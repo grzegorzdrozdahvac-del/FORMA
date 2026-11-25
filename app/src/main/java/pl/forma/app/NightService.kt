@@ -131,6 +131,7 @@ class NightService : Service() {
             id = NightStore.newId(this, now)
             start = now
             wakeAtMs = WakeAlarm.nextWakeMillis(wakeHHmm, now)
+            append = false
             ownsConnection = !BleManager.isConnected()
         }
         val device = BleManager.deviceName ?: Prefs.lastDeviceName(this) ?: ""
