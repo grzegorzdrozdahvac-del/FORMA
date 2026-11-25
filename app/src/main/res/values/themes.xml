@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="forma_bg">#0B0E11</color>
+    <style name="Theme.Forma" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/forma_bg</item>
+        <item name="android:statusBarColor">@color/forma_bg</item>
+        <item name="android:navigationBarColor">@color/forma_bg</item>
+        <item name="android:colorBackground">@color/forma_bg</item>
+    </style>
+</resources>
