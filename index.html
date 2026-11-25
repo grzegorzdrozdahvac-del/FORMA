@@ -457,7 +457,26 @@ canvas{display:block;width:100%;height:200px}
       wellbeing: wb, tags: tags,
       whoopHrv: w != null && w > 0 ? w : null,
       sleep: o.sleep && /^\d{1,2}:\d{2}$/.test(o.sleep.bed || '') && /^\d{1,2}:\d{2}$/.test(o.sleep.wake || '') ? { bed: o.sleep.bed, wake: o.sleep.wake } : null,
-      battery: num(o.battery) != null && num(o.battery) >= 0 && num(o.battery) <= 100 ? Math.round(num(o.battery)) : null
+      battery: num(o.battery) != null && num(o.battery) >= 0 && num(o.battery) <= 100 ? Math.round(num(o.battery)) : null,
+      source: o.source === 'noc' ? 'noc' : 'poranek',
+      validWindows: Math.round(num(o.validWindows) || 0),
+      totalWindows: Math.round(num(o.totalWindows) || 0),
+      sleepEstimated: !!o.sleepEstimated,
+      nightId: typeof o.nightId === 'string' ? o.nightId.slice(0, 40) : null,
+      secondary: sanitizeSecondary(o.secondary)
+    };
+  }
+  // Secondary measurement kept next to a primary one (night record -> the 2-min morning measurement).
+  function sanitizeSecondary(s) {
+    if (!s || typeof s !== 'object') return null;
+    var n = function (v) { v = typeof v === 'string' ? parseFloat(v.replace(',', '.')) : v; return typeof v === 'number' && isFinite(v) ? v : null; };
+    var rm = n(s.rmssd);
+    if (rm == null || rm <= 0) return null;
+    return {
+      source: 'poranek', time: typeof s.time === 'string' && /^\d{2}:\d{2}$/.test(s.time) ? s.time : '00:00',
+      rmssd: rm, lnRmssd: n(s.lnRmssd) != null ? n(s.lnRmssd) : Math.log(rm), hr: n(s.hr),
+      artifactPct: n(s.artifactPct) || 0, nBeats: Math.round(n(s.nBeats) || 0),
+      quality: QUALITIES.indexOf(s.quality) >= 0 ? s.quality : 'niska'
     };
   }
   function sortDays(a) { return a.slice().sort(function (x, y) { return x.date < y.date ? -1 : x.date > y.date ? 1 : 0; }); }
@@ -481,13 +500,13 @@ canvas{display:block;width:100%;height:200px}
   }
   function daysToCsv(days) {
     var head = ['data', 'godzina', 'rmssd_ms', 'ln_rmssd', 'tetno_bpm', 'zaklocenia_pct', 'uderzenia', 'jakosc', 'powtorzenia_whoop', 'urzadzenie',
-      'energia', 'bolesnosc', 'stres', 'motywacja', 'sen', 'tagi', 'whoop_hrv_ms', 'wynik_pct'];
+      'energia', 'bolesnosc', 'stres', 'motywacja', 'sen', 'tagi', 'whoop_hrv_ms', 'wynik_pct', 'zrodlo'];
     var rows = [head.join(',')];
     sortDays(days).forEach(function (d) {
       var st = dayStatus(days, d.date);
       rows.push([d.date, d.time, Math.round(d.rmssd * 10) / 10, Math.round(d.lnRmssd * 1000) / 1000, d.hr, d.artifactPct, d.nBeats, d.quality, d.dupCount, d.device]
         .concat(WB_KEYS.map(function (k) { return d.wellbeing ? d.wellbeing[k] : null; }))
-        .concat([(d.tags || []).join('|'), d.whoopHrv, st.readiness]).map(csvCell).join(','));
+        .concat([(d.tags || []).join('|'), d.whoopHrv, st.readiness, d.source || 'poranek']).map(csvCell).join(','));
     });
     return rows.join('\n') + '\n';
   }
@@ -551,6 +570,105 @@ canvas{display:block;width:100%;height:200px}
     return { charging: cs === 1, known: cs !== 0, level: level };
   }
 
+  // ====================== NIGHT PROCESSING (pure) ======================
+  var NIGHT_WIN_MS = 300000, NIGHT_MIN_VALID = 6, NIGHT_MAX_ART = 5, NIGHT_MIN_FILL = 0.6;
+  function r1(v) { return isFinite(v) ? Math.round(v * 10) / 10 : NaN; }
+  // rows: [[tEpochMs, rrMs, hr, nRrInPacket], ...] in ARRIVAL order, raw (nothing filtered by the native side).
+  // opts: { startMs, endMs } - night start / end (defaults: first / last beat).
+  function processNight(rows, opts) {
+    opts = opts || {};
+    var beats = [], recent = [], prevRaw = null, dup = 0, i;
+    for (i = 0; i < rows.length; i++) {
+      var r = rows[i], t = +r[0], rr = +r[1], hr = r[2] == null ? null : +r[2], np = r[3] == null ? 1 : +r[3];
+      if (!(t > 0) || !(rr > 0)) continue;
+      if (np === 1 && isStaleRepeat(prevRaw, rr)) { dup++; continue; } // same rule as the live pipeline (single-RR packets only)
+      prevRaw = rr;
+      var rej = isArtifact(recent.slice(-4), rr);
+      recent.push(rr); if (recent.length > 8) recent.shift();
+      beats.push({ t: t, rr: rr, hr: hr, rejected: rej });
+    }
+    var startMs = isFinite(opts.startMs) ? opts.startMs : (beats.length ? beats[0].t : 0);
+    var endMs = isFinite(opts.endMs) ? opts.endMs : (beats.length ? beats[beats.length - 1].t : 0);
+    var nWin = endMs > startMs ? Math.floor((endMs - startMs) / NIGHT_WIN_MS) : 0; // only complete 5-min windows
+    var buckets = [];
+    for (i = 0; i < nWin; i++) buckets.push([]);
+    var totAll = 0, accAll = 0;
+    beats.forEach(function (b) {
+      totAll++; if (!b.rejected) accAll++;
+      var k = Math.floor((b.t - startMs) / NIGHT_WIN_MS);
+      if (k >= 0 && k < nWin) buckets[k].push(b);
+    });
+    var windows = [], validR = [], validHr = [], anyHr = [];
+    for (i = 0; i < nWin; i++) {
+      var bk = buckets[i], acc = bk.filter(function (b) { return !b.rejected; });
+      var series = bk.map(function (b) { return b.rejected ? null : b.rr; });
+      var w = { i: i, t0: startMs + i * NIGHT_WIN_MS, nTotal: bk.length, nBeats: acc.length, artifactPct: bk.length ? (bk.length - acc.length) * 100 / bk.length : 100, rmssd: NaN, meanHr: NaN, expected: NaN, valid: false };
+      if (acc.length) {
+        w.meanHr = 60000 / mean(acc.map(function (b) { return b.rr; }));
+        w.expected = NIGHT_WIN_MS / 1000 * w.meanHr / 60;
+        w.rmssd = rmssd(series);
+        w.valid = w.artifactPct < NIGHT_MAX_ART && acc.length >= NIGHT_MIN_FILL * w.expected && isFinite(w.rmssd) && w.rmssd > 0;
+        if (acc.length >= 30) anyHr.push(w.meanHr);
+      }
+      if (w.valid) { validR.push(w.rmssd); validHr.push(w.meanHr); }
+      windows.push(w);
+    }
+    var res = {
+      ok: false, quality: 'niska', reason: '', rmssd: NaN, lnRmssd: NaN, hr: NaN, restingHr: NaN,
+      artifactPct: totAll ? (totAll - accAll) * 100 / totAll : 0, nBeats: accAll, dupCount: dup,
+      validWindows: validR.length, totalWindows: nWin, windows: windows, startMs: startMs, endMs: endMs
+    };
+    if (validR.length) {
+      res.rmssd = r1(median(validR)); res.lnRmssd = Math.round(Math.log(res.rmssd) * 1000) / 1000;
+      res.restingHr = r1(Math.min.apply(null, validHr)); res.hr = res.restingHr; res.ok = true;
+    } else if (anyHr.length) res.restingHr = r1(Math.min.apply(null, anyHr));
+    if (validR.length >= NIGHT_MIN_VALID) {
+      res.quality = res.artifactPct < 2 && validR.length >= 12 ? 'wysoka' : 'średnia';
+      res.reason = validR.length + ' z ' + nWin + ' okien 5-minutowych poprawnych.';
+    } else {
+      res.quality = 'niska';
+      res.reason = nWin < NIGHT_MIN_VALID
+        ? 'Pomiar krótszy niż 30 minut (' + nWin + ' pełnych okien 5-minutowych, potrzeba co najmniej ' + NIGHT_MIN_VALID + ').'
+        : 'Za mało poprawnych okien 5-minutowych: ' + validR.length + ' z ' + nWin + ' (potrzeba co najmniej ' + NIGHT_MIN_VALID + ').';
+      if (!validR.length) res.reason += ' Brak okna nadającego się do obliczenia HRV.';
+    }
+    return res;
+  }
+  // Day record from a night result. Date = local wake date; sleep = start/end of the recording (estimated).
+  function nightRecord(res, o) {
+    o = o || {};
+    var s = new Date(res.startMs), e = new Date(res.endMs);
+    return {
+      date: localDateStr(e), time: localTimeStr(e), rmssd: res.rmssd, lnRmssd: res.lnRmssd, hr: res.restingHr,
+      artifactPct: r1(res.artifactPct), nBeats: res.nBeats, quality: res.quality, dupCount: res.dupCount, device: o.device || '',
+      source: 'noc', validWindows: res.validWindows, totalWindows: res.totalWindows,
+      sleep: { bed: localTimeStr(s), wake: localTimeStr(e) }, sleepEstimated: true, nightId: o.nightId || null,
+      battery: o.battery != null ? o.battery : null
+    };
+  }
+  function secondaryOf(d) {
+    return { source: 'poranek', time: d.time, rmssd: d.rmssd, lnRmssd: d.lnRmssd, hr: d.hr, artifactPct: d.artifactPct, nBeats: d.nBeats, quality: d.quality };
+  }
+  // Night result arrives: it becomes the primary HRV of its date. An existing morning measurement is kept as secondary;
+  // wellbeing, tags, whoop value and (user-entered) sleep times are carried over.
+  function mergeNightRecord(existing, night) {
+    var n = sanitizeDay(night); if (!n) return null;
+    if (!existing) return n;
+    var out = Object.assign({}, n, { wellbeing: existing.wellbeing, tags: existing.tags, whoopHrv: existing.whoopHrv });
+    if (existing.source === 'noc') { out.secondary = existing.secondary || null; if (existing.sleep && !existing.sleepEstimated) { out.sleep = existing.sleep; out.sleepEstimated = false; } }
+    else { out.secondary = secondaryOf(existing); if (existing.sleep) { out.sleep = existing.sleep; out.sleepEstimated = false; } }
+    if (existing.battery != null && out.battery == null) out.battery = existing.battery;
+    return sanitizeDay(out);
+  }
+  // A morning record is saved while a night record of the same date exists: night stays primary, morning becomes secondary.
+  function mergeMorningRecord(existing, morning) {
+    var m = sanitizeDay(morning); if (!m) return null;
+    if (!existing || existing.source !== 'noc') return m;
+    var out = Object.assign({}, existing, { wellbeing: m.wellbeing, tags: m.tags, whoopHrv: m.whoopHrv, secondary: secondaryOf(m) });
+    if (m.sleep) { out.sleep = m.sleep; out.sleepEstimated = false; }
+    return sanitizeDay(out);
+  }
+
   var api = {
     parseHeartRateMeasurement: parseHeartRateMeasurement,
     parsePmdPpiFrame: parsePmdPpiFrame,
@@ -562,6 +680,7 @@ canvas{display:block;width:100%;height:200px}
     clamp: clamp, colorFor: colorFor, baseline: baseline, rolling7: rolling7, dayStatus: dayStatus, calibrationLabel: calibrationLabel,
     quadrantFor: quadrantFor, sanitizeDay: sanitizeDay, mergeDays: mergeDays, upsertDay: upsertDay, removeDay: removeDay,
     findDay: findDay, daysToCsv: daysToCsv, syntheticDays: syntheticDays, sortDays: sortDays,
+    processNight: processNight, nightRecord: nightRecord, mergeNightRecord: mergeNightRecord, mergeMorningRecord: mergeMorningRecord, sanitizeSecondary: sanitizeSecondary,
     inferCharging: inferCharging, parseBatteryPowerState: parseBatteryPowerState, parseBatteryLevelStatus: parseBatteryLevelStatus,
     WB_KEYS: WB_KEYS, QUADRANTS: QUADRANTS, RECOMMENDATIONS: RECOMMENDATIONS
   };
@@ -979,7 +1098,8 @@ var S = {
   beats: [], recent: [], cumT: 0, hr: null, hrAt: 0, ppiSkinBad: false, rrContactBad: false, ppiPending: false, dupCount: 0,
   measure: null, pending: null, wake: null,
   days: [], workouts: [], profile: null, weights: [], storageBroken: false,
-  session: null, pendingWorkout: null, hrLog: [], flash: null
+  session: null, pendingWorkout: null, hrLog: [], flash: null,
+  picker: null, pendingScan: null, night: { st: null, io: null, warn: '', err: '', result: null, busy: false, seen: {}, refreshedAt: 0, info: '' }
 };
 
 // ---------- log ----------
@@ -1070,7 +1190,7 @@ function importAll(j) {
 }
 function wipeAll() {
   S.days = []; S.workouts = []; S.profile = null; S.weights = []; S.pending = null; S.pendingWorkout = null; S.session = null; S.resume = null; S.editDay = null;
-  if (!DEMO) try { localStorage.removeItem(SKEY); localStorage.removeItem(SKEY + '.corrupt'); Object.keys(KEYS).forEach(function (k) { localStorage.removeItem(KEYS[k]); localStorage.removeItem(KEYS[k] + '.corrupt'); }); } catch (e) { /* ignore */ }
+  if (!DEMO) try { localStorage.removeItem(SKEY); localStorage.removeItem(SKEY + '.corrupt'); Object.keys(KEYS).forEach(function (k) { localStorage.removeItem(KEYS[k]); localStorage.removeItem(KEYS[k] + '.corrupt'); }); localStorage.removeItem('forma.v1.nightsDone'); } catch (e) { /* ignore */ }
   log('Usunięto wszystkie dane.');
   if (UI.onData) UI.onData();
 }
@@ -1330,6 +1450,7 @@ function describeError(e) {
 }
 async function connect(showAll) {
   showError('');
+  if (NATIVE) { nativeScan(!!showAll); return; }
   if (window.top !== window.self) { showError(IFRAME_MSG); log('Strona działa w ramce (iframe) – Bluetooth zablokowany.'); return; }
   if (!navigator.bluetooth) { showError(NOBT_MSG); return; }
   try {
@@ -1388,6 +1509,7 @@ async function startPpi() {
   } catch (e) { log('Błąd uruchomienia PPI: ' + (e && e.name) + ' – ' + (e && e.message)); ppiFallback('PPI niedostępne'); }
 }
 async function disconnect() {
+  if (NATIVE) { nat('disconnect'); onDisconnected(); return; }
   try {
     if (S.connected && S.mode === 'PPI' && S.cp) {
       try { await S.cp.writeValueWithResponse(new Uint8Array([0x03, 0x03])); log('Zapis do control point: 03 03 (stop PPI).'); } catch (e) { log('Stop PPI nieudany: ' + e.message); }
@@ -1404,6 +1526,164 @@ function exportCsv() {
   var name = 'forma-hrv-' + stamp().replace('-', '') + '.csv';
   download(name, rows.join('\n') + '\n', 'text/csv;charset=utf-8');
   log('Pobrano CSV: ' + name + ' (' + S.beats.length + ' wierszy, pominiętych powtórzeń: ' + (S.dupCount || 0) + ').');
+}
+
+
+// ---------- native transport (Android app: window.FormaNative, events via window.__formaNativeEvent) ----------
+var NATIVE = !!window.FormaNative && !DEMO;
+var NK = { wake: 'forma.v1.nightWake', done: 'forma.v1.nightsDone' };
+var NIGHT_MIN_MS = 30 * 60000;
+// Safe call into the Java bridge: always returns parsed JSON (or the raw string / null on failure).
+function nat(m, a) {
+  try {
+    var FN = window.FormaNative, raw = a === undefined ? FN[m]() : FN[m](a);
+    if (typeof raw !== 'string') return raw == null ? null : raw;
+    try { return JSON.parse(raw); } catch (e) { return raw; }
+  } catch (e) { log('Błąd natywny ' + m + ': ' + (e && e.message)); return null; }
+}
+function nightWake() { try { var v = localStorage.getItem(NK.wake); if (v && /^\d{2}:\d{2}$/.test(v)) return v; } catch (e) { /* ignore */ } return '07:00'; }
+function setNightWake(v) { try { localStorage.setItem(NK.wake, v); } catch (e) { /* ignore */ } }
+function doneNights() { try { var a = JSON.parse(localStorage.getItem(NK.done) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+function markNightDone(id) { var a = doneNights(); if (a.indexOf(id) < 0) a.push(id); try { localStorage.setItem(NK.done, JSON.stringify(a.slice(-90))); } catch (e) { /* ignore */ } }
+function nativeScan(all) {
+  showError('');
+  S.picker = { devices: [], scanning: true, all: !!all };
+  S.pendingScan = all ? 'scanAll' : 'scan';
+  setConn('Szukam opaski…', 'busy');
+  log('Szukam urządzeń (natywnie' + (all ? ', wszystkie' : '') + ').');
+  nat('requestPermissions');
+  if (UI.onConn) UI.onConn();
+}
+function nativeApplyState(state, name) {
+  if (state === 'connecting') { if (name) S.name = name; setConn('Łączenie…', 'busy'); S.picker = null; }
+  else if (state === 'connected') {
+    var fresh = !S.connected;
+    if (name) S.name = name; else if (!S.name) S.name = 'Opaska';
+    if (fresh) {
+      S.rrSeen = false; S.hrOnlyCount = 0; S.pkt = 0; S.dupCount = 0; S.lastRawRr = null; S.t0 = null;
+      resetBattery();
+      S.dedupe = /WHOOP/i.test(S.name);
+      if (S.dedupe) log('Wykryto WHOOP: włączone pomijanie powtórzonych odstępów.');
+    }
+    S.connected = true; S.mode = 'RR'; S.picker = null; S.error = '';
+    setConn('Połączono: ' + S.name + ' · tryb RR', 'ok');
+    if (fresh) log('Połączono (natywnie): ' + S.name);
+  } else if (state === 'disconnected') {
+    S.picker = null;
+    if (S.connected) onDisconnected(); else setConn('Niepołączono', '');
+  }
+}
+function nativeSync() {
+  var g = nat('getState');
+  if (g && typeof g === 'object') {
+    if (g.state) nativeApplyState(g.state, g.name);
+    if (g.battery != null && g.state === 'connected') setBattery(g.battery);
+    if (g.lastDeviceName) S.lastDeviceName = g.lastDeviceName;
+  }
+}
+function nightRefresh() {
+  var st = nat('nightStatus'), io = nat('isIgnoringBatteryOptimizations');
+  S.night.st = st && typeof st === 'object' ? st : null;
+  S.night.io = io === true || io === 'true' ? true : (io === false || io === 'false' ? false : null);
+  S.night.refreshedAt = Date.now();
+}
+function buildNightResult(n, rows) {
+  var res = C.processNight(rows, { startMs: n.start, endMs: n.end });
+  var out = { id: n.id, res: res, state: 'rejected', msg: res.reason, rec: null };
+  if (n.end - n.start < NIGHT_MIN_MS) { out.msg = 'Pomiar krótszy niż 30 minut – nie zapisano. ' + res.reason; return out; }
+  if (!res.ok) { out.msg = res.reason; return out; }
+  out.rec = C.nightRecord(res, { device: n.device || S.name || '', nightId: n.id, battery: n.battery != null ? n.battery : null });
+  out.state = res.quality === 'niska' ? 'pending' : 'saved';
+  return out;
+}
+function saveNightResult(r) {
+  var rec = C.mergeNightRecord(C.findDay(S.days, r.rec.date), r.rec);
+  if (!rec) { r.state = 'rejected'; r.msg = 'Nie można zapisać tej nocy.'; return false; }
+  var u = C.upsertDay(S.days, rec); S.days = u.days; persist('days');
+  r.state = 'saved'; markNightDone(r.id);
+  log('Zapisano noc ' + r.id + ' jako dzień ' + rec.date + ': RMSSD ' + nf(rec.rmssd, 1) + ' ms, tętno spocz. ' + nf(rec.hr, 0) + ', okna ' + rec.validWindows + '/' + rec.totalWindows + ', jakość ' + rec.quality + (u.replaced ? ' (zastąpiono)' : '') + '.');
+  return true;
+}
+function checkNights() {
+  if (!NATIVE || S.night.busy) return;
+  var list = nat('getNights');
+  if (!Array.isArray(list)) return;
+  var done = doneNights();
+  var todo = list.filter(function (n) { return n && !n.running && n.end > n.start && done.indexOf(n.id) < 0 && !S.night.seen[n.id]; }).sort(function (a, b) { return a.start - b.start; });
+  if (!todo.length) return;
+  S.night.busy = true;
+  try {
+    todo.forEach(function (n) {
+      S.night.seen[n.id] = 1;
+      var rows = nat('getNightData', n.id);
+      if (!Array.isArray(rows)) { log('Nie udało się odczytać nocy ' + n.id + '.'); return; }
+      var r = buildNightResult(n, rows);
+      log('Przetworzono noc ' + n.id + ': ' + rows.length + ' wierszy, ' + r.res.validWindows + '/' + r.res.totalWindows + ' okien, stan: ' + r.state + '.');
+      if (r.state === 'saved') saveNightResult(r);
+      else if (r.state === 'rejected') markNightDone(n.id);
+      S.night.result = r;
+    });
+  } catch (e) { log('Błąd przetwarzania nocy: ' + (e && e.message)); }
+  S.night.busy = false;
+  if (UI.onData) UI.onData();
+}
+function nightStart(wake) {
+  S.night.err = '';
+  if (!/^\d{2}:\d{2}$/.test(wake || '')) { S.night.err = 'Podaj godzinę pobudki.'; return false; }
+  setNightWake(wake);
+  var r = nat('startNight', wake);
+  if (!r || r.ok === false) { S.night.err = (r && r.error) || 'Nie udało się rozpocząć pomiaru nocy.'; return false; }
+  S.night.result = null; S.night.warn = '';
+  log('Start nocy, pobudka ' + wake + '.');
+  nightRefresh();
+  return true;
+}
+function nightStop() { nat('stopNight'); log('Zakończono noc (przycisk).'); nightRefresh(); }
+if (window.FormaNative) window.__formaNativeEvent = function (ev) {
+  if (typeof ev === 'string') { try { ev = JSON.parse(ev); } catch (e) { return; } }
+  if (!ev || typeof ev !== 'object' || !ev.type) return;
+  try {
+    switch (ev.type) {
+      case 'permissions':
+        if (ev.granted) { if (S.pendingScan) { var m = S.pendingScan; S.pendingScan = null; nat(m, 20000); } }
+        else { S.pendingScan = null; S.picker = null; showError('Brak zgody na Bluetooth. Zezwól Formie na „Urządzenia w pobliżu” (lub lokalizację w starszym Androidzie) w ustawieniach aplikacji.'); setConn('Niepołączono', ''); }
+        break;
+      case 'scanResult':
+        if (S.picker) {
+          var found = false;
+          S.picker.devices.forEach(function (d) { if (d.id === ev.id) { d.rssi = ev.rssi; if (ev.name) d.name = ev.name; found = true; } });
+          if (!found) S.picker.devices.push({ id: ev.id, name: ev.name || '', rssi: ev.rssi });
+          S.picker.devices.sort(function (a, b) { return (b.rssi || -999) - (a.rssi || -999); });
+          if (UI.onConn) UI.onConn();
+        }
+        break;
+      case 'scanState':
+        if (S.picker && !ev.scanning) { S.picker.scanning = false; setConn(S.connected ? S.connText : 'Niepołączono', S.connCls); }
+        break;
+      case 'state': nativeApplyState(ev.state, ev.name); break;
+      case 'hr':
+        if (!S.connected) nativeApplyState('connected', ev.name || S.name);
+        handleHrPacket({ hr: ev.hr, contact: ev.contact && typeof ev.contact === 'object' ? ev.contact : { supported: false, detected: false }, rrMs: Array.isArray(ev.rr) ? ev.rr : [] });
+        break;
+      case 'battery': if (isFinite(ev.level)) setBattery(+ev.level); break;
+      case 'night':
+        nightRefresh();
+        if (ev.state === 'stopped') setTimeout(checkNights, 400);
+        if (UI.onNight) UI.onNight();
+        break;
+      case 'warning':
+        if (ev.code === 'lowBattery') { S.night.warn = 'Bateria opaski: ' + ev.level + '%. Może nie wystarczyć do rana – pomiar działa dalej.'; log(S.night.warn); if (UI.onNight) UI.onNight(); }
+        break;
+      case 'appResumed': nightRefresh(); nativeSync(); checkNights(); if (UI.onNight) UI.onNight(); break;
+      case 'error': log('Błąd natywny: ' + ev.message); if (ev.message) showError(String(ev.message)); break;
+      default: break;
+    }
+  } catch (e) { log('Błąd zdarzenia ' + ev.type + ': ' + (e && e.message)); }
+};
+function nativeInit() {
+  if (!NATIVE) return;
+  log('Natywna aplikacja Android: Bluetooth i pomiar nocy przez FormaNative.');
+  nativeSync(); nightRefresh(); checkNights();
 }
 
 // ---------- demo (synthetic WHOOP + history, memory only) ----------
@@ -1573,8 +1853,23 @@ function renderBattery() {
 }
 
 // ---------- connection block ----------
+function pickerHtml() {
+  var P = S.picker, h = '<div class="col" role="group" aria-label="Znalezione urządzenia">';
+  h += '<div class="row sp"><span class="sm sub">' + (P.scanning ? 'Szukam urządzeń…' : (P.devices.length ? 'Wybierz urządzenie' : 'Nie znaleziono urządzeń')) + '</span><button class="btn sm" data-act="pickClose">Anuluj</button></div>';
+  P.devices.forEach(function (d) {
+    h += '<button class="btn full" data-act="pickDev" data-id="' + esc(d.id) + '" data-name="' + esc(d.name) + '" style="justify-content:space-between"><span>' + esc(d.name || 'Urządzenie') + '</span><span class="xs mut">' + (d.rssi != null ? esc(d.rssi) + ' dBm' : '') + '</span></button>';
+  });
+  if (!P.scanning) h += '<button class="btn full" data-act="pickRescan">Szukaj ponownie</button>';
+  if (!P.scanning && !P.devices.length) h += '<p class="xs mut" style="margin:0">WHOOP: włącz „HR Broadcast” w aplikacji WHOOP, potem szukaj ponownie. Możesz też spróbować „Pokaż wszystkie urządzenia”.</p>';
+  return h + '</div>';
+}
 function connHtml() {
   var h = '';
+  if (NATIVE && S.picker && !S.connected) {
+    h += pickerHtml();
+    if (S.error) h += '<p class="err">' + esc(S.error) + '</p>';
+    return h;
+  }
   if (!S.connected) {
     h += '<div class="row" style="flex-wrap:wrap"><button class="btn pri grow" data-act="connect">Połącz z opaską</button><button class="btn grow" data-act="connectAll">Pokaż wszystkie urządzenia</button></div>';
     h += '<p class="xs mut" style="margin:0">' + esc(S.connText) + '</p>';
@@ -1583,6 +1878,78 @@ function connHtml() {
   if (S.info) h += '<p class="note" style="margin:0">' + esc(S.info) + '</p>';
   return h;
 }
+
+
+// ====================== NOC (Android native only) ======================
+function nightView() { // what the result block shows: this session's processed night, else today's night record
+  var r = S.night.result;
+  if (r) {
+    var res = r.res;
+    return { state: r.state, msg: r.msg, rmssd: res.rmssd, hr: res.restingHr, valid: res.validWindows, total: res.totalWindows, art: res.artifactPct, quality: res.quality, reason: res.reason, id: r.id, estimated: true };
+  }
+  var rec = dayRec(todayStr());
+  if (rec && rec.source === 'noc') return { state: 'saved', msg: '', rmssd: rec.rmssd, hr: rec.hr, valid: rec.validWindows, total: rec.totalWindows, art: rec.artifactPct, quality: rec.quality, reason: '', id: rec.nightId, estimated: rec.sleepEstimated, sec: rec.secondary };
+  return null;
+}
+function typingIn(el) { var a = document.activeElement; return !!(a && el.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)); }
+function nightHasResult() { return !!nightView(); }
+function nightResultHtml() {
+  var v = nightView(); if (!v) return '';
+  var h = '<div class="card ' + (v.state === 'saved' ? (v.quality === 'niska' ? 'tint-r' : 'tint-g') : 'tint-r') + '" style="margin-top:4px"><p class="lbl">Wynik nocy</p>';
+  if (v.state === 'rejected') {
+    h += '<span class="n" style="font-size:18px">Nocy nie zapisano</span><span class="sm sub">' + esc(v.msg) + '</span>';
+    return h + '</div>';
+  }
+  h += '<div class="row" style="align-items:baseline;gap:10px"><span class="n" style="font-size:36px">' + nf(v.rmssd, 0) + ' ms</span><span class="sm sub">RMSSD (mediana z okien 5 min)</span></div>' +
+    '<span class="sm sub">Tętno spoczynkowe ' + nf(v.hr, 0) + ' ud/min · okna ' + v.valid + ' z ' + v.total + ' · zakłócenia ' + nf(v.art, 1) + '% · jakość <b style="color:' + QCOL[v.quality] + '">' + esc(v.quality) + '</b></span>' +
+    '<span class="xs mut">Źródło: noc (WHOOP)' + (v.estimated ? ' · sen z czasu startu i pobudki' : '') + '</span>';
+  if (v.quality === 'niska' && v.reason) h += '<p class="sm" style="margin:0;color:#FFD6DA">' + esc(v.reason) + '</p>';
+  if (v.sec) h += '<span class="xs mut">Pomiar poranny (2 min): ' + nf(v.sec.rmssd, 0) + ' ms – zapisany jako dodatkowy</span>';
+  if (v.state === 'pending') h += '<p class="sm" style="margin:0">Wynik niepewny – nie został zapisany.</p><div class="row"><button class="btn grow" data-act="nightSave">Zapisz mimo to</button><button class="btn grow" data-act="nightDiscard">Odrzuć</button></div>';
+  else h += '<button class="btn sm" data-act="editDay" style="align-self:flex-start">Uzupełnij poranek (sen, samopoczucie)</button>';
+  return h + '</div>';
+}
+function nightCardHtml() {
+  var N = S.night, st = N.st, h = '<p class="lbl">Noc</p>';
+  if (st && st.running) {
+    h += '<div class="row sp"><span class="n" style="font-size:18px">Pomiar nocy trwa</span><span class="dotp" style="background:#2EE86B"></span></div>' +
+      '<div class="g2" style="gap:8px">' +
+      '<div class="stat"><div class="k">Start</div><div class="v n">' + esc(C.localTimeStr(new Date(st.startedAt))) + '</div></div>' +
+      '<div class="stat"><div class="k">Uderzeń</div><div class="v n">' + nfi(st.beats) + '</div></div>' +
+      '<div class="stat"><div class="k">Ostatnie tętno</div><div class="v n">' + (st.lastHr ? st.lastHr : '—') + ' <span class="xs sub">bpm</span></div></div>' +
+      '<div class="stat"><div class="k">Bateria opaski</div><div class="v n">' + (st.battery != null ? st.battery + ' <span class="xs sub">%</span>' : '—') + '</div></div></div>' +
+      '<span class="xs mut">' + esc(st.deviceName || S.name || 'Opaska') + (st.wake ? ' · pobudka ' + esc(st.wake) : '') + '</span>';
+    if (N.warn) h += '<p class="note" style="margin:0">' + esc(N.warn) + '</p>';
+    h += '<button class="btn danger full" data-act="nightStop">Zakończ noc</button>';
+  } else {
+    var canStart = S.connected || (st && st.deviceName) || S.lastDeviceName;
+    h += '<p class="sm sub" style="margin:0">Przed snem załóż WHOOP z włączonym „HR Broadcast” (aplikacja WHOOP, ustawienia urządzenia). Telefon zostaw w pobliżu łóżka.</p>' +
+      '<label class="xs sub">Pobudka (kończy pomiar)<input class="inp num" type="time" id="nightWake" data-in="nightWake" data-keep="1" value="' + esc(nightWake()) + '" aria-label="Godzina pobudki"></label>';
+    if (N.io === false) h += '<div class="note">Aby pomiar nie został przerwany w nocy, pozwól Formie działać w tle (wyłącz oszczędzanie baterii dla tej aplikacji).</div><button class="btn full" data-act="nightIo">Pozwól działać w tle</button>';
+    if (S.connected && S.battery != null && S.battery < 30) h += '<div class="note err">Bateria opaski: ' + S.battery + '%. Naładuj ją przed snem – może nie wystarczyć do rana.</div>';
+    if (!canStart) h += '<p class="xs mut" style="margin:0">Najpierw połącz opaskę (przycisk „Połącz z opaską”).</p>';
+    if (N.err) h += '<p class="err">' + esc(N.err) + '</p>';
+    h += '<button class="btn pri full" data-act="nightStart"' + (canStart ? '' : ' disabled') + '>Start nocy</button>';
+  }
+  return h;
+}
+function nightBlock() { // card + result
+  if (!NATIVE) return '';
+  return '<div class="col" data-live="night-wrap"><div class="card fu js-night" data-live="night">' + nightCardHtml() + '</div>' + nightResultHtml() + '</div>';
+}
+function nightTick(el) {
+  if (!NATIVE) return;
+  var n = Date.now(); if (n - S.night.refreshedAt < 5000) return;
+  nightRefresh();
+  nightPaint(el);
+}
+function nightPaint(el) {
+  var w = el.querySelector('[data-live="night-wrap"]'); if (!w) return;
+  if (typingIn(w)) return;
+  var c = w.querySelector('[data-live="night"]'), nh = nightCardHtml();
+  if (c && c.innerHTML !== nh) c.innerHTML = nh;
+}
+UI.onNight = function () { var t = stack[stack.length - 1]; if (t && t.path === 'dzis') { var w = t.el.querySelector('[data-live="night-wrap"]'); if (w && !typingIn(w)) rerender(); } };
 
 // ====================== ROUTER ======================
 var ROUTES = {};
@@ -1733,6 +2100,8 @@ function rDzis() {
       '<div class="chips" role="radiogroup" aria-label="Płeć"><button class="chip" data-act="obSex" data-v="m" role="radio" aria-checked="false">Mężczyzna</button><button class="chip" data-act="obSex" data-v="k" role="radio" aria-checked="false">Kobieta</button></div>' +
       '<p class="err" id="obErr" hidden></p><button class="btn pri full" data-act="obSave">Zapisz</button></div>';
   }
+  var nightTop = NATIVE && ((S.night.st && S.night.st.running) || nightHasResult());
+  if (nightTop) h += nightBlock();
   if (!st.hasRecord) {
     h += '<button class="btn pri big fu" data-act="measure" ' + dl(i++) + (S.connected ? '' : ' disabled') + '>Poranny pomiar (2 min)</button>';
     if (!S.connected) h += '<p class="xs mut" style="margin:-6px 0 0">Najpierw połącz opaskę.</p>';
@@ -1771,6 +2140,7 @@ function rDzis() {
   h += '<a href="#/sen" class="card tile"><p class="row sp lbl">Sen' + ico('chev', 14) + '</p>' + (sl ? '<span class="n big">' + FC.fmtDur(sl.durH).replace(' min', '').replace(' h ', ' h ') + ' min</span><span class="sm sub">z ' + FC.fmtDur(sl.needH) + ' potrzeby' + (sl.shortH > 0.05 ? ',<br><b style="color:#fff">brakuje ' + FC.fmtDur(sl.shortH) + '</b>' : '') + '</span><div class="bar"><i class="gx" style="width:' + clamp(sl.durH / sl.needH * 100, 0, 100) + '%;background:#E07BF0"></i></div>' : '<span class="mut sm">Brak danych o śnie. Wpisz godziny snu w porannym pomiarze.</span>') + '</a>';
   h += '<div class="card tile"><p class="lbl">Dziś wieczorem</p><span class="xs sub">Do łóżka do</span><span class="n big">' + esc(tp.bed || '—') + '</span><span class="xs mut">potrzeba ok. ' + FC.fmtDur(tp.needH) + ' snu</span>' +
     '<label class="xs sub">Pobudka<input class="inp num" type="time" data-in="wake" data-keep="1" value="' + esc(plannedWake()) + '" aria-label="Planowana pobudka"></label></div></div>';
+  if (NATIVE && !nightTop) h += nightBlock();
   var tb = FC.targetBand(st.scored ? st.color : null);
   h += '<div class="g2 fu" ' + dl(i++) + '><a href="#/trening" class="card tile span2"><p class="row sp lbl">Obciążenie' + ico('chev', 14) + '</p><span class="n big" style="font-size:44px">' + nf(strain, 1) + '</span><span class="xs mut">dotąd dziś</span>' + gaugeHtml(strain, tb) + (tb ? '' : '<span class="xs mut">Cel pojawi się po porannym pomiarze.</span>') + '</a>';
   var wk = FC.weeklyVolume(S.workouts, today, 1)[0];
@@ -1784,6 +2154,7 @@ function rDzis() {
 ROUTES.dzis = { tab: 'dzis', depth: 0, render: rDzis, mount: function (el) { renderBattery(); }, tick: function (el) {
   var n = Date.now(); if (n - (ROUTES.dzis.lastHr || 0) < 2500) return; ROUTES.dzis.lastHr = n;
   var t = el.querySelector('[data-live="hr"]'); if (t) t.innerHTML = hrTileHtml();
+  nightTick(el);
 } };
 
 // ====================== POMIAR (2 min) ======================
@@ -1851,7 +2222,7 @@ function rPoranek() {
   else h += '<div class="stepper"><span class="s"><b class="ok">' + ico('check', 12) + '</b>Pomiar</span><hr><span class="s"><b class="cur">2</b><span style="color:#fff;font-weight:600">Sen i samopoczucie</span></span><hr><span class="s"><b>3</b>Tagi</span></div>';
   if (!edit) h += '<div class="card ' + (low || !ok ? 'tint-r' : 'tint-g') + '"><div class="row sp"><div><span class="n" style="font-size:18px">' + (ok ? 'Pomiar zakończony' : 'Za mało uderzeń') + '</span><div class="sm sub">' + (ok ? 'RMSSD ' + nf(p.rmssd, 0) + ' ms · tętno ' + nf(p.hr, 0) + ' · jakość <b style="color:' + QCOL[p.quality] + '">' + p.quality + '</b>' : 'Zarejestrowano ' + p.nBeats + ' uderzeń.') + '</div></div><button class="btn sm" data-act="repeat">Powtórz</button></div>' +
     (!ok ? '<p class="sm" style="margin:0;color:#FFD6DA">Za mało poprawnych uderzeń (' + p.nBeats + '). Powtórz w bezruchu.</p>' : (low ? '<p class="sm" style="margin:0;color:#FFD6DA">Pomiar niepewny (' + nf(p.artifactPct, 1) + '% zakłóceń). Powtórz w bezruchu.</p>' : '')) +
-    (dayRec(p.date) ? '<p class="xs mut" style="margin:0">Masz już dziś zapisany pomiar – zapis go zastąpi.</p>' : '') + '</div>';
+    (dayRec(p.date) ? (dayRec(p.date).source === 'noc' ? '<p class="xs mut" style="margin:0">Masz dziś wynik nocy – on zostaje głównym wynikiem HRV, ten pomiar zapisze się jako dodatkowy.</p>' : '<p class="xs mut" style="margin:0">Masz już dziś zapisany pomiar – zapis go zastąpi.</p>') : '') + '</div>';
   if (ok) {
     h += '<div class="card"><p class="lbl">Sen tej nocy</p><div class="row"><label class="grow xs mut">Zasnąłem o<input class="inp num" type="time" id="inBed" data-in="bed" data-keep="1" value="' + esc(f.bed) + '"></label><label class="grow xs mut">Obudziłem się o<input class="inp num" type="time" id="inWake" data-in="wakeT" data-keep="1" value="' + esc(f.wake) + '"></label></div><p class="xs mut" style="margin:0">Podpowiedź z wczoraj albo 23:00 / 07:00. Z tego liczymy czas i wynik snu.</p></div>';
     h += '<div class="card"><p class="lbl">Jak się czujesz?</p>' + WB.map(function (w) {
@@ -1870,7 +2241,9 @@ function saveMorning() {
   var w = null, wv = String(f.whoop || '').trim();
   if (wv) { w = parseFloat(wv.replace(',', '.')); if (!(w > 0 && w <= 300) || !/^[0-9]+([.,][0-9]+)?$/.test(wv)) { f.err = 'HRV z WHOOP: podaj liczbę od 1 do 300 albo zostaw puste.'; $('pkErr').textContent = f.err; $('pkErr').hidden = false; return; } }
   if (isNaN(FC.parseHM(f.bed)) || isNaN(FC.parseHM(f.wake))) { f.err = 'Podaj godziny snu (zasnąłem / obudziłem się).'; $('pkErr').textContent = f.err; $('pkErr').hidden = false; return; }
-  var rec = C.sanitizeDay(Object.assign({}, p, { wellbeing: f.wb, tags: f.tags, whoopHrv: w, battery: S.editDay ? p.battery : S.battery, sleep: { bed: f.bed, wake: f.wake } }));
+  var est = !!(S.editDay && p.sleepEstimated && p.sleep && f.bed === p.sleep.bed && f.wake === p.sleep.wake);
+  var rec = C.sanitizeDay(Object.assign({}, p, { wellbeing: f.wb, tags: f.tags, whoopHrv: w, battery: S.editDay ? p.battery : S.battery, sleep: { bed: f.bed, wake: f.wake }, sleepEstimated: est }));
+  if (rec && !S.editDay) { var exN = dayRec(rec.date); if (exN && exN.source === 'noc') rec = C.mergeMorningRecord(exN, rec) || rec; } // night stays primary, morning becomes secondary
   if (!rec) { f.err = 'Nie można zapisać tego pomiaru.'; $('pkErr').textContent = f.err; $('pkErr').hidden = false; return; }
   var wasEdit = !!S.editDay, r = commitDay(rec); S.form = null; S.editDay = null;
   S.flash = { to: 'dzis', text: wasEdit ? 'Zapisano zmiany w porannym zapisie (' + rec.time + ').' : 'Zapisano poranek (' + rec.time + ').' + (r.replaced ? ' Zastąpiono dzisiejszy pomiar.' : '') + (r.saved ? '' : ' Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie') + (DEMO ? ' (demo – tylko w pamięci)' : '') };
@@ -1901,9 +2274,12 @@ function rRegen() {
     '<div class="row sp xs"><span style="color:#2EE86B;font-weight:600">' + (b.n >= 5 ? 'Twoja norma (60 dni)' : '') + '</span><span class="mut">— średnia 7 dni: ' + nf(st.r7.meanMs, 0) + (isFinite(st.r7.cvPct) ? ' · CV ' + nf(st.r7.cvPct, 0) + '%' : '') + '</span></div>' + hrvChartSvg(7, 'HRV z 7 ostatnich nocy') + '</div>';
   var qn = { 'wysoka': 'Pomiar HRV wiarygodny', 'średnia': 'Pomiar HRV średniej jakości', 'niska': 'Pomiar HRV niepewny' }[rec.quality];
   h += '<div class="card ' + (rec.quality === 'niska' ? 'tint-r' : 'tint-g') + ' fu" ' + dl(2) + '><div class="row">' + ico('shield', 24) + '<span class="n" style="font-size:18px">' + qn + '</span></div>' +
-    '<p class="sm sub" style="margin:0">' + esc(rec.device || 'Opaska') + ' · 2 min w bezruchu, ' + rec.time + ' · ' + rec.nBeats + ' uderzeń, ' + nf(rec.artifactPct, 1) + '% zakłóceń usuniętych · pominięte powtórzenia WHOOP: ' + rec.dupCount + '</p>' +
+    (rec.source === 'noc'
+      ? '<p class="sm sub" style="margin:0"><b style="color:#fff">Źródło: noc (WHOOP)</b> · ' + esc(rec.device || 'Opaska') + ' · okna 5 min poprawne: ' + rec.validWindows + ' z ' + rec.totalWindows + ' · ' + rec.nBeats + ' uderzeń, ' + nf(rec.artifactPct, 1) + '% zakłóceń usuniętych · pominięte powtórzenia WHOOP: ' + rec.dupCount + (rec.sleepEstimated ? ' · sen z czasu startu i pobudki' : '') + '</p>' +
+        (rec.secondary ? '<p class="sm" style="margin:0;color:#C5CED6">Pomiar poranny (2 min, ' + rec.secondary.time + '): ' + nf(rec.secondary.rmssd, 0) + ' ms – dodatkowy, wynik nocy jest główny</p>' : '')
+      : '<p class="sm sub" style="margin:0">' + esc(rec.device || 'Opaska') + ' · 2 min w bezruchu, ' + rec.time + ' · ' + rec.nBeats + ' uderzeń, ' + nf(rec.artifactPct, 1) + '% zakłóceń usuniętych · pominięte powtórzenia WHOOP: ' + rec.dupCount + '</p>') +
     (rec.whoopHrv != null ? '<p class="sm" style="margin:0;color:#C5CED6">WHOOP tej nocy: ' + nf(rec.whoopHrv, 0) + ' ms (inna metoda – porównuj trend, nie liczby)</p>' : '') +
-    '<button class="btn sm" data-act="measure"' + (S.connected ? '' : ' disabled') + ' style="align-self:flex-start">Zmierz ponownie</button></div>';
+    '<button class="btn sm" data-act="measure"' + (S.connected ? '' : ' disabled') + ' style="align-self:flex-start">' + (rec.source === 'noc' ? 'Dodaj pomiar poranny (2 min)' : 'Zmierz ponownie') + '</button></div>';
   if (st.scored) {
     h += '<div class="card fu" ' + dl(3) + '><p class="lbl">Co złożyło się na wynik</p><div class="g2" style="gap:12px 18px"><div><div class="row sp"><span class="sm sub">HRV · 75%</span><span class="n" style="font-size:22px">' + Math.round(st.cHrv) + '</span></div>' + factorBar(st.cHrv) + '</div>' +
       '<div><div class="row sp"><span class="sm sub">Tętno spocz. · 25%</span><span class="n" style="font-size:22px">' + Math.round(st.cRhr) + '</span></div>' + factorBar(st.cRhr) + '</div></div>' +
@@ -2105,7 +2481,7 @@ ROUTES.trendy = { tab: 'trendy', depth: 0, render: rTrendy, mount: renderBattery
 function pomiarRow(d, today) {
   var sl = d.sleep ? '<span class="xs mut">sen ' + esc(d.sleep.bed) + '–' + esc(d.sleep.wake) + '</span>' : '';
   var wbv = FC_wbCount(d);
-  return '<div class="card" style="gap:6px"><div class="row sp"><b>' + ddmm(d.date) + '.' + d.date.slice(0, 4) + (d.date === today ? ' <span class="xs" style="color:#2CE8B5">dziś</span>' : '') + ' <span class="xs mut">' + d.time + '</span></b>' +
+  return '<div class="card" style="gap:6px"><div class="row sp"><b>' + ddmm(d.date) + '.' + d.date.slice(0, 4) + (d.date === today ? ' <span class="xs" style="color:#2CE8B5">dziś</span>' : '') + ' <span class="xs mut">' + d.time + '</span>' + (d.source === 'noc' ? ' <span class="xs" style="color:#2D9CFF">noc (WHOOP)</span>' : '') + '</b>' +
     '<span class="xs" style="color:' + QCOL[d.quality] + ';font-weight:700">jakość ' + d.quality + '</span></div>' +
     '<div class="row" style="gap:18px;flex-wrap:wrap"><span><b class="n" style="font-size:22px">' + nf(d.rmssd, 0) + '</b> <span class="xs mut">ms RMSSD</span></span><span><b class="n" style="font-size:22px">' + (d.hr != null ? nf(d.hr, 0) : '—') + '</b> <span class="xs mut">ud/min</span></span>' + sl + '</div>' +
     '<div class="xs mut">' + (d.tags.length ? esc(d.tags.join(' · ')) : 'Bez tagów') + (wbv ? ' · samopoczucie: ' + wbv + '/5 ocen' : '') + '</div>' +
@@ -2221,6 +2597,14 @@ var ACT = {
   },
   connect: function () { connect(false); }, connectAll: function () { S.device = null; connect(true); }, disconnect: disconnect,
   csv: exportCsv,
+  pickDev: function (el) { S.picker = null; S.name = el.dataset.name || S.name; setConn('Łączenie…', 'busy'); nat('connect', el.dataset.id); UI.onConn(); },
+  pickClose: function () { nat('stopScan'); S.picker = null; S.pendingScan = null; setConn(S.connected ? S.connText : 'Niepołączono', S.connCls); UI.onConn(); },
+  pickRescan: function () { nativeScan(S.picker && S.picker.all); },
+  nightStart: function () { var i = $('nightWake'); var ok = nightStart(i ? i.value : nightWake()); if (!ok) { var t = pageTop(); if (t) nightPaint(t.el); } else UI.onNight(); },
+  nightStop: function () { nightStop(); setTimeout(function () { UI.onNight(); }, 100); },
+  nightIo: function () { nat('openBatterySettings'); },
+  nightSave: function () { var r = S.night.result; if (r && r.rec && r.state === 'pending') { saveNightResult(r); UI.onData(); } },
+  nightDiscard: function () { var r = S.night.result; if (r) { markNightDone(r.id); S.night.result = null; log('Odrzucono noc ' + r.id + '.'); UI.onData(); } },
   measure: function () { if (S.connected) go('pomiar'); },
   startNow: function () { if (startMeasure()) { var t = pageTop(); paint(t.el, 'pomiar'); t.el.classList.add('noanim'); } },
   measureAnyway: function () { S.battOverride = true; log('Pomiar mimo niskiej baterii.'); ACT.startNow(); },
@@ -2323,6 +2707,7 @@ $('stack').addEventListener('input', function (e) {
 $('stack').addEventListener('change', function (e) {
   var el = e.target;
   if (el.dataset && el.dataset.in === 'wake' && !isNaN(FC.parseHM(el.value))) { el.blur(); applyProfile({ plannedWake: el.value }); }
+  if (el.dataset && el.dataset.in === 'nightWake' && /^\d{2}:\d{2}$/.test(el.value)) setNightWake(el.value);
   if (el.id === 'fileImport' && el.files && el.files[0]) {
     var f = el.files[0], rd = new FileReader();
     rd.onerror = function () { showMsg('bkMsg', 'Nie udało się odczytać pliku.', 'err'); };
@@ -2349,10 +2734,11 @@ storageProbe(); loadAll();
 log('Gotowe. Forma 0.2.');
 if (DEMO) startDemo();
 else if (window.top !== window.self) { showError(IFRAME_MSG); }
-else if (!navigator.bluetooth) showError(NOBT_MSG);
+else if (!navigator.bluetooth && !NATIVE) showError(NOBT_MSG);
 if (!location.hash || location.hash === '#') history.replaceState(null, '', '#/dzis');
 route();
 renderBattery();
+nativeInit();
 
 })();</script>
 </body>
