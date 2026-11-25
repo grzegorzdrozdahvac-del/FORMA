@@ -1,0 +1,1510 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forma – prototyp 0.1</title>
+<style>
+:root{--bg:#0B0E11;--bd:rgba(255,255,255,.10);--tx:#F2F5F7;--mut:#AAB4BE;--green:#2EE86B;--yellow:#F7D23E;--red:#FF4D5E;--blue:#2D9CFF;--mint:#2CE8B5;--orange:#F2A93B;--card:linear-gradient(160deg,#2B3339,#20272C)}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--tx);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:16px;line-height:1.4;overflow-x:hidden}
+.wrap{max-width:760px;margin:0 auto;padding:14px 12px 28px}
+header{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;justify-content:space-between;margin-bottom:12px}
+h1{font-size:22px;margin:0;letter-spacing:-.01em}
+.hstat{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;min-width:0;max-width:100%}
+.pill{display:inline-block;max-width:100%;padding:6px 12px;border-radius:999px;border:1px solid var(--bd);background:rgba(255,255,255,.05);color:var(--mut);font-size:14px;overflow-wrap:anywhere}
+.pill.ok{color:var(--green);border-color:var(--green)}.pill.busy{color:var(--orange);border-color:var(--orange)}.pill.err{color:var(--red);border-color:var(--red)}
+/* battery */
+.batt{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;color:var(--mut);min-width:0}
+.batt-ico{flex:none}
+.batt-pct{font-size:20px;font-weight:800;line-height:1.1}
+.batt.none .batt-pct{font-size:16px;font-weight:600}
+.batt-chg{display:inline-flex;align-items:center;gap:4px;color:var(--mint);font-weight:700;font-size:15px;animation:pulse 1.6s ease-in-out infinite}
+.batt-sub{flex-basis:100%;font-size:12px;color:var(--mint);margin:0}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+@media(prefers-reduced-motion:reduce){.batt-chg{animation:none}}
+/* tabs */
+.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;padding:5px;border-radius:16px;background:rgba(255,255,255,.05);border:1px solid var(--bd);margin-bottom:14px}
+.tabs button{min-height:46px;border:0;border-radius:12px;background:transparent;color:var(--mut);font:inherit;font-weight:700;cursor:pointer;padding:6px 8px}
+.tabs button[aria-selected="true"]{background:linear-gradient(160deg,#3A444B,#2B3339);color:var(--tx);box-shadow:inset 0 -3px 0 var(--mint)}
+:focus-visible{outline:2px solid var(--mint);outline-offset:2px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:18px;padding:16px;margin-bottom:14px;min-width:0}
+.lbl{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);font-weight:700;margin:0 0 10px}
+.btns{display:flex;flex-wrap:wrap;gap:8px}
+button{min-height:44px;padding:8px 16px;border-radius:12px;border:1px solid var(--bd);background:rgba(255,255,255,.07);color:var(--tx);font:inherit;font-weight:600;cursor:pointer}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.primary{background:var(--green);color:#0B0E11;border-color:var(--green)}
+button.blue{border-color:var(--blue);color:var(--blue)}
+button.danger{border-color:var(--red);color:var(--red)}
+button.big{width:100%;min-height:68px;font-size:20px;font-weight:800;border-radius:18px;background:linear-gradient(160deg,#35F078,#1FCF5E);color:#0B0E11;border:0;letter-spacing:.01em}
+button.big:disabled{background:rgba(255,255,255,.12);color:var(--tx)}
+.msg{margin:10px 0 0;color:var(--mut);font-size:14px;overflow-wrap:anywhere}
+.msg.warn{color:var(--orange)}.msg.error{color:var(--red)}.msg.ok{color:var(--mint)}
+.banner{display:flex;gap:12px;align-items:flex-start;width:100%;border-radius:16px;padding:12px 14px;margin-bottom:14px;font-weight:700;border:1px solid var(--red);background:rgba(255,77,94,.16);color:#FFD9DD}
+.banner svg{flex:none;margin-top:2px}
+.banner.chg{border-color:var(--mint);background:rgba(44,232,181,.15);color:#CFFFF0}
+.warnbox{border:1px solid var(--orange);background:rgba(242,169,59,.12);color:#FFE2B8;border-radius:12px;padding:10px 12px;font-size:14px;margin:0 0 12px}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.stat{background:rgba(0,0,0,.18);border:1px solid var(--bd);border-radius:14px;padding:10px 12px;min-width:0}
+.stat .l{color:var(--mut);font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:700}
+.stat .v{font-size:30px;font-weight:800;line-height:1.15;overflow-wrap:anywhere}
+.stat .u{font-size:14px;color:var(--mut);font-weight:500}
+.stat .s{font-size:13px;color:var(--mut)}
+.q-wysoka{color:var(--blue)}.q-srednia{color:var(--orange)}.q-niska{color:var(--red)}
+canvas{display:block;width:100%;height:220px}
+canvas.tall{height:260px}
+.legend{font-size:13px;color:var(--mut);margin-top:8px;display:flex;flex-wrap:wrap;gap:4px 14px}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+#log{height:200px;overflow-y:auto;overflow-x:hidden;font:12px/1.5 ui-monospace,Consolas,monospace;color:var(--mut);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+footer{text-align:center;color:var(--mut);font-size:12px;margin-top:10px;padding:0 8px}
+[hidden]{display:none!important}
+/* flow */
+.instr{font-size:18px;font-weight:700;margin:0 0 10px;text-align:center}
+.ringwrap{position:relative;width:200px;height:200px;margin:6px auto 14px}
+.ringwrap svg{width:200px;height:200px;transform:rotate(-90deg)}
+.ringtxt{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+#ringTime{font-size:48px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1}
+#ringPhase{font-size:13px;color:var(--mut);letter-spacing:.1em;text-transform:uppercase;font-weight:700;margin-top:6px}
+.score{font-size:76px;font-weight:800;line-height:1;letter-spacing:-.03em}
+.score small{font-size:34px;font-weight:700}
+.scorelbl{font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;margin-top:6px}
+.quad{font-size:18px;font-weight:700;margin:14px 0 4px}
+.rec{margin:0 0 12px;color:var(--tx)}
+.pts{list-style:none;margin:0;padding:0;border-top:1px solid var(--bd)}
+.pts li{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--bd);font-size:15px}
+.pts b{white-space:nowrap}
+.small{font-size:13px;color:var(--mut);margin:10px 0 0}
+.empty{margin:0;color:var(--mut)}
+/* form */
+fieldset{border:0;padding:0;margin:14px 0 0;min-width:0}
+legend{padding:0;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);font-weight:700;margin-bottom:6px}
+.wbrow{display:flex;align-items:center;justify-content:space-between;gap:6px;border-bottom:1px solid var(--bd)}
+.wbrow .n{font-size:14px;flex:1;min-width:0}
+.dots{display:flex;flex:none}
+.dot{position:relative;width:40px;height:44px;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.dot input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
+.dot span{width:26px;height:26px;border-radius:50%;border:2px solid #8A96A1;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--mut)}
+.dot input:checked+span{background:var(--mint);border-color:var(--mint);color:#0B0E11;font-weight:800}
+.dot input:focus-visible+span{outline:2px solid #fff;outline-offset:2px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{position:relative;display:inline-flex}
+.chip input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
+.chip span{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;border-radius:999px;border:1px solid #8A96A1;font-size:14px;color:var(--tx)}
+.chip input:checked+span{background:rgba(44,232,181,.18);border-color:var(--mint);color:var(--mint);font-weight:700}
+.chip input:focus-visible+span{outline:2px solid #fff;outline-offset:2px}
+label.fl{display:block;font-size:14px;margin:0 0 6px}
+input[type=text]{width:100%;min-height:44px;border-radius:12px;border:1px solid #8A96A1;background:rgba(0,0,0,.25);color:var(--tx);font:inherit;font-size:16px;padding:8px 12px}
+/* table */
+.tw{width:100%}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut);text-align:left;padding:6px 6px;border-bottom:1px solid var(--bd)}
+td{padding:8px 6px;border-bottom:1px solid var(--bd);vertical-align:middle}
+td small{color:var(--mut)}
+td .tg{display:inline-block;margin:1px 3px 1px 0;padding:1px 8px;border-radius:999px;border:1px solid var(--bd);font-size:12px;color:var(--mut)}
+td button{min-height:44px;padding:6px 12px;font-size:14px}
+.sc{font-weight:800}
+@media(max-width:600px){
+  .grid{grid-template-columns:repeat(2,minmax(0,1fr))}.grid.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .stat .v{font-size:26px}
+  .btns button{flex:1 1 40%}
+  .score{font-size:64px}
+  table,tbody,tr,td{display:block}
+  thead{display:none}
+  tr{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:2px 8px;padding:10px 0;border-bottom:1px solid var(--bd)}
+  td{border:0;padding:0}
+  td::before{content:attr(data-label);display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)}
+  td.c-tags,td.c-del{grid-column:1/-1;margin-top:6px}
+  td.c-tags:empty{display:none}
+  td.c-del button{width:100%}
+  td.c-del::before{display:none}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Forma – prototyp 0.1</h1>
+    <div class="hstat">
+      <div id="batt" class="batt none" aria-label="Bateria: brak danych">
+        <svg class="batt-ico" viewBox="0 0 38 20" width="38" height="20" aria-hidden="true"><rect x="1" y="1" width="31" height="18" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><rect x="33.5" y="6" width="3" height="8" rx="1" fill="currentColor"/><rect id="battFill" x="4" y="4" width="0" height="12" rx="2" fill="currentColor"/></svg>
+        <span id="battPct" class="batt-pct">Bateria: —</span>
+        <span id="battChg" class="batt-chg" hidden><svg width="14" height="18" viewBox="0 0 14 18" aria-hidden="true"><path d="M8.5 0 1 10h4.5L4.5 18 13 7.5H8z" fill="currentColor"/></svg>Ładowanie</span>
+        <p id="battSub" class="batt-sub" hidden></p>
+      </div>
+      <span id="pill" class="pill">Niepołączono</span>
+    </div>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="Sekcje">
+    <button id="tab-today" role="tab" aria-selected="true" aria-controls="panel-today">Dziś</button>
+    <button id="tab-hist" role="tab" aria-selected="false" aria-controls="panel-hist" tabindex="-1">Historia</button>
+    <button id="tab-diag" role="tab" aria-selected="false" aria-controls="panel-diag" tabindex="-1">Diagnostyka</button>
+  </div>
+
+  <!-- ============ DZIŚ ============ -->
+  <section id="panel-today" role="tabpanel" aria-labelledby="tab-today">
+    <div id="battBanner" class="banner" role="status" hidden>
+      <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 1 21h22z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 9v6M12 17.5v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span id="battBannerTxt"></span>
+    </div>
+    <div class="card">
+      <p class="lbl">Połączenie</p>
+      <div class="btns">
+        <button id="btnConnect" class="primary">Połącz z opaską</button>
+        <button id="btnConnectAll">Pokaż wszystkie urządzenia</button>
+        <button id="btnDisconnect" disabled>Rozłącz</button>
+      </div>
+      <p id="msgError" class="msg error" hidden></p>
+      <p id="msgInfo" class="msg warn" hidden></p>
+      <p class="msg warn js-contact" hidden></p>
+    </div>
+
+    <div class="card">
+      <p class="lbl">Poranny pomiar</p>
+      <p class="warnbox js-storewarn" hidden></p>
+      <div id="flowIdle">
+        <button id="btnMeasure" class="big" disabled>Poranny pomiar (2 min)</button>
+        <button id="btnMeasureAnyway" hidden style="margin-top:10px;width:100%">Mierz mimo to</button>
+        <p id="measureHint" class="msg">Najpierw połącz opaskę.</p>
+        <p id="saveNote" class="msg ok" role="status" hidden></p>
+      </div>
+      <div id="flowRun" hidden>
+        <p class="instr">Połóż się, oddychaj spokojnie, nie ruszaj się.</p>
+        <div class="ringwrap">
+          <svg viewBox="0 0 140 140" aria-hidden="true"><circle cx="70" cy="70" r="60" fill="none" stroke="rgba(255,255,255,.10)" stroke-width="10"/><circle id="ringArc" cx="70" cy="70" r="60" fill="none" stroke="#F2A93B" stroke-width="10" stroke-linecap="round" stroke-dasharray="376.99" stroke-dashoffset="376.99"/></svg>
+          <div class="ringtxt"><div id="ringTime" role="timer">2:00</div><div id="ringPhase">Stabilizacja</div></div>
+        </div>
+        <div class="grid g3">
+          <div class="stat"><div class="l">Uderzenia</div><div class="v" id="runN">—</div></div>
+          <div class="stat"><div class="l">Zakłócenia</div><div class="v"><span id="runArt">—</span><span class="u"> %</span></div></div>
+          <div class="stat"><div class="l">RMSSD</div><div class="v"><span id="runRm">—</span><span class="u"> ms</span></div></div>
+        </div>
+        <p id="fastNote" class="msg" hidden>Tryb demo przyspieszony ×12.</p>
+        <p class="msg js-contact" hidden></p>
+        <div class="btns" style="margin-top:12px"><button id="btnCancel">Anuluj pomiar</button></div>
+      </div>
+      <div id="flowResult" hidden>
+        <div id="resSummary" class="grid"></div>
+        <p id="resMsg" class="msg warn" hidden></p>
+        <p id="resReplace" class="msg" hidden>Masz już dziś zapisany pomiar – zapis go zastąpi.</p>
+        <div id="resForm"></div>
+        <div id="resBtns" class="btns" style="margin-top:16px"></div>
+      </div>
+    </div>
+
+    <div class="card" id="dayCard">
+      <p class="lbl">Wynik dnia</p>
+      <div id="dayBody"></div>
+    </div>
+  </section>
+
+  <!-- ============ HISTORIA ============ -->
+  <section id="panel-hist" role="tabpanel" aria-labelledby="tab-hist" hidden>
+    <div class="card">
+      <p class="lbl">RMSSD – ostatnie 60 dni</p>
+      <canvas id="histChart" class="tall" role="img" aria-label="Wykres dziennego RMSSD z ostatnich 60 dni"></canvas>
+      <div class="legend" id="histLegend"></div>
+    </div>
+    <div class="card">
+      <p class="lbl">Dni</p>
+      <div class="tw"><table>
+        <thead><tr><th>Data</th><th>RMSSD</th><th>Tętno</th><th>Jakość</th><th>Wynik</th><th>Tagi</th><th></th></tr></thead>
+        <tbody id="histBody"></tbody>
+      </table></div>
+      <button id="btnMoreDays" hidden style="width:100%;margin-top:10px">Pokaż wszystkie dni</button>
+      <p id="histEmpty" class="empty" hidden>Brak zapisanych dni. Zrób pierwszy poranny pomiar.</p>
+    </div>
+    <div class="card">
+      <p class="lbl">Kopia danych</p>
+      <p class="warnbox js-storewarn" hidden></p>
+      <div class="btns">
+        <button id="btnExpJson">Eksportuj kopię (JSON)</button>
+        <button id="btnImpJson">Wczytaj kopię (JSON)</button>
+        <button id="btnExpCsv">Eksportuj dni (CSV)</button>
+      </div>
+      <input id="fileImport" type="file" accept=".json,application/json" hidden>
+      <p id="histMsg" class="msg" role="status" hidden></p>
+    </div>
+  </section>
+
+  <!-- ============ DIAGNOSTYKA ============ -->
+  <section id="panel-diag" role="tabpanel" aria-labelledby="tab-diag" hidden>
+    <div class="card">
+      <p class="lbl">Sterowanie</p>
+      <div class="btns">
+        <button id="btnMeasureDiag" class="blue" disabled>Start pomiaru 2 min</button>
+        <button id="btnCsv" disabled>Pobierz dane (CSV)</button>
+      </div>
+      <p class="msg warn js-contact" hidden></p>
+    </div>
+    <div class="grid">
+      <div class="stat"><div class="l">Tętno</div><div class="v"><span id="vHr">—</span> <span class="u">bpm</span></div></div>
+      <div class="stat"><div class="l">RMSSD (ostatnie 60 s)</div><div class="v"><span id="vRmssd">—</span> <span class="u">ms</span></div></div>
+      <div class="stat"><div class="l">ln RMSSD</div><div class="v" id="vLn">—</div></div>
+      <div class="stat"><div class="l">Jakość</div><div class="v" id="vQ">—</div></div>
+      <div class="stat"><div class="l">Zakłócenia</div><div class="v"><span id="vArt">—</span> <span class="u">%</span></div></div>
+      <div class="stat"><div class="l">Liczba uderzeń</div><div class="v" id="vN">0</div></div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <p class="lbl">Odstępy między uderzeniami – ostatnie 120 s</p>
+      <canvas id="chart"></canvas>
+      <div class="legend"><span><i style="background:#2D9CFF;border-radius:50%"></i>zaakceptowane</span><span><i style="background:#FF4D5E;border-radius:50%"></i>odrzucone</span></div>
+    </div>
+    <div class="card">
+      <p class="lbl">Ostatni pomiar 2-minutowy</p>
+      <div id="countdown" class="msg" style="margin:0">Pierwsze 30 s jest odrzucane, wynik z kolejnych 90 s.</div>
+      <div id="result" class="msg ok" style="font-weight:700;font-size:16px" hidden></div>
+    </div>
+    <div class="card">
+      <p class="lbl">Dziennik zdarzeń</p>
+      <div id="log"></div>
+    </div>
+  </section>
+
+  <footer>Narzędzie testowe. Nie jest wyrobem medycznym. Dane zapisują się tylko w tej przeglądarce.</footer>
+</div>
+<script>/* Forma HRV core - pure logic, no DOM. Works in browser (window.HrvCore) and node (module.exports). */
+(function (root) {
+  'use strict';
+
+  var MIN_RR = 300, MAX_RR = 2000, MAX_DEV = 0.20;
+
+  function parseHeartRateMeasurement(dv) {
+    var flags = dv.getUint8(0);
+    var off = 1, hr;
+    if (flags & 0x01) { hr = dv.getUint16(off, true); off += 2; }
+    else { hr = dv.getUint8(off); off += 1; }
+    if (flags & 0x08) off += 2; // energy expended
+    var rrMs = [];
+    if (flags & 0x10) {
+      while (off + 1 < dv.byteLength) {
+        rrMs.push(dv.getUint16(off, true) * 1000 / 1024);
+        off += 2;
+      }
+    }
+    return {
+      hr: hr,
+      contact: { supported: !!(flags & 0x04), detected: !!(flags & 0x02) },
+      rrMs: rrMs
+    };
+  }
+
+  function parsePmdPpiFrame(dv) {
+    if (dv.byteLength < 10 || dv.getUint8(0) !== 3) return null;
+    var samples = [];
+    var off = 10; // 1 type + 8 timestamp + 1 frame type
+    while (off + 6 <= dv.byteLength) {
+      var flags = dv.getUint8(off + 5);
+      samples.push({
+        hr: dv.getUint8(off),
+        ppiMs: dv.getUint16(off + 1, true),
+        errMs: dv.getUint16(off + 3, true),
+        blocker: !!(flags & 0x01),
+        skinContact: !!(flags & 0x02),
+        skinContactSupported: !!(flags & 0x04)
+      });
+      off += 6;
+    }
+    return { samples: samples };
+  }
+
+  function parseControlPointResponse(dv) {
+    if (dv.byteLength < 4 || dv.getUint8(0) !== 0xF0) return null;
+    var err = dv.getUint8(3);
+    return { ok: err === 0, opCode: dv.getUint8(1), type: dv.getUint8(2), errorCode: err };
+  }
+
+  function median(arr) {
+    if (!arr.length) return NaN;
+    var s = arr.slice().sort(function (a, b) { return a - b; });
+    var m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  function inRange(x) { return x >= MIN_RR && x <= MAX_RR; }
+
+  // Streaming variant: prev4 = previous raw values (up to 4), x = new raw value.
+  function isArtifact(prev4, x) {
+    if (!(x >= MIN_RR && x <= MAX_RR)) return true;
+    var ref = prev4.filter(inRange).slice(-4);
+    if (!ref.length) return false;
+    var med = median(ref);
+    return Math.abs(x - med) / med > MAX_DEV;
+  }
+
+  // WHOOP (HR Broadcast) resends the previous RR when a 1-s packet has no new beat.
+  // An exact repeat of the previous raw value is treated as stale and skipped.
+  function isStaleRepeat(prevRaw, x) {
+    return prevRaw != null && Math.abs(prevRaw - x) < 0.05;
+  }
+
+  // Offline variant: median of up to 2 before + 2 after surrounding raw values.
+  function cleanIntervals(raw) {
+    var clean = [], flags = [];
+    for (var i = 0; i < raw.length; i++) {
+      var x = raw[i], bad = false;
+      if (!inRange(x)) bad = true;
+      else {
+        var nb = [];
+        for (var j = i - 2; j <= i + 2; j++) {
+          if (j !== i && j >= 0 && j < raw.length && inRange(raw[j])) nb.push(raw[j]);
+        }
+        if (nb.length) {
+          var med = median(nb);
+          if (Math.abs(x - med) / med > MAX_DEV) bad = true;
+        }
+      }
+      flags.push(bad);
+      if (!bad) clean.push(x);
+    }
+    return { clean: clean, flags: flags };
+  }
+
+  // Input: numbers; null/NaN/undefined entries are dropped beats and break the chain.
+  function rmssd(series) {
+    var sum = 0, n = 0;
+    for (var i = 1; i < series.length; i++) {
+      var a = series[i - 1], b = series[i];
+      if (typeof a === 'number' && typeof b === 'number' && isFinite(a) && isFinite(b)) {
+        var d = b - a; sum += d * d; n++;
+      }
+    }
+    return n ? Math.sqrt(sum / n) : NaN;
+  }
+
+  function mean(a) { if (!a.length) return NaN; var s = 0; for (var i = 0; i < a.length; i++) s += a[i]; return s / a.length; }
+  function sdnn(a) {
+    if (a.length < 2) return NaN;
+    var m = mean(a), s = 0;
+    for (var i = 0; i < a.length; i++) s += (a[i] - m) * (a[i] - m);
+    return Math.sqrt(s / (a.length - 1));
+  }
+
+  // beats: [{t (ms), rr (ms), rejected (bool)}] ; window = last windowSec seconds before the last beat.
+  function windowStats(beats, windowSec) {
+    var res = { rmssd: NaN, lnRmssd: NaN, sdnn: NaN, meanRr: NaN, meanHr: NaN, nBeats: 0, nTotal: 0, artifactPct: 0, quality: 'niska' };
+    if (!beats.length) return res;
+    var tEnd = beats[beats.length - 1].t;
+    var sel = beats.filter(function (b) { return b.t > tEnd - windowSec * 1000; });
+    var series = sel.map(function (b) { return b.rejected ? null : b.rr; });
+    var accepted = series.filter(function (v) { return v !== null; });
+    res.nTotal = sel.length;
+    res.nBeats = accepted.length;
+    res.artifactPct = sel.length ? (sel.length - accepted.length) * 100 / sel.length : 0;
+    res.meanRr = mean(accepted);
+    res.meanHr = accepted.length ? 60000 / res.meanRr : NaN;
+    res.sdnn = sdnn(accepted);
+    res.rmssd = rmssd(series);
+    res.lnRmssd = res.rmssd > 0 ? Math.log(res.rmssd) : NaN;
+    if (res.artifactPct < 2 && res.nBeats >= 40) res.quality = 'wysoka';
+    else if (res.artifactPct < 5 && res.nBeats > 0) res.quality = 'średnia';
+    else res.quality = 'niska';
+    return res;
+  }
+
+  var PMD_ERRORS = {
+    1: 'nieprawidłowa komenda', 2: 'nieprawidłowy typ pomiaru', 3: 'pomiar nieobsługiwany',
+    4: 'nieprawidłowa długość', 5: 'nieprawidłowy parametr', 6: 'pomiar już trwa',
+    7: 'nieprawidłowe ustawienia', 8: 'nieprawidłowe ustawienia', 9: 'nieprawidłowe ustawienia',
+    10: 'nieprawidłowe ustawienia', 11: 'nieprawidłowe ustawienia',
+    12: 'nieprawidłowy stan', 13: 'urządzenie się ładuje'
+  };
+  function pmdErrorText(code) { return code === 0 ? 'OK' : (PMD_ERRORS[code] || 'nieznany błąd (' + code + ')'); }
+
+
+  // ====================== DAILY RECORDS & READINESS (pure) ======================
+  var DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+  var CAL_FULL = 14, CAL_MIN = 5, BASE_WINDOW = 60;
+  var EXCLUDE_TAGS = ['Choroba', 'Alkohol'];
+  var MIN_SD_LN = 0.02, MIN_SD_HR = 1; // floors so that a very flat history cannot blow up z-scores
+  var WB_KEYS = ['energia', 'bolesnosc', 'stres', 'motywacja', 'sen'];
+  var QUALITIES = ['wysoka', 'średnia', 'niska'];
+  function p2(n) { return (n < 10 ? '0' : '') + n; }
+
+  function dayNum(s) {
+    var m = typeof s === 'string' ? DAY_RE.exec(s) : null;
+    if (!m) return NaN;
+    return Math.round(Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000);
+  }
+  function dateFromNum(n) {
+    var d = new Date(n * 86400000);
+    return d.getUTCFullYear() + '-' + p2(d.getUTCMonth() + 1) + '-' + p2(d.getUTCDate());
+  }
+  function addDays(s, k) { return dateFromNum(dayNum(s) + k); }
+  function localDateStr(d) { return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); }
+  function localTimeStr(d) { return p2(d.getHours()) + ':' + p2(d.getMinutes()); }
+  function clamp(x, a, b) { return Math.min(b, Math.max(a, x)); }
+  function colorFor(r) { return r <= 33 ? 'czerwony' : (r <= 66 ? 'żółty' : 'zielony'); }
+
+  var RECOMMENDATIONS = {
+    'zielony': 'Dobry dzień na mocny trening: interwały, mocny bieg albo ciężkie nogi',
+    'żółty': 'Umiarkowanie: spokojny bieg albo górne partie na siłowni',
+    'czerwony': 'Regeneracja: spacer i mobilność'
+  };
+  var QUADRANTS = {
+    zmeczenie: 'Zmęczenie lub możliwa infekcja – odpuść intensywność',
+    przeciazenie: 'Przeciążenie przy dużej objętości – rozważ lżejszy dzień',
+    swiezosc: 'Świeżość – możesz dołożyć obciążenie',
+    dobrze: 'Dobrze znosisz obciążenia',
+    stabilny: 'Stan stabilny'
+  };
+  function calibrationLabel(n) { return 'Kalibracja: ' + n + ' z ' + CAL_FULL + ' dni – wynik wstępny'; }
+
+  function excludedFromNorm(day) {
+    var t = day.tags || [];
+    for (var i = 0; i < EXCLUDE_TAGS.length; i++) if (t.indexOf(EXCLUDE_TAGS[i]) >= 0) return true;
+    return false;
+  }
+  function band(vals, k) {
+    var m = mean(vals), s = sdnn(vals);
+    return { n: vals.length, mean: m, sd: s, lo: m - k * s, hi: m + k * s };
+  }
+  // days: records strictly BEFORE refDate and within the last 60 days; Choroba/Alkohol days excluded.
+  function baseline(days, refDate) {
+    var r = dayNum(refDate);
+    var sel = days.filter(function (d) {
+      var k = dayNum(d.date);
+      return k < r && k >= r - BASE_WINDOW && !excludedFromNorm(d) && isFinite(d.lnRmssd);
+    });
+    var b = band(sel.map(function (d) { return d.lnRmssd; }), 0.75);
+    b.loMs = Math.exp(b.lo); b.hiMs = Math.exp(b.hi); b.meanMs = Math.exp(b.mean);
+    b.hr = band(sel.filter(function (d) { return isFinite(d.hr); }).map(function (d) { return d.hr; }), 1);
+    return b;
+  }
+  // Mean ln(RMSSD) over the 7 days ending at refDate (inclusive) + CV% of RMSSD over the same days.
+  function rolling7(days, refDate) {
+    var r = dayNum(refDate);
+    var sel = days.filter(function (d) { var k = dayNum(d.date); return k <= r && k > r - 7 && isFinite(d.lnRmssd); });
+    var res = { n: sel.length, meanLn: NaN, meanMs: NaN, cvPct: NaN };
+    if (!sel.length) return res;
+    res.meanLn = mean(sel.map(function (d) { return d.lnRmssd; }));
+    res.meanMs = Math.exp(res.meanLn);
+    if (sel.length > 1) {
+      var ms = sel.map(function (d) { return d.rmssd; });
+      res.cvPct = sdnn(ms) / mean(ms) * 100;
+    }
+    return res;
+  }
+  function findDay(days, date) {
+    for (var i = 0; i < days.length; i++) if (days[i].date === date) return days[i];
+    return null;
+  }
+  // Score of one day WITHOUT the points breakdown (so it can be reused for the previous 30 days).
+  function scoreCore(days, date) {
+    var rec = findDay(days, date);
+    if (!rec || !isFinite(rec.lnRmssd)) return null;
+    var b = baseline(days, date);
+    var out = { rec: rec, base: b, scored: false };
+    if (b.n < CAL_MIN) return out;
+    var sdL = isFinite(b.sd) ? Math.max(b.sd, MIN_SD_LN) : MIN_SD_LN;
+    var sdH = isFinite(b.hr.sd) ? Math.max(b.hr.sd, MIN_SD_HR) : MIN_SD_HR;
+    var r7 = rolling7(days, date);
+    out.r7 = r7;
+    out.z = (rec.lnRmssd - b.mean) / sdL;
+    out.z7 = (r7.meanLn - b.mean) / sdL;
+    out.zRhr = isFinite(rec.hr) && isFinite(b.hr.mean) ? (rec.hr - b.hr.mean) / sdH : 0;
+    out.cHrv = clamp(50 + 25 * (0.6 * out.z + 0.4 * out.z7), 0, 100);
+    out.cRhr = clamp(50 - 25 * out.zRhr, 0, 100);
+    out.raw = 0.75 * out.cHrv + 0.25 * out.cRhr;
+    out.readiness = Math.round(out.raw);
+    out.scored = true;
+    return out;
+  }
+  function quadrantFor(r7Ln, b, hr) {
+    var hrvLow = r7Ln < b.lo, hrvHigh = r7Ln > b.hi;
+    var hrHigh = isFinite(hr) && hr > b.hr.hi, hrLow = isFinite(hr) && hr < b.hr.lo;
+    var key;
+    if (hrvLow && hrHigh) key = 'zmeczenie';
+    else if (hrvLow) key = 'przeciazenie';
+    else if (hrvHigh && !hrHigh && !hrLow) key = 'swiezosc';
+    else if (!hrHigh) key = 'dobrze';
+    else key = 'stabilny';
+    return { key: key, message: QUADRANTS[key] };
+  }
+  // Full status for one calendar day. status: 'brak' (no record) | 'kalibracja' (<14 baseline days) | 'ok'.
+  function dayStatus(days, date) {
+    var sc = scoreCore(days, date);
+    if (!sc) return { status: 'brak', date: date, hasRecord: false, scored: false, readiness: null };
+    var b = sc.base;
+    var res = {
+      date: date, hasRecord: true, rec: sc.rec, base: b, baselineN: b.n,
+      status: b.n < CAL_FULL ? 'kalibracja' : 'ok',
+      scored: sc.scored, readiness: null, color: null, label: null,
+      today: { rmssd: sc.rec.rmssd, hr: sc.rec.hr },
+      usual: { rmssd: b.meanMs, hr: b.hr.mean },
+      r7: rolling7(days, date)
+    };
+    if (b.n < CAL_FULL) res.label = b.n < CAL_MIN ? 'Kalibracja: ' + b.n + ' z ' + CAL_FULL + ' dni – za mało danych na wynik' : calibrationLabel(b.n);
+    if (!sc.scored) return res;
+    res.z = sc.z; res.z7 = sc.z7; res.zRhr = sc.zRhr; res.cHrv = sc.cHrv; res.cRhr = sc.cRhr;
+    res.readiness = sc.readiness; res.color = colorFor(sc.readiness);
+    res.recommendation = RECOMMENDATIONS[res.color];
+    res.quadrant = quadrantFor(res.r7.meanLn, b, sc.rec.hr);
+    // points: weight * (today's component - mean component over the previous 30 days)
+    var t = dayNum(date), prev = [];
+    days.forEach(function (d) {
+      var k = dayNum(d.date);
+      if (k < t && k >= t - 30) { var s = scoreCore(days, d.date); if (s && s.scored) prev.push(s); }
+    });
+    var start, mH, mR;
+    if (prev.length >= CAL_MIN) {
+      start = mean(prev.map(function (s) { return s.raw; }));
+      mH = mean(prev.map(function (s) { return s.cHrv; }));
+      mR = mean(prev.map(function (s) { return s.cRhr; }));
+    } else { start = 50; mH = 50; mR = 50; }
+    var hrvRaw = 0.75 * (sc.cHrv - mH), hrRaw = 0.25 * (sc.cRhr - mR);
+    var startR = Math.round(start), hrvPts = Math.round(hrvRaw);
+    // displayed integers always add up: start + HRV + Tętno = readiness (rounding residue goes to Tętno)
+    var hrPts = (sc.readiness - startR) - hrvPts;
+    res.points = { start: startR, startRaw: start, hrv: hrvPts, hr: hrPts, hrvRaw: hrvRaw, hrRaw: hrRaw, prevScored: prev.length };
+    return res;
+  }
+
+  function sanitizeDay(o) {
+    if (!o || typeof o !== 'object' || isNaN(dayNum(o.date))) return null;
+    var num = function (v) { v = typeof v === 'string' ? parseFloat(v.replace(',', '.')) : v; return typeof v === 'number' && isFinite(v) ? v : null; };
+    var rm = num(o.rmssd);
+    if (rm == null || rm <= 0) return null;
+    var wb = {};
+    WB_KEYS.forEach(function (k) {
+      var v = num(o.wellbeing && o.wellbeing[k]);
+      wb[k] = v != null && v >= 1 && v <= 5 ? Math.round(v) : null;
+    });
+    var tags = Array.isArray(o.tags) ? o.tags.filter(function (t) { return typeof t === 'string' && t.length && t.length <= 40; }).slice(0, 20) : [];
+    var w = num(o.whoopHrv);
+    return {
+      date: o.date,
+      time: typeof o.time === 'string' && /^\d{2}:\d{2}$/.test(o.time) ? o.time : '00:00',
+      rmssd: rm,
+      lnRmssd: num(o.lnRmssd) != null ? num(o.lnRmssd) : Math.log(rm),
+      hr: num(o.hr),
+      artifactPct: num(o.artifactPct) || 0,
+      nBeats: Math.round(num(o.nBeats) || 0),
+      quality: QUALITIES.indexOf(o.quality) >= 0 ? o.quality : 'niska',
+      dupCount: Math.round(num(o.dupCount) || 0),
+      device: typeof o.device === 'string' ? o.device.slice(0, 60) : '',
+      wellbeing: wb, tags: tags,
+      whoopHrv: w != null && w > 0 ? w : null,
+      battery: num(o.battery) != null && num(o.battery) >= 0 && num(o.battery) <= 100 ? Math.round(num(o.battery)) : null
+    };
+  }
+  function sortDays(a) { return a.slice().sort(function (x, y) { return x.date < y.date ? -1 : x.date > y.date ? 1 : 0; }); }
+  // Imported records win over existing ones with the same date.
+  function mergeDays(existing, incoming) {
+    var map = {}, added = 0, replaced = 0;
+    existing.forEach(function (d) { map[d.date] = d; });
+    incoming.forEach(function (d) { if (map[d.date]) replaced++; else added++; map[d.date] = d; });
+    return { days: sortDays(Object.keys(map).map(function (k) { return map[k]; })), added: added, replaced: replaced };
+  }
+  function upsertDay(days, rec) {
+    var replaced = !!findDay(days, rec.date);
+    return { days: sortDays(days.filter(function (d) { return d.date !== rec.date; }).concat([rec])), replaced: replaced };
+  }
+  function removeDay(days, date) { return days.filter(function (d) { return d.date !== date; }); }
+
+  function csvCell(v) {
+    if (v == null) return '';
+    var s = String(v);
+    return /[",\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function daysToCsv(days) {
+    var head = ['data', 'godzina', 'rmssd_ms', 'ln_rmssd', 'tetno_bpm', 'zaklocenia_pct', 'uderzenia', 'jakosc', 'powtorzenia_whoop', 'urzadzenie',
+      'energia', 'bolesnosc', 'stres', 'motywacja', 'sen', 'tagi', 'whoop_hrv_ms', 'wynik_pct'];
+    var rows = [head.join(',')];
+    sortDays(days).forEach(function (d) {
+      var st = dayStatus(days, d.date);
+      rows.push([d.date, d.time, Math.round(d.rmssd * 10) / 10, Math.round(d.lnRmssd * 1000) / 1000, d.hr, d.artifactPct, d.nBeats, d.quality, d.dupCount, d.device]
+        .concat(WB_KEYS.map(function (k) { return d.wellbeing ? d.wellbeing[k] : null; }))
+        .concat([(d.tags || []).join('|'), d.whoopHrv, st.readiness]).map(csvCell).join(','));
+    });
+    return rows.join('\n') + '\n';
+  }
+
+  // Deterministic synthetic history (demo + tests). n consecutive days ending at endDate.
+  function syntheticDays(endDate, n, seed) {
+    var a = seed >>> 0;
+    function rnd() { a = (a + 0x6D2B79F5) >>> 0; var t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }
+    function gauss() { return (rnd() + rnd() + rnd() + rnd() - 2) * 1.7; }
+    var out = [], end = dayNum(endDate);
+    for (var i = 0; i < n; i++) {
+      var date = dateFromNum(end - (n - 1 - i));
+      var ln = 3.62 + 0.10 * Math.sin(i / 6) + 0.09 * gauss(), tags = [], hrAdd = 0;
+      if (i % 11 === 7) { tags.push('Alkohol'); ln -= 0.30; hrAdd += 3; }
+      if (i === 22 || i === 23) { tags.push('Choroba'); ln -= 0.45; hrAdd += 6; }
+      if (i % 9 === 4) tags.push('Kawa po 16:00');
+      if (i % 13 === 5) tags.push('Ciężki trening wczoraj');
+      var rm = Math.exp(ln), q = i % 17 === 9 ? 'niska' : (i % 5 === 2 ? 'średnia' : 'wysoka');
+      var wb = { energia: 3 + Math.round(gauss()), bolesnosc: 2 + Math.round(gauss()), stres: 2 + Math.round(gauss()), motywacja: 3 + Math.round(gauss()), sen: 3 + Math.round(gauss()) };
+      WB_KEYS.forEach(function (k) { wb[k] = clamp(wb[k], 1, 5); });
+      out.push({
+        date: date, time: p2(6 + (i % 3)) + ':' + p2(10 + (i * 7) % 40),
+        rmssd: Math.round(rm * 10) / 10, lnRmssd: Math.round(Math.log(Math.round(rm * 10) / 10) * 1000) / 1000,
+        hr: Math.round((59 - 6 * (ln - 3.62) + hrAdd + 1.2 * gauss()) * 10) / 10,
+        artifactPct: q === 'niska' ? 7.5 : (q === 'średnia' ? 3.2 : 0.8), nBeats: 72 + (i % 9), quality: q, dupCount: 10 + (i % 7),
+        device: 'WHOOP 4.0', wellbeing: wb, tags: tags,
+        battery: 40 + (i * 7) % 55,
+        whoopHrv: i % 4 === 1 ? Math.round(rm * 1.35 + 3 * gauss()) : null
+      });
+    }
+    return out;
+  }
+
+
+  // ====================== BATTERY (pure) ======================
+  var CHARGE_WINDOW_MS = 15 * 60000;
+  // hist: [{t (ms epoch), level (0-100)}]. Charging is INFERRED only when the level rose by >=1 point
+  // within the last 15 min (last level minus the lowest level seen in that window). Older samples are ignored.
+  function inferCharging(hist, now) {
+    var recent = (hist || []).filter(function (h) { return h && isFinite(h.level) && h.t >= now - CHARGE_WINDOW_MS && h.t <= now; })
+      .sort(function (a, b) { return a.t - b.t; });
+    if (recent.length < 2) return false;
+    var last = recent[recent.length - 1].level, min = Infinity;
+    recent.forEach(function (h) { if (h.level < min) min = h.level; });
+    return last - min >= 1;
+  }
+  // Battery Power State 0x2A1A (uint8): bits 4-5 = charge state (3 = charging). Layout from memory of the GATT spec: UNVERIFIED on a real device.
+  function parseBatteryPowerState(dv) {
+    if (!dv || dv.byteLength < 1) return null;
+    var v = dv.getUint8(0), cs = (v >> 4) & 3;
+    return { charging: cs === 3, known: cs !== 0 };
+  }
+  // Battery Level Status 0x2BED: flags(u8), power state(u16 LE), optional identifier(u16) / level(u8) / additional status(u8).
+  // Power state bits 5-6 = battery charge state (1 = charging). UNVERIFIED on a real device.
+  function parseBatteryLevelStatus(dv) {
+    if (!dv || dv.byteLength < 3) return null;
+    var flags = dv.getUint8(0), ps = dv.getUint16(1, true), off = 3, level = null;
+    if (flags & 0x01) off += 2;
+    if ((flags & 0x02) && off < dv.byteLength) { level = dv.getUint8(off); off += 1; }
+    var cs = (ps >> 5) & 3;
+    return { charging: cs === 1, known: cs !== 0, level: level };
+  }
+
+  var api = {
+    parseHeartRateMeasurement: parseHeartRateMeasurement,
+    parsePmdPpiFrame: parsePmdPpiFrame,
+    parseControlPointResponse: parseControlPointResponse,
+    cleanIntervals: cleanIntervals, isArtifact: isArtifact, isStaleRepeat: isStaleRepeat,
+    rmssd: rmssd, sdnn: sdnn, mean: mean, median: median,
+    windowStats: windowStats, pmdErrorText: pmdErrorText,
+    dayNum: dayNum, dateFromNum: dateFromNum, addDays: addDays, localDateStr: localDateStr, localTimeStr: localTimeStr,
+    clamp: clamp, colorFor: colorFor, baseline: baseline, rolling7: rolling7, dayStatus: dayStatus, calibrationLabel: calibrationLabel,
+    quadrantFor: quadrantFor, sanitizeDay: sanitizeDay, mergeDays: mergeDays, upsertDay: upsertDay, removeDay: removeDay,
+    findDay: findDay, daysToCsv: daysToCsv, syntheticDays: syntheticDays, sortDays: sortDays,
+    inferCharging: inferCharging, parseBatteryPowerState: parseBatteryPowerState, parseBatteryLevelStatus: parseBatteryLevelStatus,
+    WB_KEYS: WB_KEYS, QUADRANTS: QUADRANTS, RECOMMENDATIONS: RECOMMENDATIONS
+  };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else root.HrvCore = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+<script>(function () {
+  'use strict';
+  var C = window.HrvCore;
+  var PMD_SERVICE = 'fb005c80-02e7-f387-1cad-8acd2d8df0c8';
+  var PMD_CP = 'fb005c81-02e7-f387-1cad-8acd2d8df0c8';
+  var PMD_DATA = 'fb005c82-02e7-f387-1cad-8acd2d8df0c8';
+  var WHOOP_SERVICE = '61080000-8d6d-82b8-614a-1c8cb0f8dcc6';
+  var DEMO = /[?&]demo=1\b/.test(location.search);
+  var FAST = DEMO && /[?&]fast=1\b/.test(location.search);
+  var BAD = DEMO && /[?&]bad=1\b/.test(location.search);
+  var BATT_STATIC = DEMO && /[?&]batt=static\b/.test(location.search);
+  var F = FAST ? 12 : 1; // time compression of the 2-min flow (demo only)
+  var KEY = 'forma.v1.days';
+  var TAGS = ['Alkohol', 'Późny posiłek', 'Kawa po 16:00', 'Ciężki trening wczoraj', 'Stres w pracy', 'Podróż', 'Choroba'];
+  var WB = [['energia', 'Energia'], ['bolesnosc', 'Bolesność mięśni'], ['stres', 'Stres'], ['motywacja', 'Motywacja'], ['sen', 'Jakość snu']];
+  var COL = { zielony: '#2EE86B', 'żółty': '#F7D23E', czerwony: '#FF4D5E' };
+  var $ = function (id) { return document.getElementById(id); };
+  var $$ = function (sel) { return Array.prototype.slice.call(document.querySelectorAll(sel)); };
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  var S = {
+    device: null, server: null, mode: null, connected: false, name: '',
+    battery: null, battHist: [], chgSignal: null, battOverride: false, battChar: null, battPoll: null,
+    beats: [], recent: [], cumT: 0, hr: null, ppiSkinBad: false, rrContactBad: false,
+    measure: null, pending: null, demoTimer: null, ppiPending: false, dupCount: 0,
+    days: [], storageBroken: false, delPending: null, wake: null
+  };
+
+  // ---------- log ----------
+  var logLines = [];
+  function ts() { var d = new Date(); return d.toTimeString().slice(0, 8); }
+  function log(msg) {
+    logLines.push('[' + ts() + '] ' + msg);
+    if (logLines.length > 200) logLines.splice(0, logLines.length - 200);
+    var el = $('log'); el.textContent = logLines.join('\n'); el.scrollTop = el.scrollHeight;
+  }
+  function hex(dv) {
+    var o = []; for (var i = 0; i < dv.byteLength; i++) o.push(('0' + dv.getUint8(i).toString(16)).slice(-2));
+    return o.join(' ');
+  }
+  function showError(t) { var e = $('msgError'); e.textContent = t || ''; e.hidden = !t; }
+  function todayStr() { return C.localDateStr(new Date()); }
+  function fmt(v, d) { return isFinite(v) ? v.toFixed(d) : '—'; }
+  function download(name, text, mime) {
+    var blob = new Blob([text], { type: mime });
+    var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+  }
+  function stamp() { var d = new Date(), p = function (n) { return ('0' + n).slice(-2); }; return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()); }
+
+  // ---------- storage (every access guarded) ----------
+  function storageProbe() {
+    if (DEMO) return;
+    try { localStorage.setItem('forma.v1.probe', '1'); localStorage.removeItem('forma.v1.probe'); }
+    catch (e) { S.storageBroken = true; }
+  }
+  function loadDays() {
+    if (DEMO || S.storageBroken) return [];
+    var raw = null;
+    try { raw = localStorage.getItem(KEY); } catch (e) { S.storageBroken = true; return []; }
+    if (raw == null) return [];
+    try {
+      var arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) throw new Error('not array');
+      return C.sortDays(arr.map(C.sanitizeDay).filter(Boolean));
+    } catch (e) {
+      try { localStorage.setItem(KEY + '.corrupt', raw); } catch (e2) { /* ignore */ }
+      log('Zapisane dane były uszkodzone – kopia w kluczu ' + KEY + '.corrupt.');
+      return [];
+    }
+  }
+  function persist() {
+    if (DEMO) return true; // demo never touches localStorage
+    try { localStorage.setItem(KEY, JSON.stringify(S.days)); return true; }
+    catch (e) { S.storageBroken = true; renderStorageWarn(); log('Zapis nieudany: ' + e.message); return false; }
+  }
+  function renderStorageWarn() {
+    $$('.js-storewarn').forEach(function (el) {
+      el.hidden = !(S.storageBroken || DEMO);
+      el.textContent = S.storageBroken ? 'Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie' : 'Demo: dane syntetyczne, tylko w pamięci. Nic nie jest zapisywane w przeglądarce.';
+    });
+  }
+
+  // ---------- battery ----------
+  function battColor(l) { return l >= 50 ? '#2EE86B' : (l >= 20 ? '#F7D23E' : '#FF4D5E'); }
+  function chargingState() {
+    if (S.chgSignal != null) return { on: S.chgSignal, src: 'status' };
+    return { on: C.inferCharging(S.battHist, Date.now()), src: 'inferred' };
+  }
+  function setBattery(level) {
+    if (!isFinite(level)) return;
+    var prev = S.battery;
+    S.battHist.push({ t: Date.now(), level: level });
+    if (S.battHist.length > 200) S.battHist.splice(0, S.battHist.length - 200);
+    if (prev == null) log('Bateria: ' + level + '%');
+    else if (prev !== level) log('Bateria: ' + prev + '% → ' + level + '%');
+    S.battery = level;
+    if (level >= 10) S.battOverride = false;
+    renderBattery(); refreshButtons();
+  }
+  function resetBattery() {
+    S.battery = null; S.battHist = []; S.chgSignal = null; S.battOverride = false; S.battChar = null;
+    if (S.battPoll) { clearInterval(S.battPoll); S.battPoll = null; }
+    renderBattery();
+  }
+  function renderBattery() {
+    var b = $('batt'), l = S.battery;
+    var has = l != null && (S.connected || DEMO);
+    b.className = 'batt' + (has ? '' : ' none');
+    b.style.color = has ? battColor(l) : '';
+    $('battFill').setAttribute('width', has ? String(Math.max(0, Math.min(25, l / 100 * 25))) : '0');
+    $('battPct').textContent = has ? l + '%' : 'Bateria: —';
+    var chg = has ? chargingState() : { on: false };
+    $('battChg').hidden = !chg.on;
+    var sub = $('battSub');
+    sub.hidden = !chg.on;
+    if (chg.on) {
+      sub.textContent = chg.src === 'status' ? 'ładowanie zgłoszone przez opaskę' : 'wykryte po wzroście poziomu';
+      $('battChg').title = sub.textContent;
+    }
+    b.setAttribute('aria-label', has ? 'Bateria ' + l + '%' + (chg.on ? ', ładowanie (' + sub.textContent + ')' : '') : 'Bateria: brak danych');
+    var bn = $('battBanner');
+    if (has && l < 20) {
+      bn.hidden = false;
+      bn.className = 'banner' + (chg.on ? ' chg' : '');
+      $('battBannerTxt').textContent = chg.on ? 'Opaska się ładuje (' + l + '%).' : 'Niski poziom baterii opaski: ' + l + '%. Naładuj ją przed nocą – pomiar może się urwać.';
+    } else bn.hidden = true;
+  }
+  async function initBattery() {
+    var bs, bc;
+    try { bs = await S.server.getPrimaryService('battery_service'); bc = await bs.getCharacteristic('battery_level'); }
+    catch (e) { log('Bateria niedostępna: ' + e.message); return; }
+    S.battChar = bc;
+    async function readLevel() { var v = await bc.readValue(); setBattery(v.getUint8(0)); }
+    try { await readLevel(); } catch (e) { log('Odczyt baterii nieudany: ' + e.message); }
+    var notif = false;
+    try {
+      bc.addEventListener('characteristicvaluechanged', function (ev) { setBattery(ev.target.value.getUint8(0)); });
+      await bc.startNotifications(); notif = true;
+      log('Bateria: powiadomienia aktywne.');
+    } catch (e) { log('Powiadomienia baterii niedostępne (' + e.message + ') – odczyt co 60 s.'); }
+    if (!notif) {
+      S.battPoll = setInterval(function () {
+        if (!S.connected) return;
+        readLevel().catch(function (e) { log('Odczyt baterii nieudany: ' + e.message); });
+      }, 60000);
+    }
+    // optional characteristics with a real charging flag (usually absent)
+    var opts = [[0x2BED, 'Battery Level Status', C.parseBatteryLevelStatus], [0x2A1A, 'Battery Power State', C.parseBatteryPowerState]];
+    for (var i = 0; i < opts.length; i++) {
+      try {
+        var ch = await bs.getCharacteristic(opts[i][0]);
+        var parse = opts[i][2], nm = opts[i][1];
+        var apply = function (dv) {
+          var r = parse(dv);
+          if (r && r.known) {
+            var was = S.chgSignal;
+            S.chgSignal = r.charging;
+            if (was !== r.charging) log(nm + ': ' + (r.charging ? 'ładowanie' : 'brak ładowania') + ' [' + hex(dv) + ']');
+            if (r.level != null) setBattery(r.level); else renderBattery();
+          }
+        };
+        apply(await ch.readValue());
+        try { ch.addEventListener('characteristicvaluechanged', function (ev) { apply(ev.target.value); }); await ch.startNotifications(); } catch (e) { /* read-only */ }
+        log('Znaleziono ' + nm + ' – flaga ładowania z urządzenia.');
+      } catch (e) { /* usually missing */ }
+    }
+  }
+
+  // ---------- status ----------
+  function setPill(text, cls) { var p = $('pill'); p.textContent = text; p.className = 'pill' + (cls ? ' ' + cls : ''); }
+  function refreshPill() {
+    if (DEMO && S.connected) { setPill('Demo · symulowany WHOOP · dane syntetyczne', 'ok'); return; }
+    if (!S.connected) return;
+    setPill('Połączono: ' + S.name + ' · tryb ' + (S.mode === 'PPI' ? 'PPI' : 'RR'), 'ok');
+  }
+  function battBlocks() { return S.connected && S.battery != null && S.battery < 10 && !S.battOverride; }
+  function refreshButtons() {
+    $('btnConnect').disabled = S.connected || DEMO;
+    $('btnConnectAll').disabled = S.connected || DEMO;
+    $('btnDisconnect').disabled = !S.connected || DEMO;
+    var blocked = battBlocks();
+    $('btnMeasure').disabled = !S.connected || !!S.measure || blocked;
+    $('btnMeasureDiag').disabled = !S.connected || !!S.measure || blocked;
+    $('btnMeasureAnyway').hidden = !blocked;
+    $('btnCsv').disabled = S.beats.length === 0;
+    var h = $('measureHint');
+    if (!S.connected) h.textContent = 'Najpierw połącz opaskę.';
+    else if (blocked) h.textContent = 'Bateria poniżej 10% – pomiar może się urwać. Naładuj opaskę albo zmierz mimo to.';
+    else h.textContent = 'Opaska połączona. Zacznij, gdy leżysz spokojnie.';
+  }
+
+  // ---------- data pipeline ----------
+  function addInterval(rr, hr, src, invalid) {
+    var prev4 = S.recent.slice(-4);
+    var rejected = !!invalid || C.isArtifact(prev4, rr);
+    S.recent.push(rr); if (S.recent.length > 8) S.recent.shift();
+    S.cumT += rr > 0 ? rr : 0;
+    var h = hr > 0 ? hr : (rr > 0 ? Math.round(60000 / rr) : null);
+    var now = Date.now(); if (S.t0 == null) S.t0 = now;
+    S.beats.push({ t: S.cumT, w: now, rr: rr, rejected: rejected, hr: h, src: src, pkt: S.pkt || 0 });
+    if (S.beats.length > 20000) S.beats.splice(0, S.beats.length - 20000);
+    if (h) S.hr = h;
+  }
+
+  var QCLS = { 'wysoka': 'q-wysoka', 'średnia': 'q-srednia', 'niska': 'q-niska' };
+
+  function renderStats() {
+    var s = C.windowStats(S.beats, 60);
+    $('vHr').textContent = S.hr != null ? S.hr : '—';
+    var enough = s.nBeats >= 5;
+    $('vRmssd').textContent = enough ? fmt(s.rmssd, 1) : '—';
+    $('vLn').textContent = enough ? fmt(s.lnRmssd, 2) : '—';
+    var q = $('vQ');
+    if (s.nTotal) { q.textContent = s.quality; q.className = 'v ' + QCLS[s.quality]; } else { q.textContent = '—'; q.className = 'v'; }
+    $('vArt').textContent = s.nTotal ? fmt(s.artifactPct, 1) : '—';
+    $('vN').textContent = S.beats.length;
+    $('btnCsv').disabled = S.beats.length === 0;
+    var bad = S.ppiSkinBad || S.rrContactBad;
+    $$('.js-contact').forEach(function (c) { c.hidden = !bad; c.textContent = bad ? 'brak kontaktu ze skórą' : ''; });
+    renderBattery();
+    if (!$('panel-diag').hidden) drawChart();
+  }
+
+  // ---------- tachogram (Diagnostyka) ----------
+  function drawChart() {
+    var cv = $('chart'), dpr = window.devicePixelRatio || 1;
+    var w = cv.clientWidth, h = cv.clientHeight;
+    if (!w) return;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    var g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    var padL = 40, padR = 8, padT = 8, padB = 20;
+    var pw = w - padL - padR, ph = h - padT - padB;
+    var tEnd = S.beats.length ? S.beats[S.beats.length - 1].t : 0, t0 = tEnd - 120000;
+    var vis = S.beats.filter(function (b) { return b.t >= t0; });
+    var lo = 600, hi = 1000;
+    vis.forEach(function (b) { if (b.rr >= 250 && b.rr <= 2200) { lo = Math.min(lo, b.rr); hi = Math.max(hi, b.rr); } });
+    lo = Math.floor((lo - 30) / 50) * 50; hi = Math.ceil((hi + 30) / 50) * 50;
+    function X(t) { return padL + (t - t0) / 120000 * pw; }
+    function Y(v) { return padT + (1 - (Math.min(Math.max(v, lo), hi) - lo) / (hi - lo)) * ph; }
+    g.font = '11px system-ui,sans-serif'; g.fillStyle = '#AAB4BE'; g.strokeStyle = 'rgba(255,255,255,.12)'; g.lineWidth = 1;
+    var step = (hi - lo) > 600 ? 200 : 100;
+    for (var v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+      g.beginPath(); g.moveTo(padL, Y(v) + .5); g.lineTo(w - padR, Y(v) + .5); g.stroke();
+      g.textAlign = 'right'; g.fillText(v, padL - 4, Y(v) + 4);
+    }
+    [0, 30, 60, 90, 120].forEach(function (s) { g.textAlign = s === 120 ? 'right' : (s === 0 ? 'left' : 'center'); g.fillText(s === 120 ? 'teraz' : '-' + (120 - s) + 's', padL + s / 120 * pw, h - 5); });
+    g.beginPath(); var started = false;
+    g.strokeStyle = '#2D9CFF'; g.lineWidth = 1.5;
+    vis.forEach(function (b) { if (b.rejected) return; if (!started) { g.moveTo(X(b.t), Y(b.rr)); started = true; } else g.lineTo(X(b.t), Y(b.rr)); });
+    g.stroke();
+    g.fillStyle = '#2D9CFF';
+    vis.forEach(function (b) { if (!b.rejected) { g.beginPath(); g.arc(X(b.t), Y(b.rr), 2, 0, 6.3); g.fill(); } });
+    g.fillStyle = '#FF4D5E';
+    vis.forEach(function (b) { if (b.rejected) { g.beginPath(); g.arc(X(b.t), Y(b.rr), 3.5, 0, 6.3); g.fill(); } });
+    if (!vis.length) { g.fillStyle = '#AAB4BE'; g.textAlign = 'center'; g.font = '13px system-ui,sans-serif'; g.fillText('Brak danych', padL + pw / 2, padT + ph / 2); }
+  }
+
+  // ---------- CSV of raw beats (Diagnostyka) ----------
+  function exportCsv() {
+    var rows = ['czas_ms_od_startu,czas_odbioru_ms,pakiet,interwal_ms,zrodlo,odrzucony,hr'];
+    S.beats.forEach(function (b) {
+      rows.push([Math.round(b.t), S.t0 != null ? b.w - S.t0 : '', b.pkt || '', (Math.round(b.rr * 10) / 10), b.src, b.rejected ? 1 : 0, b.hr == null ? '' : b.hr].join(','));
+    });
+    var name = 'forma-hrv-' + stamp().replace('-', '') + '.csv';
+    download(name, rows.join('\n') + '\n', 'text/csv;charset=utf-8');
+    log('Pobrano CSV: ' + name + ' (' + S.beats.length + ' wierszy, pominiętych powtórzeń: ' + (S.dupCount || 0) + ').');
+  }
+
+  // ====================== MORNING MEASUREMENT FLOW ======================
+  function setFlow(name) {
+    $('flowIdle').hidden = name !== 'idle';
+    $('flowRun').hidden = name !== 'run';
+    $('flowResult').hidden = name !== 'result';
+  }
+  function startMeasure() {
+    if (!S.connected || S.measure || battBlocks()) return;
+    S.measure = { w0: Date.now(), dup0: null };
+    S.pending = null;
+    $('result').hidden = true;
+    $('saveNote').hidden = true;
+    $('fastNote').hidden = !FAST;
+    $('ringArc').setAttribute('stroke', '#F2A93B');
+    log('Start pomiaru 2 min (pierwsze 30 s odrzucane, mierzone kolejne 90 s)' + (FAST ? ' [demo ×' + F + ']' : '') + '.');
+    try { if (navigator.wakeLock) navigator.wakeLock.request('screen').then(function (l) { S.wake = l; }, function () { }); } catch (e) { /* optional */ }
+    setFlow('run'); refreshButtons(); tickMeasure();
+  }
+  function releaseWake() { try { if (S.wake) { S.wake.release(); S.wake = null; } } catch (e) { /* ignore */ } }
+  function tickMeasure() {
+    var m = S.measure; if (!m) return;
+    var vel = (Date.now() - m.w0) * F / 1000; // virtual seconds
+    if (vel >= 120) { finishMeasure(); return; }
+    if (m.dup0 == null && vel >= 30) m.dup0 = S.dupCount;
+    var rem = Math.ceil(120 - vel);
+    $('ringTime').textContent = Math.floor(rem / 60) + ':' + ('0' + (rem % 60)).slice(-2);
+    $('ringArc').setAttribute('stroke-dashoffset', String(376.99 * (1 - vel / 120)));
+    var meas = vel >= 30;
+    $('ringPhase').textContent = meas ? 'Pomiar' : 'Stabilizacja';
+    $('ringArc').setAttribute('stroke', meas ? '#2CE8B5' : '#F2A93B');
+    if (meas) {
+      var sel = S.beats.filter(function (b) { return b.w >= m.w0 + 30000 / F; });
+      var st = C.windowStats(sel, 100000);
+      $('runN').textContent = st.nBeats;
+      $('runArt').textContent = st.nTotal ? fmt(st.artifactPct, 1) : '—';
+      $('runRm').textContent = st.nBeats >= 5 ? fmt(st.rmssd, 1) : '—';
+    } else { $('runN').textContent = '—'; $('runArt').textContent = '—'; $('runRm').textContent = '—'; }
+  }
+  function finishMeasure() {
+    var m = S.measure; S.measure = null; releaseWake();
+    var sel = S.beats.filter(function (b) { return b.w >= m.w0 + 30000 / F && b.w <= m.w0 + 120000 / F; });
+    var st = C.windowStats(sel, 100000);
+    var dup = S.dupCount - (m.dup0 == null ? S.dupCount : m.dup0);
+    var now = new Date();
+    var r1 = function (v, d) { var k = Math.pow(10, d); return isFinite(v) ? Math.round(v * k) / k : NaN; };
+    S.pending = {
+      date: C.localDateStr(now), time: C.localTimeStr(now),
+      rmssd: r1(st.rmssd, 1), lnRmssd: r1(st.lnRmssd, 3), hr: r1(st.meanHr, 1),
+      artifactPct: r1(st.artifactPct, 1), nBeats: st.nBeats, quality: st.quality, dupCount: dup, device: S.name || ''
+    };
+    var txt = 'Wynik pomiaru: RMSSD ' + fmt(st.rmssd, 1) + ' ms (ln ' + fmt(st.lnRmssd, 2) + '), jakość ' + st.quality +
+      ', uderzeń ' + st.nBeats + ', zakłóceń ' + fmt(st.artifactPct, 1) + '%, pominiętych powtórzeń ' + dup;
+    var r = $('result'); r.textContent = txt; r.hidden = false;
+    $('countdown').textContent = 'Pomiar zakończony.';
+    log(txt);
+    showResult(); refreshButtons();
+  }
+  function cancelMeasure(msg) {
+    S.measure = null; releaseWake(); setFlow('idle');
+    if (msg) showError(msg);
+    $('countdown').textContent = 'Pomiar anulowany.';
+    log('Pomiar anulowany.'); refreshButtons();
+  }
+
+  function buildForm() {
+    var h = '<fieldset><legend>Samopoczucie (opcjonalnie)</legend>';
+    WB.forEach(function (w) {
+      h += '<div class="wbrow" role="radiogroup" aria-label="' + w[1] + '"><span class="n">' + w[1] + '</span><span class="dots">';
+      for (var i = 1; i <= 5; i++) h += '<label class="dot"><input type="radio" name="wb_' + w[0] + '" value="' + i + '" aria-label="' + w[1] + ' ' + i + ' z 5"><span>' + i + '</span></label>';
+      h += '</span></div>';
+    });
+    h += '<p class="small">Skala: 1 = bardzo nisko, 5 = bardzo wysoko.</p></fieldset>';
+    h += '<fieldset><legend>Tagi (opcjonalnie)</legend><div class="chips">';
+    TAGS.forEach(function (t, i) { h += '<label class="chip"><input type="checkbox" name="tag" value="' + esc(t) + '"><span>' + esc(t) + '</span></label>'; });
+    h += '</div></fieldset>';
+    h += '<fieldset><label class="fl" for="inWhoop">HRV z aplikacji WHOOP (ms, opcjonalnie)</label><input id="inWhoop" type="text" inputmode="decimal" autocomplete="off" placeholder="np. 52"><p id="whoopErr" class="msg error" hidden>Podaj liczbę od 1 do 300 albo zostaw puste.</p></fieldset>';
+    $('resForm').innerHTML = h;
+  }
+  function tile(label, val, unit, cls) {
+    return '<div class="stat"><div class="l">' + label + '</div><div class="v ' + (cls || '') + '">' + val + (unit ? ' <span class="u">' + unit + '</span>' : '') + '</div></div>';
+  }
+  function showResult() {
+    var p = S.pending;
+    var ok = isFinite(p.rmssd) && p.nBeats >= 20;
+    $('resSummary').innerHTML = tile('RMSSD', fmt(p.rmssd, 1), 'ms') + tile('Tętno', fmt(p.hr, 0), 'bpm') + tile('Jakość', p.quality, '', QCLS[p.quality]) +
+      tile('Zakłócenia', fmt(p.artifactPct, 1), '%') + tile('Uderzenia', p.nBeats, '') + tile('Powtórzenia WHOOP', p.dupCount, 'pominięte');
+    var msg = $('resMsg');
+    if (!ok) { msg.hidden = false; msg.textContent = 'Za mało poprawnych uderzeń (' + p.nBeats + '). Powtórz w bezruchu.'; }
+    else if (p.quality === 'niska') { msg.hidden = false; msg.textContent = 'Pomiar niepewny (' + fmt(p.artifactPct, 1) + '% zakłóceń). Powtórz w bezruchu.'; }
+    else msg.hidden = true;
+    $('resReplace').hidden = !C.findDay(S.days, p.date);
+    buildForm();
+    var btns = $('resBtns'); btns.innerHTML = '';
+    function mk(txt, cls, fn) { var b = document.createElement('button'); b.textContent = txt; if (cls) b.className = cls; b.addEventListener('click', fn); btns.appendChild(b); }
+    if (!ok) mk('Powtórz', 'primary', repeatMeasure);
+    else if (p.quality === 'niska') { mk('Powtórz', 'primary', repeatMeasure); mk('Zapisz mimo to', '', saveMorning); }
+    else { mk('Zapisz poranek', 'primary', saveMorning); mk('Powtórz', '', repeatMeasure); }
+    if (!ok) $('resForm').hidden = true; else $('resForm').hidden = false;
+    setFlow('result');
+  }
+  function repeatMeasure() {
+    S.pending = null;
+    if (S.connected) startMeasure(); else setFlow('idle');
+  }
+  function saveMorning() {
+    var p = S.pending; if (!p) return;
+    var wv = $('inWhoop').value.trim(), w = null;
+    $('whoopErr').hidden = true;
+    if (wv) {
+      w = parseFloat(wv.replace(',', '.'));
+      if (!(w > 0 && w <= 300) || !/^[0-9]+([.,][0-9]+)?$/.test(wv)) { $('whoopErr').hidden = false; $('inWhoop').focus(); return; }
+    }
+    var wb = {};
+    WB.forEach(function (x) { var c = document.querySelector('input[name="wb_' + x[0] + '"]:checked'); wb[x[0]] = c ? +c.value : null; });
+    var tags = $$('input[name="tag"]:checked').map(function (c) { return c.value; });
+    var rec = C.sanitizeDay(Object.assign({}, p, { wellbeing: wb, tags: tags, whoopHrv: w, battery: S.battery }));
+    if (!rec) { $('resMsg').hidden = false; $('resMsg').textContent = 'Nie można zapisać tego pomiaru (brak poprawnego RMSSD). Powtórz.'; return; }
+    var u = C.upsertDay(S.days, rec);
+    S.days = u.days;
+    var saved = persist();
+    S.pending = null;
+    var note = 'Zapisano poranek (' + rec.date + ', ' + rec.time + ').' + (u.replaced ? ' Zastąpiono dzisiejszy pomiar.' : '');
+    if (!saved) note += ' Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie';
+    if (DEMO) note += ' (demo – tylko w pamięci)';
+    $('saveNote').textContent = note; $('saveNote').hidden = false;
+    log('Zapisano dzień ' + rec.date + (u.replaced ? ' (zastąpiono)' : '') + '.');
+    setFlow('idle');
+    renderToday(); renderHist(); renderStorageWarn(); refreshButtons();
+  }
+
+  // ====================== WYNIK DNIA ======================
+  function pts(n) { return n > 0 ? '+' + n : (n < 0 ? '−' + Math.abs(n) : '0'); }
+  function renderToday() {
+    var st = C.dayStatus(S.days, todayStr()), el = $('dayBody');
+    if (!st.hasRecord) { el.innerHTML = '<p class="empty">Brak pomiaru z dzisiaj. Zrób poranny pomiar, żeby zobaczyć wynik dnia.</p>'; return; }
+    var rec = st.rec, h = '';
+    var hasUsual = st.baselineN >= 1;
+    if (st.scored) {
+      var col = COL[st.color];
+      h += '<div class="score" style="color:' + col + '">' + st.readiness + '<small>%</small></div><div class="scorelbl" style="color:' + col + '">Gotowość · ' + st.color + '</div>';
+    } else h += '<div class="score" style="color:#AAB4BE">—</div><div class="scorelbl" style="color:#AAB4BE">Brak wyniku</div>';
+    if (st.label) h += '<p class="msg warn" style="margin-top:8px">' + esc(st.label) + '</p>';
+    h += '<div class="grid" style="margin-top:14px">' +
+      tile('RMSSD', fmt(rec.rmssd, 0), 'ms') .replace('</div></div>', '</div><div class="s">zwykle ' + (hasUsual ? fmt(st.usual.rmssd, 0) + ' ms' : 'brak danych') + '</div></div>') +
+      tile('Tętno spoczynkowe', fmt(rec.hr, 0), 'bpm').replace('</div></div>', '</div><div class="s">zwykle ' + (hasUsual && isFinite(st.usual.hr) ? fmt(st.usual.hr, 0) + ' bpm' : 'brak danych') + '</div></div>') + '</div>';
+    if (st.scored) {
+      h += '<p class="quad">' + esc(st.quadrant.message) + '</p><p class="rec">' + esc(st.recommendation) + '</p>';
+      var pp = st.points;
+      h += '<ul class="pts"><li><span>Punkt wyjścia (średni wynik z 30 dni)</span><b>' + pp.start + '</b></li>' +
+        '<li><span>HRV ' + fmt(rec.rmssd, 0) + ' ms, zwykle ' + fmt(st.usual.rmssd, 0) + '</span><b>→ ' + pts(pp.hrv) + ' pkt</b></li>' +
+        '<li><span>Tętno ' + fmt(rec.hr, 0) + ' bpm, zwykle ' + fmt(st.usual.hr, 0) + '</span><b>→ ' + pts(pp.hr) + ' pkt</b></li>' +
+        '<li><span>Wynik dnia</span><b>' + st.readiness + '%</b></li></ul>';
+      if (st.r7 && isFinite(st.r7.cvPct)) h += '<p class="small">Zmienność HRV z 7 dni (CV): ' + fmt(st.r7.cvPct, 0) + '%</p>';
+    }
+    h += '<p class="small">Wstępna regeneracja – tylko HRV i tętno. Sen i obciążenie dojdą później.</p>';
+    if (rec.whoopHrv != null) h += '<p class="small">WHOOP tej nocy: ' + fmt(rec.whoopHrv, 0) + ' ms (inna metoda – porównuj trend, nie liczby)</p>';
+    if (rec.quality === 'niska') h += '<p class="small" style="color:#F2A93B">Pomiar zapisany z niską jakością (' + fmt(rec.artifactPct, 1) + '% zakłóceń).</p>';
+    el.innerHTML = h;
+  }
+
+  // ====================== HISTORIA ======================
+  function qLabel(q) { return '<span class="' + QCLS[q] + '">' + esc(q) + '</span>'; }
+  function renderHist() {
+    renderTable();
+    if (!$('panel-hist').hidden) drawHist();
+  }
+  function renderTable() {
+    var body = $('histBody'), all = C.sortDays(S.days).reverse(), h = '';
+    var rows = S.showAll ? all : all.slice(0, 14);
+    $('histEmpty').hidden = all.length > 0;
+    $('btnMoreDays').hidden = all.length <= 14;
+    $('btnMoreDays').textContent = S.showAll ? 'Pokaż tylko ostatnie 14 dni' : 'Pokaż wszystkie dni (' + all.length + ')';
+    rows.forEach(function (d) {
+      var st = C.dayStatus(S.days, d.date), sc = '—';
+      if (st.scored) sc = '<span class="sc" style="color:' + COL[st.color] + '">' + st.readiness + '%</span>' + (st.status === 'kalibracja' ? ' <small>wst.</small>' : '');
+      var p = d.date.split('-');
+      var tags = (d.tags || []).map(function (t) { return '<span class="tg">' + esc(t) + '</span>'; }).join('');
+      var conf = S.delPending === d.date;
+      h += '<tr><td data-label="Data">' + p[2] + '.' + p[1] + '.' + p[0] + ' <small>' + esc(d.time) + '</small></td>' +
+        '<td data-label="RMSSD">' + fmt(d.rmssd, 1) + ' ms</td><td data-label="Tętno">' + (d.hr != null ? fmt(d.hr, 0) : '—') + '</td>' +
+        '<td data-label="Jakość">' + qLabel(d.quality) + '</td><td data-label="Wynik">' + sc + '</td>' +
+        '<td class="c-tags" data-label="Tagi">' + tags + '</td>' +
+        '<td class="c-del"><button class="' + (conf ? 'danger' : '') + '" data-del="' + d.date + '" aria-label="' + (conf ? 'Potwierdź usunięcie dnia ' : 'Usuń dzień ') + d.date + '">' + (conf ? 'Na pewno? Usuń' : 'Usuń') + '</button></td></tr>';
+    });
+    body.innerHTML = h;
+    $$('td.c-tags').forEach(function (td) { if (!td.firstChild) td.removeAttribute('data-label'); });
+  }
+  var delTimer = null;
+  function onDelete(date) {
+    if (S.delPending === date) {
+      S.days = C.removeDay(S.days, date); S.delPending = null; clearTimeout(delTimer);
+      persist(); log('Usunięto dzień ' + date + '.');
+      renderTable(); drawHist(); renderToday(); renderStorageWarn();
+      histMsg('Usunięto dzień ' + date + '.');
+    } else {
+      S.delPending = date; renderTable();
+      clearTimeout(delTimer); delTimer = setTimeout(function () { S.delPending = null; renderTable(); }, 4000);
+      var b = document.querySelector('button[data-del="' + date + '"]'); if (b) b.focus();
+    }
+  }
+  function histMsg(t, cls) { var e = $('histMsg'); e.textContent = t; e.hidden = !t; e.className = 'msg ' + (cls || 'ok'); }
+
+  function drawHist() {
+    var cv = $('histChart'), dpr = window.devicePixelRatio || 1;
+    var w = cv.clientWidth, h = cv.clientHeight;
+    if (!w) return;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    var g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    var today = todayStr(), tn = C.dayNum(today), N = 60, d0 = tn - (N - 1);
+    var padL = 36, padR = 6, padT = 10, padB = 22, pw = w - padL - padR, ph = h - padT - padB;
+    var days = S.days.filter(function (d) { var k = C.dayNum(d.date); return k >= d0 && k <= tn; });
+    var b = C.baseline(S.days, today), hasBand = b.n >= 5;
+    var mx = 40;
+    days.forEach(function (d) { mx = Math.max(mx, d.rmssd, d.whoopHrv || 0); });
+    if (hasBand) mx = Math.max(mx, b.hiMs);
+    mx = Math.ceil(mx * 1.1 / 10) * 10;
+    var slot = pw / N;
+    function X(k) { return padL + (k - d0 + 0.5) * slot; }
+    function Y(v) { return padT + (1 - v / mx) * ph; }
+    g.font = '11px system-ui,sans-serif'; g.lineWidth = 1;
+    var step = mx > 100 ? 40 : (mx > 60 ? 20 : 10);
+    for (var v = 0; v <= mx; v += step) {
+      g.strokeStyle = 'rgba(255,255,255,.12)'; g.beginPath(); g.moveTo(padL, Math.round(Y(v)) + .5); g.lineTo(w - padR, Math.round(Y(v)) + .5); g.stroke();
+      g.fillStyle = '#AAB4BE'; g.textAlign = 'right'; g.fillText(v, padL - 5, Y(v) + 4);
+    }
+    // x labels
+    g.fillStyle = '#AAB4BE';
+    [0, 15, 30, 45, 59].forEach(function (i) {
+      var dt = C.dateFromNum(d0 + i).split('-');
+      g.textAlign = i === 0 ? 'left' : (i === 59 ? 'right' : 'center');
+      g.fillText(i === 59 ? 'dziś' : dt[2] + '.' + dt[1], i === 0 ? padL : (i === 59 ? w - padR : X(d0 + i)), h - 6);
+    });
+    // normal band
+    if (hasBand) {
+      g.fillStyle = 'rgba(46,232,107,.13)'; g.fillRect(padL, Y(b.hiMs), pw, Y(b.loMs) - Y(b.hiMs));
+      g.strokeStyle = 'rgba(46,232,107,.55)'; g.setLineDash([4, 3]);
+      [b.hiMs, b.loMs].forEach(function (m) { g.beginPath(); g.moveTo(padL, Y(m) + .5); g.lineTo(w - padR, Y(m) + .5); g.stroke(); });
+      g.setLineDash([]);
+    }
+    // bars
+    var bw = Math.max(2, Math.min(14, slot * 0.7));
+    days.forEach(function (d) {
+      var x = X(C.dayNum(d.date)) - bw / 2, y = Y(d.rmssd), bh = Y(0) - y;
+      if (d.quality === 'niska') { g.fillStyle = 'rgba(255,77,94,.20)'; g.fillRect(x, y, bw, bh); g.strokeStyle = '#FF4D5E'; g.lineWidth = 1.5; g.strokeRect(x + .75, y + .75, bw - 1.5, bh - 1.5); }
+      else { g.fillStyle = d.quality === 'wysoka' ? '#2D9CFF' : '#F2A93B'; g.fillRect(x, y, bw, bh); }
+    });
+    // 7-day average
+    var pts7 = days.map(function (d) { var r = C.rolling7(S.days, d.date); return { k: C.dayNum(d.date), v: r.meanMs }; }).filter(function (p) { return isFinite(p.v); });
+    g.strokeStyle = '#2CE8B5'; g.lineWidth = 2.5; g.lineJoin = 'round'; g.beginPath();
+    pts7.forEach(function (p, i) { if (i) g.lineTo(X(p.k), Y(p.v)); else g.moveTo(X(p.k), Y(p.v)); });
+    g.stroke();
+    // WHOOP hollow circles
+    g.strokeStyle = '#F2F5F7'; g.lineWidth = 1.5;
+    days.forEach(function (d) { if (d.whoopHrv != null) { g.beginPath(); g.arc(X(C.dayNum(d.date)), Y(d.whoopHrv), 4, 0, 6.3); g.stroke(); } });
+    if (!days.length) { g.fillStyle = '#AAB4BE'; g.textAlign = 'center'; g.font = '14px system-ui,sans-serif'; g.fillText('Brak zapisanych dni', padL + pw / 2, padT + ph / 2); }
+    $('histLegend').innerHTML =
+      '<span><i style="background:#2D9CFF"></i>RMSSD – jakość wysoka</span><span><i style="background:#F2A93B"></i>średnia</span>' +
+      '<span><i style="background:rgba(255,77,94,.2);border:2px solid #FF4D5E"></i>niska</span>' +
+      '<span><i style="background:#2CE8B5;height:4px;vertical-align:3px"></i>średnia 7 dni</span>' +
+      '<span><i style="background:rgba(46,232,107,.25);border:1px dashed #2EE86B"></i>zakres normalny' + (hasBand ? (b.n < 14 ? ' (wstępny, ' + b.n + ' z 14 dni)' : '') : ' (po 5 dniach)') + '</span>' +
+      '<span><i style="border:2px solid #F2F5F7;border-radius:50%"></i>HRV z WHOOP</span>';
+  }
+
+  function exportJson() {
+    var payload = { app: 'forma', version: 1, exportedAt: new Date().toISOString(), days: S.days };
+    download('forma-kopia-' + stamp() + '.json', JSON.stringify(payload, null, 1), 'application/json');
+    histMsg('Wyeksportowano kopię: ' + S.days.length + ' dni.');
+  }
+  function exportDaysCsv() {
+    download('forma-dni-' + stamp() + '.csv', '﻿' + C.daysToCsv(S.days), 'text/csv;charset=utf-8');
+    histMsg('Wyeksportowano CSV: ' + S.days.length + ' dni.');
+  }
+  function importJson(file) {
+    var rd = new FileReader();
+    rd.onerror = function () { histMsg('Nie udało się odczytać pliku.', 'error'); };
+    rd.onload = function () {
+      try {
+        var j = JSON.parse(String(rd.result));
+        var arr = Array.isArray(j) ? j : (j && Array.isArray(j.days) ? j.days : null);
+        if (!arr) throw new Error('brak listy dni');
+        var inc = arr.map(C.sanitizeDay).filter(Boolean);
+        var m = C.mergeDays(S.days, inc);
+        S.days = m.days;
+        var ok = persist();
+        renderHist(); renderToday(); renderStorageWarn();
+        histMsg('Wczytano ' + inc.length + ' dni (nowe: ' + m.added + ', zastąpione: ' + m.replaced + ', pominięte jako błędne: ' + (arr.length - inc.length) + ').' + (ok ? '' : ' Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie'), ok ? 'ok' : 'warn');
+        log('Wczytano kopię: ' + inc.length + ' dni.');
+      } catch (e) { histMsg('Nieprawidłowy plik kopii (' + e.message + ').', 'error'); }
+    };
+    rd.readAsText(file);
+  }
+
+  // ====================== TABS ======================
+  var TABS = ['today', 'hist', 'diag'];
+  function showTab(id, focus) {
+    TABS.forEach(function (t) {
+      var sel = t === id, b = $('tab-' + t);
+      b.setAttribute('aria-selected', sel ? 'true' : 'false'); b.tabIndex = sel ? 0 : -1;
+      $('panel-' + t).hidden = !sel;
+      if (sel && focus) b.focus();
+    });
+    if (id === 'hist') renderHist();
+    if (id === 'diag') drawChart();
+  }
+
+  // ====================== BLUETOOTH ======================
+  function handleHrPacket(p) {
+    if (S.mode === 'RR') {
+      S.rrContactBad = p.contact.supported && !p.contact.detected;
+      S.pkt = (S.pkt || 0) + 1;
+      if (p.rrMs.length) {
+        S.rrSeen = true;
+        p.rrMs.forEach(function (rr) {
+          if (S.dedupe && p.rrMs.length === 1 && C.isStaleRepeat(S.lastRawRr, rr)) {
+            S.dupCount++;
+            if (S.dupCount === 1) log('WHOOP powtarza poprzedni odstęp, gdy w pakiecie nie ma nowego uderzenia. Powtórzenia są pomijane (nie zaniżają HRV).');
+            return;
+          }
+          S.lastRawRr = rr;
+          addInterval(rr, p.hr, 'RR', false);
+        });
+      }
+      else if (p.hr) {
+        S.hr = p.hr;
+        S.hrOnlyCount = (S.hrOnlyCount || 0) + 1;
+        if (!S.rrSeen && S.hrOnlyCount === 20) {
+          log('UWAGA: urządzenie wysyła tętno, ale bez odstępów między uderzeniami (RR).');
+          showError('To urządzenie wysyła samo tętno, bez odstępów między uderzeniami. HRV nie da się z niego policzyć. Potrzebny jest pas piersiowy (np. Polar H10) albo opaska Polar Verity Sense.');
+        }
+      }
+    } else if (p.hr) S.hr = p.hr;
+    renderStats();
+  }
+  function onHrNotify(ev) {
+    var dv = ev.target.value, p;
+    try { p = C.parseHeartRateMeasurement(dv); } catch (e) { log('Błąd parsowania HR: ' + e.message + ' [' + hex(dv) + ']'); return; }
+    handleHrPacket(p);
+  }
+  function onPmdData(ev) {
+    var dv = ev.target.value, f;
+    try { f = C.parsePmdPpiFrame(dv); } catch (e) { log('Błąd parsowania PMD: ' + e.message + ' [' + hex(dv) + ']'); return; }
+    if (!f) { log('PMD dane (inny typ): ' + hex(dv)); return; }
+    if (S.ppiPending) { S.ppiPending = false; $('msgInfo').hidden = true; log('Pierwsze dane PPI odebrane.'); }
+    f.samples.forEach(function (s) {
+      S.ppiSkinBad = s.skinContactSupported && !s.skinContact;
+      addInterval(s.ppiMs, s.hr, 'PPI', s.blocker);
+    });
+    renderStats();
+  }
+  function onPmdControl(ev) {
+    var dv = ev.target.value;
+    var r = C.parseControlPointResponse(dv);
+    log('Control point: ' + hex(dv) + (r ? ' → op ' + r.opCode + ', typ ' + r.type + ', ' + C.pmdErrorText(r.errorCode) : ''));
+    if (r && r.opCode === 2 && r.type === 3 && !r.ok && r.errorCode !== 6) ppiFallback('Błąd startu PPI: ' + C.pmdErrorText(r.errorCode));
+  }
+  function ppiFallback(reason) {
+    if (S.mode !== 'PPI') return;
+    S.mode = 'RR'; S.ppiPending = false;
+    $('msgInfo').hidden = true;
+    log(reason + '. Przełączam na odstępy RR z usługi tętna.');
+    refreshPill();
+  }
+  function onDisconnected() {
+    if (DEMO) return;
+    var was = S.connected, wasMeasuring = !!S.measure;
+    S.connected = false; S.server = null; S.ppiPending = false;
+    $('msgInfo').hidden = true;
+    setPill('Rozłączono', 'err');
+    if (was) log('Rozłączono.');
+    resetBattery();
+    if (wasMeasuring) cancelMeasure('Połączenie z opaską przerwane – pomiar anulowany. Połącz ponownie i powtórz.');
+    refreshButtons();
+  }
+
+  var IFRAME_MSG = 'Plik jest otwarty w podglądzie (np. w Claude), a podgląd blokuje Bluetooth. Pobierz plik na dysk i otwórz go bezpośrednio w Chrome lub Edge: dwuklik na pliku albo przeciągnij go do okna przeglądarki. Adres w pasku powinien zaczynać się od file:///';
+  function describeError(e) {
+    var n = e && e.name, m = e && e.message ? e.message : String(e);
+    if (/permissions policy/i.test(m)) return IFRAME_MSG;
+    if (n === 'NotFoundError' && /service/i.test(m)) return 'Opaska jest połączona, ale nie udostępnia tętna. WHOOP: w aplikacji WHOOP otwórz Ustawienia urządzenia i włącz „HR Broadcast” (nadawanie tętna), potem połącz ponownie. (' + m + ')';
+    if (n === 'NotFoundError') return 'Nie wybrano urządzenia albo nie znaleziono opaski. WHOOP: najpierw włącz „HR Broadcast” w aplikacji WHOOP. Jeśli opaski nadal nie ma na liście, kliknij „Pokaż wszystkie urządzenia”.';
+    if (n === 'NotAllowedError') return 'Brak zgody na Bluetooth lub dostęp zablokowany. Zezwól przeglądarce na Bluetooth i spróbuj ponownie. (' + m + ')';
+    if (n === 'SecurityError') return 'Ze względów bezpieczeństwa Bluetooth jest niedostępny. Otwórz plik w Chrome/Edge (wymagane połączenie bezpieczne lub plik lokalny). (' + m + ')';
+    return 'Błąd: ' + (n ? n + ': ' : '') + m;
+  }
+
+  async function connect(ev, showAll) {
+    showError('');
+    if (window.top !== window.self) { showError(IFRAME_MSG); log('Strona działa w ramce (iframe) – Bluetooth zablokowany.'); return; }
+    if (!navigator.bluetooth) {
+      showError('Ta przeglądarka nie obsługuje Bluetooth. Otwórz plik w Chrome lub Edge na komputerze albo w Chrome na Androidzie (iPhone nie jest obsługiwany).');
+      return;
+    }
+    try {
+      setPill('Łączenie…', 'busy');
+      if (!S.device) {
+        var opts = { optionalServices: ['heart_rate', 'battery_service', PMD_SERVICE, WHOOP_SERVICE] };
+        if (showAll) opts.acceptAllDevices = true;
+        else opts.filters = [{ namePrefix: 'Polar' }, { namePrefix: 'WHOOP' }, { services: ['heart_rate'] }];
+        log(showAll ? 'Szukam: wszystkie urządzenia Bluetooth.' : 'Szukam: Polar, WHOOP i urządzenia z usługą tętna.');
+        S.device = await navigator.bluetooth.requestDevice(opts);
+        S.device.addEventListener('gattserverdisconnected', onDisconnected);
+      }
+      S.name = S.device.name || 'Urządzenie';
+      S.rrSeen = false; S.hrOnlyCount = 0; S.pkt = 0; S.dupCount = 0; S.lastRawRr = null; S.t0 = null;
+      resetBattery();
+      S.dedupe = /WHOOP/i.test(S.name);
+      if (S.dedupe) log('Wykryto WHOOP: włączone pomijanie powtórzonych odstępów.');
+      log('Wybrano urządzenie: ' + S.name);
+      S.server = await S.device.gatt.connect();
+      log('Połączono z GATT.');
+      try {
+        var svcs = await S.server.getPrimaryServices();
+        log('Dostępne usługi: ' + svcs.map(function (s) { return s.uuid.slice(0, 8); }).join(', '));
+      } catch (e) { log('Nie udało się odczytać listy usług: ' + e.message); }
+      // PPI (protokół PMD) tylko dla optycznych czujników Polar; reszta (pasy, inne marki) przez standardowe RR
+      var isBelt = !/Sense|OH1/i.test(S.name);
+      S.mode = isBelt ? 'RR' : 'PPI';
+      log('Tryb: ' + (isBelt ? 'RR (standardowa usługa tętna)' : 'PPI (opaska Polar)'));
+
+      var hrSvc = await S.server.getPrimaryService('heart_rate');
+      var hrCh = await hrSvc.getCharacteristic('heart_rate_measurement');
+      hrCh.addEventListener('characteristicvaluechanged', onHrNotify);
+      await hrCh.startNotifications();
+      log('Subskrypcja tętna (0x2A37) aktywna.');
+
+      S.connected = true;
+      refreshPill(); refreshButtons();
+
+      await initBattery();
+
+      if (!isBelt) await startPpi();
+    } catch (e) {
+      log('Błąd połączenia: ' + (e && e.name) + ' – ' + (e && e.message));
+      showError(describeError(e));
+      if (e && e.name === 'NotFoundError') S.device = null;
+      if (!S.connected) setPill('Niepołączono', '');
+      refreshButtons();
+    }
+  }
+
+  async function startPpi() {
+    try {
+      var pmd = await S.server.getPrimaryService(PMD_SERVICE);
+      var cp = await pmd.getCharacteristic(PMD_CP);
+      var data = await pmd.getCharacteristic(PMD_DATA);
+      S.cp = cp;
+      cp.addEventListener('characteristicvaluechanged', onPmdControl);
+      data.addEventListener('characteristicvaluechanged', onPmdData);
+      await cp.startNotifications();
+      await data.startNotifications();
+      log('Subskrypcja PMD (control point + dane) aktywna.');
+      var cmd = new Uint8Array([0x02, 0x03]);
+      S.ppiPending = true;
+      $('msgInfo').textContent = 'Opaska potrzebuje ok. 25 sekund, zanim wyśle pierwsze odstępy między uderzeniami. Nie ruszaj się.';
+      $('msgInfo').hidden = false;
+      log('Zapis do control point: 02 03 (start PPI).');
+      await cp.writeValueWithResponse(cmd);
+    } catch (e) {
+      log('Błąd uruchomienia PPI: ' + (e && e.name) + ' – ' + (e && e.message));
+      ppiFallback('PPI niedostępne');
+    }
+  }
+
+  async function disconnect() {
+    try {
+      if (S.connected && S.mode === 'PPI' && S.cp) {
+        try { await S.cp.writeValueWithResponse(new Uint8Array([0x03, 0x03])); log('Zapis do control point: 03 03 (stop PPI).'); }
+        catch (e) { log('Stop PPI nieudany: ' + e.message); }
+      }
+      if (S.device && S.device.gatt.connected) S.device.gatt.disconnect();
+    } catch (e) { log('Błąd rozłączania: ' + e.message); }
+    onDisconnected();
+  }
+
+  // ====================== DEMO (synthetic WHOOP, memory only) ======================
+  function startDemo() {
+    S.connected = true; S.mode = 'RR'; S.name = 'WHOOP 4.0 (demo)'; S.dedupe = true; S.dupCount = 0;
+    S.days = C.syntheticDays(C.addDays(todayStr(), -1), 40, 20261125);
+    log('Tryb DEMO: symulowany WHOOP (RR ~1000 ± 45 ms, powtórzenia, artefakty)' + (FAST ? ', pomiar przyspieszony ×' + F : '') + '. Historia: 40 dni syntetycznych, tylko w pamięci.');
+    var n = 0, last = null;
+    function gen() {
+      n++;
+      var rr;
+      if (last != null && Math.random() < 0.17) rr = last; // WHOOP resends the previous RR
+      else {
+        rr = 1010 + Math.round((Math.random() * 2 - 1) * 45);
+        var per = BAD ? 7 : 83;
+        if (n % per === 0) rr = [1600, 380, 2400][Math.floor(n / per) % 3];
+      }
+      last = rr;
+      handleHrPacket({ hr: Math.round(60000 / 1010), contact: { supported: false, detected: false }, rrMs: [rr] });
+    }
+    for (var i = 0; i < 90; i++) { // pre-filled history for Diagnostyka
+      var rr0 = 1010 + Math.round((Math.random() * 2 - 1) * 45);
+      addInterval(rr0, 59, 'RR', false); S.lastRawRr = rr0;
+    }
+    S.beats.forEach(function (b, i, a) { b.w = Date.now() - (a.length - i) * 1000 / F; });
+    S.demoTimer = setInterval(gen, 1000 / F);
+    // simulated battery: starts low, charges slowly unless ?batt=static
+    S.battery = null; setBattery(12);
+    if (!BATT_STATIC) setInterval(function () { if (S.battery < 100) setBattery(S.battery + 1); }, FAST ? 2500 : 60000);
+    refreshPill(); refreshButtons(); renderStats();
+  }
+
+  // ====================== INIT ======================
+  $('btnConnect').addEventListener('click', function (e) { connect(e, false); });
+  $('btnConnectAll').addEventListener('click', function (e) { S.device = null; connect(e, true); });
+  $('btnDisconnect').addEventListener('click', disconnect);
+  $('btnMeasure').addEventListener('click', startMeasure);
+  $('btnMeasureAnyway').addEventListener('click', function () { S.battOverride = true; log('Pomiar mimo niskiej baterii.'); refreshButtons(); startMeasure(); });
+  $('btnMeasureDiag').addEventListener('click', function () { showTab('today'); startMeasure(); });
+  $('btnCancel').addEventListener('click', function () { cancelMeasure(''); });
+  $('btnCsv').addEventListener('click', exportCsv);
+  $('btnMoreDays').addEventListener('click', function () { S.showAll = !S.showAll; renderTable(); });
+  $('btnExpJson').addEventListener('click', exportJson);
+  $('btnExpCsv').addEventListener('click', exportDaysCsv);
+  $('btnImpJson').addEventListener('click', function () { $('fileImport').click(); });
+  $('fileImport').addEventListener('change', function (e) { var f = e.target.files && e.target.files[0]; if (f) importJson(f); e.target.value = ''; });
+  $('histBody').addEventListener('click', function (e) { var b = e.target.closest('button[data-del]'); if (b) onDelete(b.getAttribute('data-del')); });
+  TABS.forEach(function (t, i) {
+    var b = $('tab-' + t);
+    b.addEventListener('click', function () { showTab(t); });
+    b.addEventListener('keydown', function (e) {
+      var j = e.key === 'ArrowRight' ? (i + 1) % 3 : e.key === 'ArrowLeft' ? (i + 2) % 3 : e.key === 'Home' ? 0 : e.key === 'End' ? 2 : -1;
+      if (j >= 0) { e.preventDefault(); showTab(TABS[j], true); }
+    });
+  });
+  window.addEventListener('resize', function () { drawChart(); if (!$('panel-hist').hidden) drawHist(); });
+  setInterval(renderStats, 500);
+  setInterval(tickMeasure, 200);
+  storageProbe();
+  S.days = loadDays();
+  log('Gotowe. Forma – prototyp 0.1.');
+  if (DEMO) startDemo();
+  else if (window.top !== window.self) showError(IFRAME_MSG);
+  else if (!navigator.bluetooth) showError('Ta przeglądarka nie obsługuje Bluetooth. Otwórz plik w Chrome lub Edge na komputerze albo w Chrome na Androidzie (iPhone nie jest obsługiwany).');
+  renderStorageWarn(); renderBattery(); refreshButtons(); renderStats(); renderToday(); renderTable();
+})();
+</script>
+</body>
+</html>
