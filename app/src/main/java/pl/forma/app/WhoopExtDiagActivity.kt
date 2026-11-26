@@ -1,0 +1,1026 @@
+package pl.forma.app
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
+import android.util.TypedValue
+import android.view.View
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import java.io.BufferedWriter
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.OutputStreamWriter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+
+/**
+ * "Diagnostyka WHOOP - tryb rozszerzony": isolated test screen for WHOOP's proprietary BLE service.
+ * READ-ONLY by design: it can only build the commands whitelisted in WhoopExtProtocol.SafeCommand.
+ * It owns its own BluetoothGatt and never touches BleManager / NightService / LiveService (it only READS their state to warn).
+ * Everything GATT-related runs on the main thread (callbacks hop to it first), file writes on one background thread.
+ */
+@SuppressLint("MissingPermission")
+class WhoopExtDiagActivity : AppCompatActivity() {
+
+    private companion object {
+        val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+        const val SCAN_TIMEOUT_MS = 20_000L
+        const val CONNECT_TIMEOUT_MS = 25_000L
+        const val OP_TIMEOUT_MS = 8_000L
+        const val MTU_WANTED = 247
+        const val NO_DATA_CHECK_MS = 7_000L
+        const val CSV_MAX_BYTES = 30L * 1024L * 1024L
+        const val LOG_LINES = 40
+        const val NAME_PREFIX = "WHOOP"
+
+        val BG = Color.parseColor("#0B0E11")
+        val CARD = Color.parseColor("#161B22")
+        val TXT = Color.parseColor("#E6EDF3")
+        val DIM = Color.parseColor("#8B949E")
+        val WARN = Color.parseColor("#F0B429")
+        val BAD = Color.parseColor("#FF7B72")
+        val GOOD = Color.parseColor("#56D364")
+    }
+
+    private val main = Handler(Looper.getMainLooper())
+    private val io: ExecutorService = Executors.newSingleThreadExecutor()
+    private var destroyed = false
+
+    // ---------- BLE state (main thread only) ----------
+    private var gatt: BluetoothGatt? = null
+    private var scanner: BluetoothLeScanner? = null
+    private var scanCb: ScanCallback? = null
+    private var cmdChar: BluetoothGattCharacteristic? = null
+    private val notifyChars = ArrayList<BluetoothGattCharacteristic>()
+    private val assemblers = HashMap<String, WhoopExtProtocol.FrameAssembler>()
+    private val ops = java.util.ArrayDeque<() -> Boolean>()
+    private var opBusy = false
+    private var connected = false
+    private var ready = false
+    private var streaming = false
+    private var seq = 0x40
+
+    // ---------- measured values ----------
+    private var packetCount = 0
+    private var frameCount = 0
+    private var otherFrames = 0
+    private var histCount = 0
+    private var hr: Int? = null
+    private var hrSource = ""
+    private var rr: List<Int> = emptyList()
+    private var tempC: Double? = null
+    private var tempRaw: Int? = null
+    private var spo2: Int? = null
+    private var ax: Double? = null
+    private var ay: Double? = null
+    private var az: Double? = null
+    private var battery: Double? = null
+    private var lastBatch: Long? = null
+    private var seenKinds = HashSet<String>()
+
+    // ---------- CSV ----------
+    private var csv: CsvLog? = null
+    private var csvFile: File? = null
+    private var savedUri: Uri? = null
+    private val isoFmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.US)
+
+    // ---------- views ----------
+    private lateinit var statusView: TextView
+    private lateinit var ownWarnView: TextView
+    private lateinit var servicesView: TextView
+    private lateinit var valuesView: TextView
+    private lateinit var logView: TextView
+    private lateinit var saveInfoView: TextView
+    private lateinit var btnConnect: Button
+    private lateinit var btnScan: Button
+    private lateinit var btnDisconnect: Button
+    private lateinit var btnStart: Button
+    private lateinit var btnStop: Button
+    private lateinit var btnBattery: Button
+    private lateinit var btnHistory: Button
+    private lateinit var btnSave: Button
+    private lateinit var btnShare: Button
+    private val logLines = ArrayDeque<String>()
+    private var refreshPending = false
+
+    private var pendingAfterPermission: (() -> Unit)? = null
+    private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        val act = pendingAfterPermission
+        pendingAfterPermission = null
+        if (neededPermissions().all { hasPerm(it) }) {
+            act?.invoke()
+        } else {
+            setStatus("Brak uprawnień Bluetooth. Zezwól w ustawieniach telefonu (Aplikacje > Forma > Uprawnienia).", BAD)
+        }
+    }
+
+    // =====================================================================================================
+    // lifecycle
+    // =====================================================================================================
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        title = "Diagnostyka WHOOP – tryb rozszerzony"
+        setContentView(buildUi())
+        refreshOwnWarning()
+        updateButtons()
+        renderValues()
+        log(if (WhoopExtProtocol.selfTest()) "Test sumy kontrolnej: OK" else "Test sumy kontrolnej: BŁĄD (nie wysyłaj poleceń)")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshOwnWarning()
+    }
+
+    override fun onDestroy() {
+        destroyed = true
+        stopScanInternal()
+        main.removeCallbacksAndMessages(null)
+        val g = gatt
+        gatt = null
+        if (g != null) {
+            // explicit stop-stream first (best effort), then close shortly after so the write can leave the radio
+            val cc = cmdChar
+            if (streaming && ready && cc != null) {
+                try {
+                    val b = WhoopExtProtocol.buildCommand(WhoopExtProtocol.SafeCommand.STOP_REALTIME, nextSeq())
+                    if (b != null) writeRaw(g, cc, b)
+                } catch (t: Throwable) { /* ignore */ }
+                Handler(Looper.getMainLooper()).postDelayed({ closeQuietly(g) }, 600L)
+            } else {
+                closeQuietly(g)
+            }
+        }
+        val c = csv
+        csv = null
+        if (c != null) c.closeLater()
+        io.shutdown()
+        super.onDestroy()
+    }
+
+    private fun closeQuietly(g: BluetoothGatt) {
+        try { g.disconnect() } catch (t: Throwable) { /* ignore */ }
+        try { g.close() } catch (t: Throwable) { /* ignore */ }
+    }
+
+    // =====================================================================================================
+    // UI
+    // =====================================================================================================
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun text(s: String, sp: Float, color: Int, bold: Boolean = false, mono: Boolean = false): TextView {
+        val t = TextView(this)
+        t.text = s
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
+        t.setTextColor(color)
+        if (bold) t.setTypeface(t.typeface, Typeface.BOLD)
+        if (mono) t.typeface = Typeface.MONOSPACE
+        t.setPadding(0, dp(4), 0, dp(4))
+        return t
+    }
+
+    private fun button(label: String, onClick: () -> Unit): Button {
+        val b = Button(this)
+        b.text = label
+        b.isAllCaps = false
+        b.setOnClickListener { try { onClick() } catch (t: Throwable) { log("Błąd: " + t.javaClass.simpleName) } }
+        val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        lp.topMargin = dp(6)
+        b.layoutParams = lp
+        return b
+    }
+
+    private fun card(vararg children: View): LinearLayout {
+        val l = LinearLayout(this)
+        l.orientation = LinearLayout.VERTICAL
+        l.setBackgroundColor(CARD)
+        l.setPadding(dp(12), dp(8), dp(12), dp(10))
+        val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        lp.topMargin = dp(10)
+        l.layoutParams = lp
+        for (c in children) l.addView(c)
+        return l
+    }
+
+    private fun buildUi(): View {
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.setPadding(dp(16), dp(40), dp(16), dp(32))
+        col.setBackgroundColor(BG)
+
+        col.addView(text("Diagnostyka WHOOP – tryb rozszerzony", 20f, TXT, bold = true))
+        col.addView(
+            card(
+                text("Tryb testowy, tylko odczyt.", 15f, WARN, bold = true),
+                text(
+                    "Ten ekran sprawdza, czy opaska WHOOP 4.0 udostępnia dodatkowe dane (temperatura skóry, ruch, SpO2, bateria, " +
+                        "dane zapisane w pamięci opaski) przez swoją własną usługę Bluetooth. Nic nie jest zmieniane ani kasowane w opasce " +
+                        "– wysyłamy tylko kilka poleceń odczytu.",
+                    13f, TXT
+                ),
+                text(
+                    "Zanim zaczniesz: zatrzymaj pomiar nocny i pomiar na żywo w Formie oraz zamknij aplikację WHOOP. " +
+                        "Opaska zwykle łączy się tylko z jednym telefonem lub aplikacją naraz.",
+                    13f, WARN
+                )
+            )
+        )
+        ownWarnView = text("", 13f, BAD, bold = true)
+        col.addView(ownWarnView)
+
+        statusView = text("Naciśnij „Połącz”.", 14f, TXT, bold = true)
+        btnConnect = button("Połącz") { onConnectClicked(false) }
+        btnScan = button("Szukaj opaski (skan)") { onConnectClicked(true) }
+        btnDisconnect = button("Rozłącz") { userDisconnect() }
+        col.addView(card(statusView, btnConnect, btnScan, btnDisconnect))
+
+        servicesView = text("Usługi opaski: (brak połączenia)", 11f, DIM, mono = true)
+        col.addView(card(text("Usługi i charakterystyki", 14f, TXT, bold = true), servicesView))
+
+        valuesView = text("", 14f, TXT, mono = true)
+        btnStart = button("Start odczytu na żywo") { sendSafe(WhoopExtProtocol.SafeCommand.START_REALTIME) }
+        btnStop = button("Stop") { sendSafe(WhoopExtProtocol.SafeCommand.STOP_REALTIME) }
+        btnBattery = button("Odczytaj baterię") { sendSafe(WhoopExtProtocol.SafeCommand.GET_BATTERY) }
+        btnHistory = button("Pobierz dane z pamięci (próba)") { confirmHistory() }
+        val liveCard = card(text("Odczyty", 14f, TXT, bold = true), valuesView, btnStart, btnStop, btnBattery)
+        if (WhoopExtProtocol.HISTORY_PULL_ENABLED) {
+            liveCard.addView(btnHistory)
+            liveCard.addView(
+                text(
+                    "Pobieranie z pamięci prosi opaskę o wysłanie zapisanych rekordów (tu są temperatura, SpO2 i ruch). " +
+                        "Niczego nie potwierdzamy i nie kasujemy. Aby przerwać, naciśnij „Rozłącz”.",
+                    12f, DIM
+                )
+            )
+        } else {
+            btnHistory.visibility = View.GONE
+            liveCard.addView(text("Pobieranie danych z pamięci jest wyłączone w tej wersji (brak bezpiecznego, udokumentowanego polecenia).", 12f, DIM))
+        }
+        col.addView(liveCard)
+
+        saveInfoView = text("", 12f, DIM)
+        btnSave = button("Zapisz plik w Pobranych") { saveToDownloads() }
+        btnShare = button("Udostępnij plik") { shareSaved() }
+        col.addView(card(text("Plik z surowymi pakietami (CSV)", 14f, TXT, bold = true), saveInfoView, btnSave, btnShare))
+
+        logView = text("", 11f, DIM, mono = true)
+        col.addView(card(text("Dziennik", 14f, TXT, bold = true), logView))
+
+        val sv = ScrollView(this)
+        sv.setBackgroundColor(BG)
+        sv.addView(col)
+        return sv
+    }
+
+    private fun setStatus(s: String, color: Int = TXT) {
+        if (destroyed) return
+        statusView.text = s
+        statusView.setTextColor(color)
+        log(s)
+    }
+
+    private fun updateButtons() {
+        if (destroyed) return
+        btnConnect.isEnabled = !connected && scanner == null
+        btnScan.isEnabled = !connected && scanner == null
+        btnDisconnect.isEnabled = connected || scanner != null
+        btnStart.isEnabled = ready && !streaming
+        btnStop.isEnabled = ready && streaming
+        btnBattery.isEnabled = ready
+        btnHistory.isEnabled = ready
+        btnSave.isEnabled = csvFile != null
+        btnShare.isEnabled = savedUri != null
+    }
+
+    private fun refreshOwnWarning() {
+        if (destroyed) return
+        val parts = ArrayList<String>()
+        try {
+            val st = BleManager.state
+            if (st == "connected" || st == "connecting" || st == "reconnecting") parts.add("Forma jest teraz połączona z opaską (tętno)")
+        } catch (t: Throwable) { /* ignore */ }
+        try {
+            if (Prefs.nightRunning(this)) parts.add("trwa pomiar nocny")
+        } catch (t: Throwable) { /* ignore */ }
+        if (parts.isEmpty()) {
+            ownWarnView.visibility = View.GONE
+        } else {
+            ownWarnView.visibility = View.VISIBLE
+            ownWarnView.text = "Uwaga: " + parts.joinToString("; ") +
+                ". Zatrzymaj to najpierw w Formie, inaczej opaska może odmówić drugiego połączenia. Tego ekranu to nie zatrzyma – nic nie ruszamy."
+        }
+    }
+
+    private fun scheduleRefresh() {
+        if (refreshPending || destroyed) return
+        refreshPending = true
+        main.postDelayed({
+            refreshPending = false
+            if (!destroyed) renderValues()
+        }, 250L)
+    }
+
+    private fun f1(v: Double?, unit: String): String = if (v == null) "?" else String.format(Locale.US, "%.1f", v) + unit
+    private fun f2(v: Double?): String = if (v == null) "?" else String.format(Locale.US, "%.2f", v)
+
+    private fun renderValues() {
+        val sb = StringBuilder()
+        sb.append("Tętno:        ").append(if (hr == null) "?" else hr.toString() + " /min" + hrSource).append('\n')
+        sb.append("RR (ms):      ").append(if (rr.isEmpty()) "?" else rr.joinToString(" ")).append('\n')
+        sb.append("Temp. skóry:  ").append(f1(tempC, " °C"))
+        if (tempRaw != null) sb.append("  (surowo ").append(tempRaw).append(", empirycznie)")
+        sb.append('\n')
+        sb.append("SpO2:         ").append(if (spo2 == null) "?" else "$spo2 %").append(if (spo2 != null) "  (empirycznie)" else "").append('\n')
+        sb.append("Ruch x/y/z:   ").append(f2(ax)).append(" / ").append(f2(ay)).append(" / ").append(f2(az)).append(if (ax != null) " g  (empirycznie)" else "").append('\n')
+        sb.append("Bateria:      ").append(if (battery == null) "?" else f1(battery, " %") + "  (przypuszczalnie)").append('\n')
+        sb.append("Paczka sync:  ").append(lastBatch?.toString() ?: "?").append('\n')
+        sb.append('\n')
+        sb.append("Pakiety (powiadomienia): ").append(packetCount).append('\n')
+        sb.append("Ramki poprawne:          ").append(frameCount).append("  (z pamięci: ").append(histCount).append(", inne: ").append(otherFrames).append(")")
+        var bad = 0
+        var dropped = 0L
+        for (a in assemblers.values) {
+            bad += a.badCrcFrames
+            dropped += a.droppedBytes
+        }
+        if (bad > 0 || dropped > 0) sb.append('\n').append("Błędne CRC: ").append(bad).append(", pominięte bajty: ").append(dropped)
+        valuesView.text = sb.toString()
+        logView.text = logLines.joinToString("\n")
+        val f = csvFile
+        saveInfoView.text = if (f == null) "Plik powstanie po połączeniu." else "Plik: " + f.name + " (" + (f.length() / 1024) + " kB)" +
+            (if (savedUri != null) "\nZapisano w Pobranych/Forma." else "")
+    }
+
+    private fun log(msg: String) {
+        if (destroyed) return
+        val line = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()) + " " + msg
+        logLines.addLast(line)
+        while (logLines.size > LOG_LINES) logLines.removeFirst()
+        csvAppend("INFO", "-", msg)
+        scheduleRefresh()
+    }
+
+    // =====================================================================================================
+    // permissions, scan, connect
+    // =====================================================================================================
+    private fun hasPerm(p: String): Boolean = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
+
+    private fun neededPermissions(): Array<String> =
+        if (Build.VERSION.SDK_INT >= 31) arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+
+    private fun ensurePermissions(then: () -> Unit) {
+        val missing = neededPermissions().filter { !hasPerm(it) }
+        if (missing.isEmpty()) {
+            then()
+        } else {
+            pendingAfterPermission = then
+            permLauncher.launch(missing.toTypedArray())
+        }
+    }
+
+    private fun adapter(): BluetoothAdapter? =
+        (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+
+    private fun onConnectClicked(forceScan: Boolean) {
+        ensurePermissions { startConnectFlow(forceScan) }
+    }
+
+    private fun startConnectFlow(forceScan: Boolean) {
+        refreshOwnWarning()
+        val ad = adapter()
+        if (ad == null || !ad.isEnabled) {
+            setStatus("Bluetooth jest wyłączony. Włącz go i spróbuj ponownie.", BAD)
+            return
+        }
+        resetSession()
+        var remembered: String? = null
+        if (!forceScan) {
+            val id = try { Prefs.preferredId(this) } catch (t: Throwable) { null }
+            val name = try { Prefs.preferredName(this) } catch (t: Throwable) { null }
+            if (id != null && (name == null || name.startsWith(NAME_PREFIX, true))) remembered = id
+        }
+        if (remembered != null) {
+            setStatus("Łączę z zapamiętaną opaską…")
+            connectTo(remembered)
+        } else {
+            startScan()
+        }
+    }
+
+    private fun startScan() {
+        val ad = adapter()
+        val sc = ad?.bluetoothLeScanner
+        if (sc == null) {
+            setStatus("Skaner Bluetooth jest niedostępny.", BAD)
+            return
+        }
+        val cb = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                main.post { handleScanResult(result) }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                main.post {
+                    stopScanInternal()
+                    setStatus("Skanowanie nie powiodło się (kod $errorCode).", BAD)
+                    updateButtons()
+                }
+            }
+        }
+        try {
+            sc.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), cb)
+            scanner = sc
+            scanCb = cb
+            setStatus("Szukam opaski WHOOP (do 20 s)… Opaska musi mieć włączone nadawanie tętna i nie być połączona z innym urządzeniem.")
+            main.postDelayed(scanTimeout, SCAN_TIMEOUT_MS)
+        } catch (t: Throwable) {
+            setStatus("Nie udało się rozpocząć skanowania: " + t.javaClass.simpleName, BAD)
+        }
+        updateButtons()
+    }
+
+    private val scanTimeout = Runnable {
+        if (scanner != null) {
+            stopScanInternal()
+            setStatus("Nie znaleziono opaski WHOOP. Sprawdź, czy jest blisko, ma włączone nadawanie tętna i nie jest połączona z innym urządzeniem.", WARN)
+            updateButtons()
+        }
+    }
+
+    private fun handleScanResult(r: ScanResult) {
+        if (scanner == null || destroyed) return
+        val dev = r.device ?: return
+        val name = r.scanRecord?.deviceName ?: dev.name ?: ""
+        if (!name.startsWith(NAME_PREFIX, true)) return
+        stopScanInternal()
+        setStatus("Znaleziono: $name. Łączę…")
+        connectTo(dev.address)
+    }
+
+    private fun stopScanInternal() {
+        main.removeCallbacks(scanTimeout)
+        try {
+            val cb = scanCb
+            if (cb != null) scanner?.stopScan(cb)
+        } catch (t: Throwable) { /* adapter off etc. */ }
+        scanner = null
+        scanCb = null
+    }
+
+    private fun connectTo(address: String) {
+        val ad = adapter()
+        val dev: BluetoothDevice? = try {
+            if (ad != null && BluetoothAdapter.checkBluetoothAddress(address)) ad.getRemoteDevice(address) else null
+        } catch (t: Throwable) {
+            null
+        }
+        if (dev == null) {
+            setStatus("Nieprawidłowy adres opaski. Użyj „Szukaj opaski (skan)”.", BAD)
+            updateButtons()
+            return
+        }
+        try {
+            gatt = dev.connectGatt(this, false, gattCb, BluetoothDevice.TRANSPORT_LE)
+        } catch (t: Throwable) {
+            gatt = null
+            setStatus("Nie udało się rozpocząć połączenia: " + t.javaClass.simpleName, BAD)
+            updateButtons()
+            return
+        }
+        main.postDelayed(connectTimeout, CONNECT_TIMEOUT_MS)
+        updateButtons()
+    }
+
+    private val connectTimeout = Runnable {
+        if (!connected && gatt != null) {
+            closeSession()
+            setStatus("Opaska nie odpowiada (25 s). Zamknij aplikację WHOOP, zatrzymaj pomiar w Formie i spróbuj ponownie.", BAD)
+        }
+    }
+
+    private fun userDisconnect() {
+        stopScanInternal()
+        val g = gatt
+        if (g != null && streaming && ready) {
+            // explicit stop-stream before leaving, so the band does not keep streaming into nothing
+            sendSafe(WhoopExtProtocol.SafeCommand.STOP_REALTIME)
+            main.postDelayed({ closeSession(); setStatus("Rozłączono.") }, 500L)
+        } else {
+            closeSession()
+            setStatus("Rozłączono.")
+        }
+        updateButtons()
+    }
+
+    /** Fresh counters and a new CSV file for a new connection attempt. */
+    private fun resetSession() {
+        closeSession()
+        packetCount = 0
+        frameCount = 0
+        otherFrames = 0
+        histCount = 0
+        hr = null
+        hrSource = ""
+        rr = emptyList()
+        tempC = null
+        tempRaw = null
+        spo2 = null
+        ax = null
+        ay = null
+        az = null
+        battery = null
+        lastBatch = null
+        seenKinds = HashSet()
+        assemblers.clear()
+        savedUri = null
+        openCsv()
+        updateButtons()
+    }
+
+    private fun closeSession() {
+        main.removeCallbacks(connectTimeout)
+        main.removeCallbacks(opTimeoutRun)
+        ops.clear()
+        opBusy = false
+        val g = gatt
+        gatt = null
+        if (g != null) closeQuietly(g)
+        connected = false
+        ready = false
+        streaming = false
+        cmdChar = null
+        notifyChars.clear()
+        updateButtons()
+    }
+
+    // =====================================================================================================
+    // GATT callbacks (each one hops to the main thread first)
+    // =====================================================================================================
+    private val gattCb = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            main.post {
+                if (destroyed || g !== gatt) {
+                    closeQuietly(g)
+                    return@post
+                }
+                if (newState == BluetoothProfile.STATE_CONNECTED && status == 0) {
+                    main.removeCallbacks(connectTimeout)
+                    connected = true
+                    setStatus("Połączono. Odczytuję usługi opaski…")
+                    updateButtons()
+                    val started = try { g.discoverServices() } catch (t: Throwable) { false }
+                    if (!started) {
+                        closeSession()
+                        setStatus("Nie udało się odczytać usług opaski.", BAD)
+                    }
+                } else {
+                    val wasConnected = connected
+                    closeSession()
+                    setStatus(
+                        if (wasConnected) "Opaska rozłączyła się (kod $status)." else "Nie udało się połączyć (kod $status). Zamknij aplikację WHOOP i spróbuj ponownie.",
+                        BAD
+                    )
+                }
+            }
+        }
+
+        override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+            main.post { if (!destroyed && g === gatt) handleServices(g, status) }
+        }
+
+        override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
+            main.post {
+                if (destroyed || g !== gatt) return@post
+                if (status != 0) log("Włączenie powiadomień nieudane (" + WhoopExtProtocol.shortId(d.characteristic.uuid) + ", kod $status)")
+                opDone()
+            }
+        }
+
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            main.post {
+                if (destroyed || g !== gatt) return@post
+                log("MTU: $mtu (kod $status)")
+                opDone()
+            }
+        }
+
+        override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
+            main.post {
+                if (destroyed || g !== gatt) return@post
+                if (status != 0) log("Zapis polecenia nieudany (kod $status). Opaska może wymagać sparowania w ustawieniach Bluetooth telefonu.")
+                opDone()
+            }
+        }
+
+        @Suppress("DEPRECATION")
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicChanged(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
+            val raw: ByteArray? = try { ch.value?.copyOf() } catch (t: Throwable) { null }
+            if (raw == null) return
+            val v: ByteArray = raw
+            val id = WhoopExtProtocol.shortId(ch.uuid)
+            main.post { if (!destroyed && g === gatt) onRx(id, v) }
+        }
+    }
+
+    private fun handleServices(g: BluetoothGatt, status: Int) {
+        if (status != 0) {
+            closeSession()
+            setStatus("Odczyt usług nieudany (kod $status).", BAD)
+            return
+        }
+        val sb = StringBuilder()
+        var whoopServices = 0
+        cmdChar = null
+        notifyChars.clear()
+        try {
+            for (svc in g.services ?: emptyList()) {
+                val isW = WhoopExtProtocol.isWhoopUuid(svc.uuid)
+                sb.append(if (isW) "* " else "  ").append(svc.uuid.toString()).append('\n')
+                if (isW) whoopServices++
+                for (ch in svc.characteristics) {
+                    val sid = WhoopExtProtocol.shortId(ch.uuid)
+                    sb.append("    ").append(if (isW) WhoopExtProtocol.charName(sid) else sid).append(' ').append(propText(ch.properties)).append('\n')
+                    if (isW) {
+                        if (sid == WhoopExtProtocol.CH_CMD_TO_STRAP) cmdChar = ch
+                        val p = ch.properties
+                        if ((p and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 || (p and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) {
+                            notifyChars.add(ch)
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            sb.append("(błąd odczytu listy usług)")
+        }
+        servicesView.text = sb.toString().ifEmpty { "(brak usług)" }
+        log("Usługi opaski:\n" + sb.toString().replace(',', ';'))
+        if (whoopServices == 0 || notifyChars.isEmpty()) {
+            setStatus("Opaska nie udostępnia rozszerzonej usługi. Nic więcej tu nie zrobimy; możesz się rozłączyć.", WARN)
+            ready = false
+            updateButtons()
+            return
+        }
+        if (cmdChar == null) log("Uwaga: brak charakterystyki poleceń (61080002). Odczyt pasywny zadziała, polecenia nie.")
+        setStatus("Włączam powiadomienia rozszerzonej usługi…")
+        enqueue { g.requestMtu(MTU_WANTED) }
+        for (ch in ArrayList(notifyChars)) {
+            enqueue { enableNotify(g, ch) }
+        }
+        enqueue {
+            onReady()
+            false
+        }
+    }
+
+    private fun propText(p: Int): String {
+        val l = ArrayList<String>()
+        if ((p and BluetoothGattCharacteristic.PROPERTY_READ) != 0) l.add("odczyt")
+        if ((p and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0) l.add("zapis")
+        if ((p and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) l.add("zapis-bez-odp")
+        if ((p and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0) l.add("notify")
+        if ((p and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) l.add("indicate")
+        return "[" + l.joinToString(" ") + "]"
+    }
+
+    private fun onReady() {
+        if (destroyed || gatt == null) return
+        ready = true
+        setStatus("Gotowe. Rozszerzona usługa WHOOP jest dostępna. Wybierz odczyt poniżej.", GOOD)
+        updateButtons()
+    }
+
+    // =====================================================================================================
+    // GATT operation queue (main thread). Every started operation must end in opDone(); a timeout covers lost callbacks.
+    // =====================================================================================================
+    private fun enqueue(op: () -> Boolean) {
+        ops.add(op)
+        pump()
+    }
+
+    private fun pump() {
+        if (opBusy || destroyed) return
+        val op = ops.poll() ?: return
+        opBusy = true
+        main.removeCallbacks(opTimeoutRun)
+        main.postDelayed(opTimeoutRun, OP_TIMEOUT_MS)
+        val started = try { op() } catch (t: Throwable) { false }
+        if (!started) {
+            main.removeCallbacks(opTimeoutRun)
+            opBusy = false
+            pump()
+        }
+    }
+
+    private fun opDone() {
+        main.removeCallbacks(opTimeoutRun)
+        opBusy = false
+        pump()
+    }
+
+    private val opTimeoutRun = Runnable {
+        if (opBusy) {
+            opBusy = false
+            pump()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun enableNotify(g: BluetoothGatt, ch: BluetoothGattCharacteristic): Boolean {
+        val cccd = ch.getDescriptor(CCCD) ?: return false
+        g.setCharacteristicNotification(ch, true)
+        val p = ch.properties
+        val indicate = (p and BluetoothGattCharacteristic.PROPERTY_NOTIFY) == 0 && (p and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+        cccd.value = if (indicate) BluetoothGattDescriptor.ENABLE_INDICATION_VALUE else BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        return g.writeDescriptor(cccd)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun writeRaw(g: BluetoothGatt, ch: BluetoothGattCharacteristic, bytes: ByteArray): Boolean {
+        ch.writeType =
+            if ((ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        ch.value = bytes
+        return g.writeCharacteristic(ch)
+    }
+
+    private fun nextSeq(): Int {
+        seq = (seq + 1) and 0xFF
+        return seq
+    }
+
+    // =====================================================================================================
+    // commands (SAFE-READ only: the type system allows nothing else)
+    // =====================================================================================================
+    private fun sendSafe(cmd: WhoopExtProtocol.SafeCommand) {
+        val g = gatt
+        val ch = cmdChar
+        if (g == null || ch == null || !ready) {
+            log("Polecenie pominięte: brak gotowego połączenia.")
+            return
+        }
+        val bytes = WhoopExtProtocol.buildCommand(cmd, nextSeq())
+        if (bytes == null) {
+            log("Polecenie wyłączone w tej wersji: " + cmd.label)
+            return
+        }
+        csvAppend("TX", WhoopExtProtocol.CH_CMD_TO_STRAP, WhoopExtProtocol.hex(bytes))
+        log("Wysyłam: " + cmd.label)
+        enqueue { writeRaw(g, ch, bytes) }
+        when (cmd) {
+            WhoopExtProtocol.SafeCommand.START_REALTIME -> {
+                streaming = true
+                expectData("odczyt na żywo")
+            }
+            WhoopExtProtocol.SafeCommand.STOP_REALTIME -> streaming = false
+            WhoopExtProtocol.SafeCommand.GET_BATTERY -> expectData("bateria")
+            WhoopExtProtocol.SafeCommand.REQUEST_HISTORY -> expectData("dane z pamięci")
+        }
+        updateButtons()
+    }
+
+    /** If no notification at all arrives within a few seconds, say so (instead of staring at "?"). */
+    private fun expectData(what: String) {
+        val before = packetCount
+        main.postDelayed({
+            if (!destroyed && ready && packetCount == before) {
+                log("Brak odpowiedzi na: $what (7 s). Opaska mogła zignorować polecenie albo wymaga sparowania.")
+            }
+        }, NO_DATA_CHECK_MS)
+    }
+
+    private fun confirmHistory() {
+        if (!ready) return
+        AlertDialog.Builder(this)
+            .setTitle("Dane z pamięci opaski")
+            .setMessage(
+                "Opaska zostanie poproszona o wysłanie zapisanych rekordów. Nic nie jest kasowane ani potwierdzane, " +
+                    "ale transfer może potrwać i zużyć trochę baterii. Kontynuować?"
+            )
+            .setPositiveButton("Tak, spróbuj") { _, _ -> sendSafe(WhoopExtProtocol.SafeCommand.REQUEST_HISTORY) }
+            .setNegativeButton("Anuluj", null)
+            .show()
+    }
+
+    // =====================================================================================================
+    // receive path
+    // =====================================================================================================
+    private fun onRx(charId: String, data: ByteArray) {
+        packetCount++
+        csvAppend("RX", charId, WhoopExtProtocol.hex(data))
+        try {
+            val asm = assemblers.getOrPut(charId) { WhoopExtProtocol.FrameAssembler() }
+            for (payload in asm.feed(data)) {
+                frameCount++
+                apply(WhoopExtProtocol.decode(payload), payload)
+            }
+        } catch (t: Throwable) {
+            log("Błąd dekodowania: " + t.javaClass.simpleName)
+        }
+        scheduleRefresh()
+    }
+
+    private fun apply(d: WhoopExtProtocol.Decoded, payload: ByteArray) {
+        if (payload.isEmpty()) return
+        if (seenKinds.add(d.kind)) {
+            log("Pierwszy pakiet typu: " + d.kind + " (typ 0x" + Integer.toHexString(payload[0].toInt() and 0xFF) + ", " + payload.size + " B) " + d.info)
+        }
+        when (d.kind) {
+            "żywe" -> {
+                if (d.hr != null) { hr = d.hr; hrSource = " (na żywo)" }
+                if (d.rr.isNotEmpty()) rr = d.rr
+            }
+            "pamięć" -> {
+                histCount++
+                if (d.hr != null) { hr = d.hr; hrSource = " (z pamięci)" }
+                if (d.rr.isNotEmpty()) rr = d.rr
+                if (d.tempRaw != null) tempRaw = d.tempRaw
+                if (d.tempC != null) tempC = d.tempC
+                if (d.spo2 != null) spo2 = d.spo2
+                if (d.ax != null && d.ay != null && d.az != null) { ax = d.ax; ay = d.ay; az = d.az }
+            }
+            "synchronizacja" -> if (d.batchNo != null) lastBatch = d.batchNo
+            "odpowiedź" -> if (d.batteryPct != null) battery = d.batteryPct
+            else -> otherFrames++
+        }
+    }
+
+    // =====================================================================================================
+    // CSV of raw packets
+    // =====================================================================================================
+    private inner class CsvLog(val file: File) {
+        private val w = BufferedWriter(OutputStreamWriter(FileOutputStream(file, true), Charsets.UTF_8))
+        private var lines = 0
+        private var bytes = 0L
+
+        init {
+            write("time_iso,epoch_ms,dir,characteristic,hex_or_text")
+        }
+
+        private fun write(line: String) {
+            try {
+                if (bytes > CSV_MAX_BYTES) return
+                w.write(line)
+                w.write("\n")
+                bytes += line.length + 1
+                lines++
+                if (lines % 25 == 0) w.flush()
+            } catch (t: Throwable) { /* disk full etc.: keep the screen alive */ }
+        }
+
+        fun append(line: String) { io.execute { write(line) } }
+
+        fun closeLater() {
+            io.execute {
+                try { w.flush() } catch (t: Throwable) { /* ignore */ }
+                try { w.close() } catch (t: Throwable) { /* ignore */ }
+            }
+        }
+
+        fun flushNow() {
+            try { w.flush() } catch (t: Throwable) { /* ignore */ }
+        }
+    }
+
+    private fun openCsv() {
+        csv?.closeLater()
+        try {
+            val name = "whoop_ext_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".csv"
+            val f = File(filesDir, name)
+            csvFile = f
+            csv = CsvLog(f)
+        } catch (t: Throwable) {
+            csv = null
+            csvFile = null
+            log("Nie udało się utworzyć pliku CSV.")
+        }
+    }
+
+    private fun csvAppend(dir: String, charId: String, content: String) {
+        val c = csv ?: return
+        val now = System.currentTimeMillis()
+        val clean = content.replace('\n', ' ').replace(',', ';')
+        val name = if (charId == "-") "-" else WhoopExtProtocol.charName(charId)
+        c.append(isoFmt.format(Date(now)) + "," + now + "," + dir + "," + name + "," + clean)
+    }
+
+    // =====================================================================================================
+    // save to Downloads / share (no FileProvider needed: MediaStore gives a content:// URI)
+    // =====================================================================================================
+    private fun saveToDownloads() {
+        val f = csvFile
+        val c = csv
+        if (f == null || c == null) {
+            log("Nie ma jeszcze pliku do zapisania.")
+            return
+        }
+        log("Zapisuję plik…")
+        io.execute {
+            try {
+                c.flushNow()
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val uri = saveViaMediaStore(f)
+                    runOnUiThread {
+                        if (destroyed) return@runOnUiThread
+                        if (uri != null) {
+                            savedUri = uri
+                            setStatus("Zapisano: Pobrane/Forma/" + f.name, GOOD)
+                        } else {
+                            setStatus("Nie udało się zapisać pliku w Pobranych.", BAD)
+                        }
+                        updateButtons()
+                        renderValues()
+                    }
+                } else {
+                    val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                    if (dir == null) {
+                        runOnUiThread { if (!destroyed) setStatus("Brak miejsca do zapisu pliku.", BAD) }
+                    } else {
+                        dir.mkdirs()
+                        val out = File(dir, f.name)
+                        FileInputStream(f).use { input -> FileOutputStream(out).use { o -> input.copyTo(o) } }
+                        runOnUiThread {
+                            if (!destroyed) {
+                                setStatus("Zapisano: " + out.absolutePath, GOOD)
+                                updateButtons()
+                            }
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                runOnUiThread { if (!destroyed) setStatus("Zapis pliku nieudany: " + t.javaClass.simpleName, BAD) }
+            }
+        }
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private fun saveViaMediaStore(src: File): Uri? {
+        val values = ContentValues()
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, src.name)
+        values.put(MediaStore.MediaColumns.MIME_TYPE, "text/csv")
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Forma")
+        values.put(MediaStore.MediaColumns.IS_PENDING, 1)
+        val resolver = contentResolver
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+        val out = resolver.openOutputStream(uri)
+        if (out == null) {
+            resolver.delete(uri, null, null)
+            return null
+        }
+        out.use { o -> FileInputStream(src).use { input -> input.copyTo(o) } }
+        val done = ContentValues()
+        done.put(MediaStore.MediaColumns.IS_PENDING, 0)
+        resolver.update(uri, done, null, null)
+        return uri
+    }
+
+    private fun shareSaved() {
+        val uri = savedUri ?: return
+        try {
+            val i = Intent(Intent.ACTION_SEND)
+            i.type = "text/csv"
+            i.putExtra(Intent.EXTRA_STREAM, uri)
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(Intent.createChooser(i, "Udostępnij plik CSV"))
+        } catch (t: Throwable) {
+            log("Nie udało się otworzyć udostępniania: " + t.javaClass.simpleName)
+        }
+    }
+}

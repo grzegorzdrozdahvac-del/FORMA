@@ -17,6 +17,7 @@ object Notifications {
     const val NUDGE_ID = 4003
     const val ALERT_ID = 4004
     const val REMINDER_ID = 4005
+    const val BEDTIME_ID = 4006
 
     fun ensureChannels(ctx: Context) {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

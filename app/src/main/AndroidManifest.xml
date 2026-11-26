@@ -131,6 +131,10 @@
             android:name=".ReminderReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".BedtimeReceiver"
+            android:exported="false" />
+
         <!-- Boot / app update: re-arms step alarm, nudges, tip reminder, wake alarm. System broadcasts reach a non-exported receiver, so exported=false is the correct (and documented) pattern. -->
         <receiver
             android:name=".BootReceiver"
@@ -141,5 +145,16 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+            <activity
+            android:name=".WhoopExtDiagActivity"
+            android:exported="true"
+            android:label="Forma – test WHOOP"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
     </application>
 </manifest>

@@ -120,4 +120,18 @@ object Prefs {
     fun clearReminder(ctx: Context) {
         sp(ctx).edit().remove("reminder_at").apply()
     }
+
+    // ---------- bedtime reminder ("pora spać"): hh:mm, repeats daily, re-armed after a reboot ----------
+    fun bedAt(ctx: Context): String = sp(ctx).getString("bed_at", "") ?: ""
+    fun bedTitle(ctx: Context): String = sp(ctx).getString("bed_title", "Pora spać") ?: "Pora spać"
+    fun bedText(ctx: Context): String = sp(ctx).getString("bed_text", "") ?: ""
+    fun bedRoute(ctx: Context): String = sp(ctx).getString("bed_route", "#/sen") ?: "#/sen"
+
+    fun setBed(ctx: Context, hhmm: String, title: String, text: String, route: String) {
+        sp(ctx).edit().putString("bed_at", hhmm).putString("bed_title", title).putString("bed_text", text).putString("bed_route", route).apply()
+    }
+
+    fun clearBed(ctx: Context) {
+        sp(ctx).edit().remove("bed_at").apply()
+    }
 }

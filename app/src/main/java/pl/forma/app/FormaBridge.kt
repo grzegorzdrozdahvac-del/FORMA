@@ -242,6 +242,25 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
         return ok()
     }
 
+    /** Daily "pora spać" reminder at hh:mm (30 min before the target bedtime; the web app sends the time whenever it changes). */
+    @JavascriptInterface
+    fun scheduleBedtimeReminder(hhmm: String, title: String, text: String, route: String): String {
+        if (!Regex("^\\d{2}:\\d{2}$").matches(hhmm)) return err("Nieprawidłowa godzina.")
+        val r: String = if (Regex("^#/[a-z/]+$").matches(route)) route else "#/dzis"
+        return try {
+            BedtimeReceiver.schedule(ctx, hhmm, title.take(60), text.take(160), r)
+            ok()
+        } catch (e: Exception) {
+            err("Nie udało się ustawić przypomnienia.")
+        }
+    }
+
+    @JavascriptInterface
+    fun cancelBedtimeReminder(): String {
+        BedtimeReceiver.cancel(ctx)
+        return ok()
+    }
+
     @JavascriptInterface
     fun requestStepsPermission(): String {
         if (Build.VERSION.SDK_INT >= 29 && !StepCounter.permitted(ctx)) {
