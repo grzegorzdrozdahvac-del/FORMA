@@ -317,6 +317,36 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
         return if (BleManager.connectPreferred()) ok() else err("Brak zapamiętanej opaski.")
     }
 
+    /** Urządzenia: the default / remembered band follows the user's choice. */
+    @JavascriptInterface
+    fun setPreferredBand(id: String, name: String): String {
+        if (id.isEmpty()) return err("Brak identyfikatora urządzenia.")
+        Prefs.setPreferred(ctx, id, name)
+        return ok()
+    }
+
+    /** Urządzenia -> "Zapomnij urządzenie". */
+    @JavascriptInterface
+    fun forgetBand(): String {
+        Prefs.clearPreferred(ctx)
+        return ok()
+    }
+
+    /** Raport tygodnia -> "Eksportuj PDF": the system print dialog of the WebView (it offers "Zapisz jako PDF"; the web print stylesheet hides the rest). */
+    @JavascriptInterface
+    fun printPage(): String {
+        activity.runOnUiThread {
+            try {
+                val pm = activity.getSystemService(android.content.Context.PRINT_SERVICE) as android.print.PrintManager
+                val name = "Forma - raport tygodnia"
+                pm.print(name, webView.createPrintDocumentAdapter(name), android.print.PrintAttributes.Builder().build())
+            } catch (e: Exception) {
+                BleManager.notifyError("Nie można otworzyć drukowania. Zrób zrzut ekranu raportu.")
+            }
+        }
+        return ok()
+    }
+
     /** Connection log ring buffer: [{t, kind, code, reason, attempt}], oldest first. */
     @JavascriptInterface
     fun getConnectionLog(): String = BleManager.connectionLogJson().toString()

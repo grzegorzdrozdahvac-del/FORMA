@@ -21,6 +21,11 @@ object Prefs {
         sp(ctx).edit().putString("preferred_id", id).putString("preferred_name", name).apply()
     }
 
+    /** "Zapomnij urządzenie": nothing is remembered afterwards, so connectPreferred() has no target. */
+    fun clearPreferred(ctx: Context) {
+        sp(ctx).edit().remove("preferred_id").remove("preferred_name").remove("last_device_id").remove("last_device_name").apply()
+    }
+
     fun setLastDevice(ctx: Context, id: String, name: String?) {
         sp(ctx).edit().putString("last_device_id", id).putString("last_device_name", name).apply()
     }

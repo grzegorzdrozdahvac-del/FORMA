@@ -6,6 +6,8 @@ import android.content.Intent
 import android.net.Uri
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
+import androidx.health.connect.client.records.BloodGlucoseRecord
+import androidx.health.connect.client.records.BloodPressureRecord
 import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
@@ -23,6 +25,8 @@ import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
 import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
+import androidx.health.connect.client.units.BloodGlucose
+import androidx.health.connect.client.units.Pressure
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -59,7 +63,8 @@ object HealthConnectManager {
         P + "READ_ACTIVE_CALORIES_BURNED", P + "READ_TOTAL_CALORIES_BURNED"
     )
     val WRITE_PERMISSIONS: Set<String> = setOf(
-        P + "WRITE_HEART_RATE_VARIABILITY", P + "WRITE_RESTING_HEART_RATE", P + "WRITE_EXERCISE", P + "WRITE_HEART_RATE", P + "WRITE_SLEEP"
+        P + "WRITE_HEART_RATE_VARIABILITY", P + "WRITE_RESTING_HEART_RATE", P + "WRITE_EXERCISE", P + "WRITE_HEART_RATE", P + "WRITE_SLEEP",
+        P + "WRITE_BLOOD_PRESSURE", P + "WRITE_BLOOD_GLUCOSE"
     )
     val ALL_PERMISSIONS: Set<String> = READ_PERMISSIONS + WRITE_PERMISSIONS
 
@@ -541,6 +546,8 @@ object HealthConnectManager {
             "exercise" -> P + "WRITE_EXERCISE"
             "hr" -> P + "WRITE_HEART_RATE"
             "sleep" -> P + "WRITE_SLEEP"
+            "bp" -> P + "WRITE_BLOOD_PRESSURE"
+            "glucose" -> P + "WRITE_BLOOD_GLUCOSE"
             else -> null
         }
     }
@@ -604,6 +611,27 @@ object HealthConnectManager {
                 if (!end.isAfter(start)) null
                 else SleepSessionRecord(
                     startTime = start, startZoneOffset = off, endTime = end, endZoneOffset = off, title = "Sen (Forma)", metadata = md
+                )
+            }
+            "bp" -> {
+                // manual entry typed by the user (Zdrowie serca); mmHg
+                val sys = j.optDouble("sys", Double.NaN)
+                val dia = j.optDouble("dia", Double.NaN)
+                if (sys.isNaN() || dia.isNaN() || sys < 60.0 || sys > 260.0 || dia < 30.0 || dia > 160.0 || sys <= dia) null
+                else BloodPressureRecord(
+                    time = Instant.ofEpochMilli(j.getLong("t")), zoneOffset = off,
+                    systolic = Pressure.millimetersOfMercury(sys), diastolic = Pressure.millimetersOfMercury(dia), metadata = md
+                )
+            }
+            "glucose" -> {
+                // manual entry typed by the user (Zdrowie serca); mg/dL, fasting or after a meal
+                val mg = j.optDouble("mgdl", Double.NaN)
+                if (mg.isNaN() || mg < 20.0 || mg > 600.0) null
+                else BloodGlucoseRecord(
+                    time = Instant.ofEpochMilli(j.getLong("t")), zoneOffset = off,
+                    level = BloodGlucose.milligramsPerDeciliter(mg),
+                    relationToMeal = if (j.optString("rel") == "fasting") BloodGlucoseRecord.RELATION_TO_MEAL_FASTING else BloodGlucoseRecord.RELATION_TO_MEAL_AFTER_MEAL,
+                    metadata = md
                 )
             }
             else -> null
