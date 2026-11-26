@@ -13,6 +13,14 @@ object Prefs {
     fun lastDeviceId(ctx: Context): String? = sp(ctx).getString("last_device_id", null)
     fun lastDeviceName(ctx: Context): String? = sp(ctx).getString("last_device_name", null)
 
+    /** The band the user chose (auto-connect target). Falls back to the last connected device for installs that predate it. */
+    fun preferredId(ctx: Context): String? = sp(ctx).getString("preferred_id", null) ?: lastDeviceId(ctx)
+    fun preferredName(ctx: Context): String? = sp(ctx).getString("preferred_name", null) ?: lastDeviceName(ctx)
+
+    fun setPreferred(ctx: Context, id: String, name: String?) {
+        sp(ctx).edit().putString("preferred_id", id).putString("preferred_name", name).apply()
+    }
+
     fun setLastDevice(ctx: Context, id: String, name: String?) {
         sp(ctx).edit().putString("last_device_id", id).putString("last_device_name", name).apply()
     }
@@ -37,5 +45,60 @@ object Prefs {
 
     fun clearNight(ctx: Context) {
         sp(ctx).edit().putBoolean("night_running", false).remove("night_id").apply()
+    }
+
+    // ---------- Etap 4: steps, nudges, reminders ----------
+    fun stepsTrack(ctx: Context): Boolean = sp(ctx).getBoolean("steps_track", false)
+    fun nudgeOn(ctx: Context): Boolean = sp(ctx).getBoolean("nudge_on", false)
+    fun nudgeFrom(ctx: Context): Int = sp(ctx).getInt("nudge_from", 9)
+    fun nudgeTo(ctx: Context): Int = sp(ctx).getInt("nudge_to", 20)
+
+    /** ISO weekdays 1 (Monday) .. 7 (Sunday). */
+    fun nudgeDays(ctx: Context): Set<Int> {
+        val raw: String = sp(ctx).getString("nudge_days", "1,2,3,4,5") ?: "1,2,3,4,5"
+        val out = HashSet<Int>()
+        for (part in raw.split(",")) {
+            val d = part.trim().toIntOrNull()
+            if (d != null && d in 1..7) out.add(d)
+        }
+        return out
+    }
+
+    fun setNudgeSettings(ctx: Context, track: Boolean, nudge: Boolean, from: Int, to: Int, days: String) {
+        sp(ctx).edit()
+            .putBoolean("steps_track", track || nudge)
+            .putBoolean("nudge_on", nudge)
+            .putInt("nudge_from", from)
+            .putInt("nudge_to", to)
+            .putString("nudge_days", days)
+            .apply()
+    }
+
+    /** Last step counter total that is already stored in steps.csv (-1 = none yet). */
+    fun stepsLastTotal(ctx: Context): Long = sp(ctx).getLong("steps_last_total", -1L)
+    fun setStepsLastTotal(ctx: Context, total: Long) { sp(ctx).edit().putLong("steps_last_total", total).apply() }
+
+    fun nudgeCount(ctx: Context, dayKey: Int): Int {
+        val p = sp(ctx)
+        return if (p.getInt("nudge_day", 0) == dayKey) p.getInt("nudge_count", 0) else 0
+    }
+
+    fun incNudge(ctx: Context, dayKey: Int) {
+        val n = nudgeCount(ctx, dayKey) + 1
+        sp(ctx).edit().putInt("nudge_day", dayKey).putInt("nudge_count", n).apply()
+    }
+
+    fun snoozeBase(ctx: Context): Long = sp(ctx).getLong("snooze_base", -1L)
+    fun setSnoozeBase(ctx: Context, total: Long) { sp(ctx).edit().putLong("snooze_base", total).apply() }
+
+    /** The web app says a workout is running; the flag expires after 6 h in case the app died without clearing it. */
+    fun workoutRunning(ctx: Context): Boolean {
+        val p = sp(ctx)
+        if (!p.getBoolean("workout_running", false)) return false
+        return System.currentTimeMillis() - p.getLong("workout_running_at", 0L) < 6L * 3_600_000L
+    }
+
+    fun setWorkoutRunning(ctx: Context, running: Boolean) {
+        sp(ctx).edit().putBoolean("workout_running", running).putLong("workout_running_at", System.currentTimeMillis()).apply()
     }
 }

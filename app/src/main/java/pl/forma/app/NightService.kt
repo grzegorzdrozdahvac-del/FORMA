@@ -148,6 +148,7 @@ class NightService : Service() {
         if (wakeAtMs > now) WakeAlarm.schedule(this, wakeAtMs) else handler.post { finishNight() }
 
         BleManager.addListener(listener)
+        BleManager.setNightUse(true) // BALANCED connection priority at night: saves the band's battery
         if (BleManager.isConnected()) checkLowBattery() else connectNow()
         handler.postDelayed(flushTick, 30_000L)
         handler.postDelayed(notifTick, 60_000L)
@@ -155,13 +156,13 @@ class NightService : Service() {
         BleManager.notifyNight("started", id)
     }
 
+    /** BleManager retries by itself (backoff, autoConnect) while the connection is wanted; this only starts it when nothing is going on. */
     private fun connectNow() {
-        val addr = Prefs.lastDeviceId(this)
-        if (addr == null) {
-            BleManager.notifyError("Brak zapamiętanej opaski. Połącz opaskę w Formie przed startem nocy.")
-            return
+        if (BleManager.state == "disconnected") {
+            if (!BleManager.connectPreferred()) {
+                BleManager.notifyError("Brak zapamiętanej opaski. Połącz opaskę w Formie przed startem nocy.")
+            }
         }
-        if (BleManager.state == "disconnected") BleManager.connect(addr)
     }
 
     private val listener = object : BleManager.Listener {
@@ -210,8 +211,7 @@ class NightService : Service() {
     private val reconnectTick = Runnable {
         if (running && !stopping && !BleManager.isConnected()) {
             attempt++
-            val addr = Prefs.lastDeviceId(this)
-            if (addr != null && BleManager.state == "disconnected") BleManager.connect(addr)
+            if (BleManager.state == "disconnected" && BleManager.connectPreferred()) { /* BleManager supervises it from here */ }
             else scheduleReconnect()
         }
     }
@@ -254,6 +254,7 @@ class NightService : Service() {
         running = false
         handler.removeCallbacksAndMessages(null)
         BleManager.removeListener(listener)
+        BleManager.setNightUse(false)
         val id = currentId
         writer?.close(System.currentTimeMillis())
         writer = null
@@ -280,6 +281,7 @@ class NightService : Service() {
         if (running) writer?.flush()
         handler.removeCallbacksAndMessages(null)
         BleManager.removeListener(listener)
+        BleManager.setNightUse(false)
         releaseWakeLock()
         if (instance === this) instance = null
         super.onDestroy()

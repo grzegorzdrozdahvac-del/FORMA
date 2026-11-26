@@ -83,6 +83,11 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
             val o = ev("state")
             o.put("state", state)
             o.put("name", name ?: JSONObject.NULL)
+            if (state == "reconnecting") {
+                o.put("attempt", BleManager.reconnectAttempt)
+                o.put("reason", BleManager.lastReason ?: JSONObject.NULL)
+                o.put("code", BleManager.lastStatus ?: JSONObject.NULL)
+            }
             emit(o)
         }
 
@@ -154,6 +159,13 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
 
     fun emitAppResumed() { emit(ev("appResumed")) }
 
+    /** Separate from the Bluetooth 'permissions' event: a refused step permission must not show the Bluetooth error. */
+    fun emitStepsPermission() {
+        val o = ev("stepsPermission")
+        o.put("granted", StepCounter.permitted(ctx))
+        emit(o)
+    }
+
     private fun btPermissionsGranted(): Boolean = BleManager.hasScanPermission() && BleManager.hasConnectPermission()
 
     private fun notificationsGranted(): Boolean =
@@ -181,6 +193,86 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
         } else {
             activity.runOnUiThread { activity.askPermissions(missing.toTypedArray()) }
         }
+        return ok()
+    }
+
+    // ---------- Etap 4: notifications, reminders, steps ----------
+    /** Alarm notification on the high-importance channel; the route (e.g. "#/alarm") opens on tap. */
+    @JavascriptInterface
+    fun notify(title: String, text: String, route: String): String {
+        if (!notificationsGranted()) return err("Brak zgody na powiadomienia.")
+        val r: String = if (Regex("^#/[a-z/]+$").matches(route)) route else "#/dzis"
+        Notifications.post(ctx, Notifications.ALERT_ID, title, text, r)
+        return ok()
+    }
+
+    /** One-shot reminder at the next hh:mm (AlarmManager.setAndAllowWhileIdle, may be a few minutes late). */
+    @JavascriptInterface
+    fun scheduleReminder(hhmm: String, title: String, text: String, route: String): String {
+        if (!Regex("^\\d{2}:\\d{2}$").matches(hhmm)) return err("Nieprawidłowa godzina.")
+        val r: String = if (Regex("^#/[a-z/]+$").matches(route)) route else "#/dzis"
+        return try {
+            val tomorrow = ReminderReceiver.schedule(ctx, hhmm, title, text, r)
+            val o = JSONObject()
+            o.put("ok", true)
+            o.put("tomorrow", tomorrow)
+            o.toString()
+        } catch (e: Exception) {
+            err("Nie udało się ustawić przypomnienia.")
+        }
+    }
+
+    @JavascriptInterface
+    fun cancelReminder(): String {
+        ReminderReceiver.cancel(ctx)
+        return ok()
+    }
+
+    @JavascriptInterface
+    fun requestStepsPermission(): String {
+        if (Build.VERSION.SDK_INT >= 29 && !StepCounter.permitted(ctx)) {
+            activity.runOnUiThread { activity.askStepsPermission() }
+        } else {
+            emitStepsPermission()
+        }
+        return ok()
+    }
+
+    /** { available, permission, tracking, hourly:[{t,steps}], daily:[{date,steps}] } from the local day fromIso. */
+    @JavascriptInterface
+    fun getSteps(fromIso: String): String = StepCounter.toJson(ctx, fromIso).toString()
+
+    /** json: { track, nudge, from, to, days:[1..7] }. Starts / stops the listener and the hourly alarm. */
+    @JavascriptInterface
+    fun setNudgeSettings(json: String): String {
+        return try {
+            val j = JSONObject(json)
+            val from = j.optInt("from", 9).coerceIn(0, 22)
+            val to = j.optInt("to", 20).coerceIn(1, 23)
+            val arr: JSONArray? = j.optJSONArray("days")
+            val days = ArrayList<String>()
+            if (arr != null) {
+                for (k in 0 until arr.length()) {
+                    val d = arr.optInt(k, 0)
+                    if (d in 1..7) days.add(d.toString())
+                }
+            }
+            Prefs.setNudgeSettings(ctx, j.optBoolean("track", false), j.optBoolean("nudge", false), from, if (to > from) to else from + 1, days.joinToString(","))
+            StepAlarmReceiver.applySettings(ctx)
+            val o = JSONObject()
+            o.put("ok", true)
+            o.put("permission", StepCounter.permitted(ctx))
+            o.put("available", StepCounter.available(ctx))
+            o.toString()
+        } catch (e: Exception) {
+            err("Nieprawidłowe ustawienia.")
+        }
+    }
+
+    /** The web app tells whether a workout is running (no nudges during it). */
+    @JavascriptInterface
+    fun setWorkoutRunning(running: Boolean): String {
+        Prefs.setWorkoutRunning(ctx, running)
         return ok()
     }
 
@@ -214,6 +306,28 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
         return ok()
     }
 
+    /** Auto-connect to the remembered band (no picker). {ok:false,error} when no band is remembered. Never connects to any other device. */
+    @JavascriptInterface
+    fun connectPreferred(): String {
+        return if (BleManager.connectPreferred()) ok() else err("Brak zapamiętanej opaski.")
+    }
+
+    /** Connection log ring buffer: [{t, kind, code, reason, attempt}], oldest first. */
+    @JavascriptInterface
+    fun getConnectionLog(): String = BleManager.connectionLogJson().toString()
+
+    /**
+     * mode: "session" (morning measurement / workout: foreground service + HIGH connection priority),
+     * "diag" (Diagnostyka: HIGH priority only), anything else = idle (BALANCED, service stopped).
+     */
+    @JavascriptInterface
+    fun setLiveUse(mode: String): String {
+        val high = mode == "session" || mode == "diag"
+        BleManager.setLiveUse(high)
+        if (mode == "session" && BleManager.hasConnectPermission()) LiveService.start(ctx) else LiveService.stop()
+        return ok()
+    }
+
     @JavascriptInterface
     fun getState(): String {
         val o = JSONObject()
@@ -223,6 +337,11 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
         o.put("charging", BleManager.chargingFlag ?: JSONObject.NULL)
         o.put("lastDeviceName", Prefs.lastDeviceName(ctx) ?: JSONObject.NULL)
         o.put("lastDeviceId", Prefs.lastDeviceId(ctx) ?: JSONObject.NULL)
+        o.put("preferredId", Prefs.preferredId(ctx) ?: JSONObject.NULL)
+        o.put("preferredName", Prefs.preferredName(ctx) ?: JSONObject.NULL)
+        o.put("attempt", BleManager.reconnectAttempt)
+        o.put("reason", BleManager.lastReason ?: JSONObject.NULL)
+        o.put("code", BleManager.lastStatus ?: JSONObject.NULL)
         return o.toString()
     }
 

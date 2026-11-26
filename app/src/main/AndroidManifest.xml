@@ -5,6 +5,9 @@
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="true" />
+    <uses-feature
+        android:name="android.hardware.sensor.stepcounter"
+        android:required="false" />
 
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
@@ -20,6 +23,7 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
 
     <application
         android:allowBackup="false"
@@ -52,8 +56,21 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <service
+            android:name=".LiveService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
         <receiver
             android:name=".WakeAlarmReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".StepAlarmReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".ReminderReceiver"
             android:exported="false" />
     </application>
 </manifest>

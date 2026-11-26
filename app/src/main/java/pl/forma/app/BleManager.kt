@@ -62,6 +62,18 @@ object BleManager {
 
     private const val CONNECT_TIMEOUT_MS = 25_000L
     private const val BATT_POLL_MS = 60_000L
+    private const val OP_TIMEOUT_MS = 10_000L
+    private const val STALE_MS = 15_000L
+    private const val WATCHDOG_TICK_MS = 5_000L
+    private const val AUTO_TICK_MS = 30_000L
+    private const val FAST_ATTEMPTS = 3
+    private const val MTU_WANTED = 185
+    private const val MIN_WAIT_GATT_MS = 600L
+    private const val TIMEOUT_STATUS = -1
+    private const val STALE_STATUS = -2
+    private const val FAIL_STATUS = -3
+    /** Mirror of ble-core.js NATIVE_BACKOFF (2, 4, 8, 15, 30 s, then every 30 s). */
+    private val BACKOFF_MS = longArrayOf(2_000L, 4_000L, 8_000L, 15_000L, 30_000L)
 
     private lateinit var appCtx: Context
     private val main = Handler(Looper.getMainLooper())
@@ -96,6 +108,26 @@ object BleManager {
 
     private val ops = java.util.ArrayDeque<() -> Boolean>()
     private var opBusy = false
+
+    // ---------- link supervision (all touched on the main thread unless noted) ----------
+    /** The user wants to be connected: unexpected losses are retried until disconnect() is called. */
+    private var wantConnected = false
+    private var targetAddress: String? = null
+    private var reconnectAuto = false
+    private var autoMode = false
+    private var count133 = 0
+    private var lastHrAt = 0L
+    private var liveUse = false
+    private var nightUse = false
+    @Volatile var reconnectAttempt: Int = 0
+        private set
+    @Volatile var lastReason: String? = null
+        private set
+    @Volatile var lastStatus: Int? = null
+        private set
+
+    private class ConnEvent(val t: Long, val kind: String, val status: Int?, val reason: String, val attempt: Int)
+    private val connLog = java.util.ArrayDeque<ConnEvent>()
 
     fun init(ctx: Context) {
         if (!::appCtx.isInitialized) appCtx = ctx.applicationContext
@@ -208,55 +240,245 @@ object BleManager {
         if (wasScanning) listeners.forEach { it.onScanFinished() }
     }
 
-    // ---------- connect / disconnect ----------
-    fun connect(address: String) {
-        main.post {
-            stopScanInternal()
-            if (!hasConnectPermission()) { notifyError("Brak uprawnienia Bluetooth (urządzenia w pobliżu)."); return@post }
-            if (state == "connected" && deviceAddress == address) { setState("connected"); return@post }
-            if (state == "connecting" && deviceAddress == address) return@post
-            closeGatt()
-            val ad = adapter()
-            if (ad == null || !ad.isEnabled) { notifyError("Bluetooth jest wyłączony."); setState("disconnected"); return@post }
-            val dev: BluetoothDevice = try {
-                ad.getRemoteDevice(address)
-            } catch (e: IllegalArgumentException) {
-                notifyError("Nieprawidłowy adres urządzenia."); return@post
-            }
-            deviceAddress = address
-            deviceName = dev.name ?: (if (Prefs.lastDeviceId(appCtx) == address) Prefs.lastDeviceName(appCtx) else null)
-            batteryLevel = null
-            setState("connecting")
-            try {
-                gatt = dev.connectGatt(appCtx, false, gattCb, BluetoothDevice.TRANSPORT_LE)
-                main.postDelayed(connectTimeout, CONNECT_TIMEOUT_MS)
-            } catch (e: Exception) {
-                notifyError("Nie udało się połączyć: " + (e.message ?: e.javaClass.simpleName))
-                setState("disconnected")
+    // ---------- connection log (ring buffer, 100 entries) ----------
+    private fun logConn(kind: String, status: Int?, reason: String) {
+        val e = ConnEvent(System.currentTimeMillis(), kind, status, reason, reconnectAttempt)
+        synchronized(connLog) {
+            connLog.addLast(e)
+            while (connLog.size > 100) connLog.removeFirst()
+        }
+    }
+
+    /** [{t, kind: connected|disconnect|stale|attempt|user, code, reason, attempt}], oldest first. Callable from any thread. */
+    fun connectionLogJson(): JSONArray {
+        val a = JSONArray()
+        synchronized(connLog) {
+            for (e in connLog) {
+                val o = JSONObject()
+                o.put("t", e.t)
+                o.put("kind", e.kind)
+                o.put("code", e.status ?: JSONObject.NULL)
+                o.put("reason", e.reason)
+                o.put("attempt", e.attempt)
+                a.put(o)
             }
         }
+        return a
+    }
+
+    private fun reasonText(status: Int): String = when (status) {
+        0 -> "łącze zamknięte"
+        8 -> "przekroczono czas łącza (poza zasięgiem?)"
+        19 -> "opaska zakończyła połączenie"
+        22 -> "telefon zakończył połączenie"
+        34 -> "błąd synchronizacji łącza (LMP)"
+        62 -> "nie udało się nawiązać połączenia"
+        133 -> "błąd połączenia GATT (133)"
+        257 -> "błąd ogólny GATT (257)"
+        TIMEOUT_STATUS -> "opaska nie odpowiada (czas łączenia)"
+        STALE_STATUS -> "brak tętna przez 15 s - łącze zawieszone"
+        FAIL_STATUS -> "nie udało się rozpocząć połączenia"
+        else -> "kod GATT $status"
+    }
+
+    // ---------- connect / disconnect ----------
+    /** Explicit connect (the user picked this device): it becomes the preferred band. */
+    fun connect(address: String) {
+        main.post { startConnect(address, true) }
+    }
+
+    /** Auto-connect to the remembered band only (never to another heart-rate device). false = no band remembered. */
+    fun connectPreferred(): Boolean {
+        val a = Prefs.preferredId(appCtx) ?: return false
+        main.post { startConnect(a, false) }
+        return true
+    }
+
+    private fun startConnect(address: String, explicit: Boolean) {
+        stopScanInternal()
+        if (!hasConnectPermission()) { notifyError("Brak uprawnienia Bluetooth (urządzenia w pobliżu)."); return }
+        if (state == "connected" && deviceAddress == address) { wantConnected = true; setState("connected"); return }
+        if ((state == "connecting" || state == "reconnecting") && deviceAddress == address && wantConnected) return
+        val ad = adapter()
+        if (ad == null || !ad.isEnabled) {
+            notifyError("Bluetooth jest wyłączony.")
+            wantConnected = false
+            cancelReconnect()
+            closeGatt()
+            setState("disconnected")
+            return
+        }
+        cancelReconnect()
+        closeGatt()
+        val dev: BluetoothDevice? = try {
+            ad.getRemoteDevice(address)
+        } catch (e: IllegalArgumentException) {
+            null
+        }
+        if (dev == null) {
+            notifyError("Nieprawidłowy adres urządzenia.")
+            wantConnected = false
+            setState("disconnected")
+            return
+        }
+        targetAddress = address
+        wantConnected = true
+        reconnectAttempt = 0
+        count133 = 0
+        lastReason = null
+        lastStatus = null
+        deviceAddress = address
+        deviceName = dev.name ?: (if (Prefs.preferredId(appCtx) == address) Prefs.preferredName(appCtx) else null)
+        if (explicit) Prefs.setPreferred(appCtx, address, deviceName)
+        batteryLevel = null
+        setState("connecting")
+        openGatt(dev, false)
+    }
+
+    /** First attempt and every fast retry: autoConnect = false. After FAST_ATTEMPTS failures: autoConnect = true (the OS reconnects when the band is back). */
+    private fun openGatt(dev: BluetoothDevice, auto: Boolean) {
+        autoMode = auto
+        main.removeCallbacks(connectTimeout)
+        main.removeCallbacks(autoTick)
+        val g: BluetoothGatt? = try {
+            dev.connectGatt(appCtx, auto, gattCb, BluetoothDevice.TRANSPORT_LE)
+        } catch (e: Exception) {
+            notifyError("Nie udało się połączyć: " + (e.message ?: e.javaClass.simpleName))
+            null
+        }
+        gatt = g
+        if (g == null) {
+            handleLinkLoss(null, FAIL_STATUS)
+            return
+        }
+        if (auto) main.postDelayed(autoTick, AUTO_TICK_MS) else main.postDelayed(connectTimeout, CONNECT_TIMEOUT_MS)
     }
 
     private val connectTimeout = Runnable {
-        if (state != "connected") {
-            notifyError("Przekroczono czas łączenia z opaską.")
-            closeGatt()
-            setState("disconnected")
+        if (wantConnected && state != "connected") handleLinkLoss(gatt, TIMEOUT_STATUS)
+    }
+
+    /** autoConnect = true has no timeout of its own: only refresh the attempt counter for the UI every 30 s. */
+    private val autoTick = object : Runnable {
+        override fun run() {
+            if (wantConnected && autoMode && state != "connected") {
+                reconnectAttempt++
+                setState("reconnecting")
+                main.postDelayed(this, AUTO_TICK_MS)
+            }
         }
     }
 
+    private val reconnectRun = Runnable {
+        val addr = targetAddress
+        if (wantConnected && addr != null) {
+            val ad = adapter()
+            if (ad == null || !ad.isEnabled) {
+                lastReason = "Bluetooth jest wyłączony"
+                setState("reconnecting")
+                scheduleReconnect(BACKOFF_MS[BACKOFF_MS.size - 1], false)
+            } else {
+                val dev: BluetoothDevice? = try {
+                    ad.getRemoteDevice(addr)
+                } catch (e: IllegalArgumentException) {
+                    null
+                }
+                if (dev == null) {
+                    wantConnected = false
+                    setState("disconnected")
+                } else {
+                    setState("reconnecting")
+                    openGatt(dev, reconnectAuto)
+                }
+            }
+        }
+    }
+
+    private fun scheduleReconnect(delayMs: Long, auto: Boolean) {
+        main.removeCallbacks(reconnectRun)
+        reconnectAuto = auto
+        main.postDelayed(reconnectRun, delayMs)
+    }
+
+    private fun cancelReconnect() {
+        main.removeCallbacks(reconnectRun)
+        main.removeCallbacks(autoTick)
+    }
+
+    private fun backoffFor(attempt: Int): Long {
+        val i = minOf(maxOf(attempt, 1), BACKOFF_MS.size) - 1
+        return BACKOFF_MS[i]
+    }
+
+    /** Hidden BluetoothGatt.refresh() clears the stack's GATT cache; best effort, never fatal. */
+    private fun refreshGatt(g: BluetoothGatt) {
+        try {
+            val m = g.javaClass.getMethod("refresh")
+            m.invoke(g)
+        } catch (e: Throwable) { /* hidden API may be blocked */ }
+    }
+
+    /**
+     * The link is gone or never came up (callback status, connect timeout, stale watchdog). Always closes the gatt, waits (>= 600 ms
+     * for 133/8/19/22) and retries with backoff while the user still wants the connection.
+     */
+    private fun handleLinkLoss(g: BluetoothGatt?, status: Int) {
+        main.removeCallbacks(connectTimeout)
+        main.removeCallbacks(autoTick)
+        main.removeCallbacks(battPoll)
+        main.removeCallbacks(opTimeoutRun)
+        main.removeCallbacks(watchdog)
+        val wasConnected = state == "connected"
+        if (!wantConnected) {
+            if (g != null) { try { g.close() } catch (e: Exception) { /* ignore */ } }
+            if (g == null || gatt === g) { resetLinkFields(); gatt = null }
+            if (state != "disconnected") setState("disconnected")
+            return
+        }
+        val reason = reasonText(status)
+        count133 = if (status == 133) count133 + 1 else 0
+        reconnectAttempt++
+        lastReason = reason
+        lastStatus = status
+        val kind = if (status == STALE_STATUS) "stale" else if (wasConnected) "disconnect" else "attempt"
+        logConn(kind, status, reason)
+        if (g != null) {
+            if (status == 133 && count133 >= 2) refreshGatt(g)
+            try { g.close() } catch (e: Exception) { /* ignore */ }
+        }
+        if (g == null || gatt === g) gatt = null
+        resetLinkFields()
+        val minWait = if (status == 133 || status == 8 || status == 19 || status == 22) MIN_WAIT_GATT_MS else 0L
+        val delay = maxOf(backoffFor(reconnectAttempt), minWait)
+        setState("reconnecting")
+        scheduleReconnect(delay, reconnectAttempt > FAST_ATTEMPTS)
+    }
+
+    /** A condition retrying cannot fix (no Heart Rate service, no CCCD): stop wanting the connection and tell the user. */
+    private fun giveUp(g: BluetoothGatt, message: String) {
+        notifyError(message)
+        wantConnected = false
+        handleLinkLoss(g, 0)
+    }
+
+    /** User-initiated: no automatic reconnect afterwards. */
     fun disconnect() {
         main.post {
+            wantConnected = false
+            cancelReconnect()
+            main.removeCallbacks(connectTimeout)
             val g = gatt
-            if (g == null) { if (state != "disconnected") setState("disconnected"); return@post }
-            try { g.disconnect() } catch (e: Exception) { /* ignore */ }
-            main.postDelayed({ if (gatt === g) { closeGatt(); setState("disconnected") } }, 1500)
+            if (state != "disconnected") logConn("user", null, "rozłączono na prośbę użytkownika")
+            if (g == null) {
+                if (state != "disconnected") setState("disconnected")
+            } else {
+                try { g.disconnect() } catch (e: Exception) { /* ignore */ }
+                main.postDelayed({ if (gatt === g) { closeGatt(); setState("disconnected") } }, 1500)
+            }
         }
     }
 
-    private fun closeGatt() {
-        main.removeCallbacks(connectTimeout)
-        main.removeCallbacks(battPoll)
+    private fun resetLinkFields() {
         ops.clear()
         opBusy = false
         hrChar = null
@@ -264,24 +486,73 @@ object BleManager {
         battNotify = false
         powerStateChar = null
         levelStatusChar = null
-        try { gatt?.close() } catch (e: Exception) { /* ignore */ }
-        gatt = null
         batteryLevel = null
         chargingFlag = null
     }
 
-    // ---------- GATT operation queue (main thread) ----------
+    private fun closeGatt() {
+        main.removeCallbacks(connectTimeout)
+        main.removeCallbacks(autoTick)
+        main.removeCallbacks(battPoll)
+        main.removeCallbacks(opTimeoutRun)
+        main.removeCallbacks(watchdog)
+        resetLinkFields()
+        try { gatt?.close() } catch (e: Exception) { /* ignore */ }
+        gatt = null
+    }
+
+    // ---------- connection priority: HIGH while the user measures / trains / opens Diagnostyka, BALANCED at night and otherwise ----------
+    fun setLiveUse(on: Boolean) { main.post { liveUse = on; applyPriority() } }
+    fun setNightUse(on: Boolean) { main.post { nightUse = on; applyPriority() } }
+
+    private fun applyPriority() {
+        val g = gatt ?: return
+        val p = if (liveUse && !nightUse) BluetoothGatt.CONNECTION_PRIORITY_HIGH else BluetoothGatt.CONNECTION_PRIORITY_BALANCED
+        try { g.requestConnectionPriority(p) } catch (e: Exception) { /* optional */ }
+    }
+
+    /** No heart-rate notification for STALE_MS while "connected": the link is a zombie, force a reconnect. */
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (state == "connected") {
+                if (System.currentTimeMillis() - lastHrAt > STALE_MS) {
+                    handleLinkLoss(gatt, STALE_STATUS)
+                } else {
+                    main.postDelayed(this, WATCHDOG_TICK_MS)
+                }
+            }
+        }
+    }
+
+    // ---------- GATT operation queue (main thread); every callback must end in opDone(), a 10 s timeout covers lost callbacks ----------
     private fun enqueue(op: () -> Boolean) { ops.add(op); pump() }
 
     private fun pump() {
         if (opBusy) return
         val op = ops.poll() ?: return
         opBusy = true
+        main.removeCallbacks(opTimeoutRun)
+        main.postDelayed(opTimeoutRun, OP_TIMEOUT_MS)
         val started = try { op() } catch (e: Exception) { false }
-        if (!started) { opBusy = false; pump() }
+        if (!started) {
+            main.removeCallbacks(opTimeoutRun)
+            opBusy = false
+            pump()
+        }
     }
 
-    private fun opDone() { opBusy = false; pump() }
+    private fun opDone() {
+        main.removeCallbacks(opTimeoutRun)
+        opBusy = false
+        pump()
+    }
+
+    private val opTimeoutRun = Runnable {
+        if (opBusy) {
+            opBusy = false
+            pump()
+        }
+    }
 
     @Suppress("DEPRECATION")
     private fun enableNotify(g: BluetoothGatt, ch: BluetoothGattCharacteristic): Boolean {
@@ -399,32 +670,21 @@ object BleManager {
         listeners.forEach { it.onGattInfo(json) }
     }
 
-    private fun handleDisconnected(g: BluetoothGatt) {
-        main.removeCallbacks(connectTimeout)
-        main.removeCallbacks(battPoll)
-        try { g.close() } catch (e: Exception) { /* ignore */ }
-        if (gatt === g) gatt = null
-        ops.clear()
-        opBusy = false
-        hrChar = null
-        battChar = null
-        powerStateChar = null
-        levelStatusChar = null
-        batteryLevel = null
-        chargingFlag = null
-        if (state != "disconnected") setState("disconnected")
-    }
-
     private fun setupServices(g: BluetoothGatt) {
         val hrSvc = g.getService(HR_SERVICE)
         val hr = hrSvc?.getCharacteristic(HR_CHAR)
         if (hr == null) {
-            notifyError("To urządzenie nie udostępnia tętna (usługa 0x180D). WHOOP: włącz „HR Broadcast” w aplikacji WHOOP.")
-            disconnect()
+            giveUp(g, "To urządzenie nie udostępnia tętna (usługa 0x180D). WHOOP: włącz „HR Broadcast” w aplikacji WHOOP.")
+            return
+        }
+        if (hr.getDescriptor(CCCD) == null) {
+            giveUp(g, "Charakterystyka tętna nie obsługuje powiadomień.")
             return
         }
         hrChar = hr
+        applyPriority() // HIGH during live use, BALANCED otherwise (night / idle)
         enqueue { enableNotify(g, hr) } // success -> onDescriptorWrite marks the link as connected
+        enqueue { g.requestMtu(MTU_WANTED) } // result (or failure) arrives in onMtuChanged -> opDone; a lost callback is covered by the op timeout
         val battSvc = g.getService(BATT_SERVICE)
         val bc = battSvc?.getCharacteristic(BATT_CHAR)
         cpfPresent = false
@@ -456,9 +716,13 @@ object BleManager {
             main.post {
                 if (g !== gatt) { try { g.close() } catch (e: Exception) { /* ignore */ }; return@post }
                 if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                    if (!g.discoverServices()) { notifyError("Nie udało się wykryć usług opaski."); disconnect() }
-                } else {
-                    handleDisconnected(g)
+                    // arm the setup timeout again (also for autoConnect, which has none while the band is out of range)
+                    main.removeCallbacks(connectTimeout)
+                    main.removeCallbacks(autoTick)
+                    main.postDelayed(connectTimeout, CONNECT_TIMEOUT_MS)
+                    if (!g.discoverServices()) handleLinkLoss(g, FAIL_STATUS)
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
+                    handleLinkLoss(g, status)
                 }
             }
         }
@@ -466,7 +730,7 @@ object BleManager {
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             main.post {
                 if (g !== gatt) return@post
-                if (status != BluetoothGatt.GATT_SUCCESS) { notifyError("Wykrywanie usług nie powiodło się (kod $status)."); disconnect(); return@post }
+                if (status != BluetoothGatt.GATT_SUCCESS) { handleLinkLoss(g, status); return@post }
                 setupServices(g)
             }
         }
@@ -479,14 +743,29 @@ object BleManager {
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         main.removeCallbacks(connectTimeout)
                         val addr = deviceAddress
-                        if (addr != null) Prefs.setLastDevice(appCtx, addr, deviceName)
+                        if (addr != null) {
+                            Prefs.setLastDevice(appCtx, addr, deviceName)
+                            if (Prefs.preferredId(appCtx) == addr) Prefs.setPreferred(appCtx, addr, deviceName)
+                        }
+                        lastHrAt = System.currentTimeMillis()
+                        logConn("connected", null, if (reconnectAttempt > 0) "połączono ponownie (po $reconnectAttempt próbach)" else "połączono")
                         setState("connected")
+                        main.removeCallbacks(watchdog)
+                        main.postDelayed(watchdog, WATCHDOG_TICK_MS)
                     } else {
-                        notifyError("Nie udało się włączyć powiadomień tętna (kod $status).")
-                        disconnect()
+                        // enabling the notification failed: a failed attempt (close, wait, retry); the queue is dropped with the gatt
+                        handleLinkLoss(g, status)
+                        return@post
                     }
                 }
                 opDone()
+            }
+        }
+
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            main.post {
+                if (g !== gatt) return@post
+                opDone() // success or not, the MTU is optional
             }
         }
 
@@ -530,6 +809,8 @@ object BleManager {
             main.post {
                 if (g !== gatt) return@post
                 if (uuid == HR_CHAR) {
+                    lastHrAt = t
+                    if (reconnectAttempt != 0 || count133 != 0) { reconnectAttempt = 0; count133 = 0 } // real data flows: the link is healthy again
                     val s = HrParser.parse(v, t)
                     if (s != null) listeners.forEach { it.onHr(s) }
                 } else if (uuid == BATT_CHAR && v != null && v.isNotEmpty()) {

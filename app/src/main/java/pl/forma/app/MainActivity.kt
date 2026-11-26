@@ -36,6 +36,13 @@ class MainActivity : AppCompatActivity() {
             bridge.emitPermissions()
         }
 
+    /** ACTIVITY_RECOGNITION (API 29+) has its own launcher and event so a refusal never shows the Bluetooth error. */
+    private val stepsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+            bridge.emitStepsPermission()
+            StepAlarmReceiver.applySettings(this)
+        }
+
     /** Pending <input type=file> request from the WebView; exactly one onReceiveValue per request (null = cancelled). */
     private var fileCallback: ValueCallback<Array<Uri>>? = null
 
@@ -51,6 +58,10 @@ class MainActivity : AppCompatActivity() {
 
     fun askPermissions(perms: Array<String>) {
         permLauncher.launch(perms)
+    }
+
+    fun askStepsPermission() {
+        stepsLauncher.launch(android.Manifest.permission.ACTIVITY_RECOGNITION)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -186,6 +197,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         BleManager.addListener(bridge.listener)
+        StepAlarmReceiver.applySettings(this) // (re)starts the step listener and the hourly alarm when tracking is on
     }
 
     override fun onResume() {
@@ -195,12 +207,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        webView.onPause()
+        // a live session (measurement / workout) must keep receiving heart-rate events with the screen off
+        if (!LiveService.running) webView.onPause()
         super.onPause()
     }
 
     override fun onStop() {
-        BleManager.removeListener(bridge.listener)
+        StepCounter.flush(this)
+        if (!LiveService.running) BleManager.removeListener(bridge.listener)
         super.onStop()
     }
 
