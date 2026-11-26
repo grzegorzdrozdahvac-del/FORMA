@@ -420,7 +420,7 @@ canvas{display:block;width:100%;height:200px}
     return { key: key, message: QUADRANTS[key] };
   }
   // Full status for one calendar day. status: 'brak' (no record) | 'kalibracja' (<14 baseline days) | 'ok'.
-  function dayStatus(days, date) {
+  function dayStatusCore(days, date) {
     var sc = scoreCore(days, date);
     if (!sc) return { status: 'brak', date: date, hasRecord: false, scored: false, readiness: null };
     var b = sc.base;
@@ -458,6 +458,84 @@ canvas{display:block;width:100%;height:200px}
     return res;
   }
 
+  // ---- sources: own measurements ('own' = night or morning) vs WHOOP API values ('whoop'). Norms are never mixed. ----
+  // Value of a day in a group, or null when the day has nothing in that group.
+  function groupValue(d, group) {
+    if (!d) return null;
+    if (group === 'whoop') {
+      if (d.source === 'whoop') return { rmssd: d.rmssd, lnRmssd: d.lnRmssd, hr: d.hr };
+      var w = d.whoop;
+      return w && isFinite(w.hrv) && w.hrv > 0 ? { rmssd: w.hrv, lnRmssd: Math.log(w.hrv), hr: isFinite(w.rhr) ? w.rhr : null } : null;
+    }
+    return d.source === 'whoop' ? null : { rmssd: d.rmssd, lnRmssd: d.lnRmssd, hr: d.hr };
+  }
+  // Which source has the most days in the 60-day window ending at refDate (inclusive). Tie -> own measurements.
+  function dominantSource(days, refDate) {
+    var r = dayNum(refDate), nOwn = 0, nWhoop = 0;
+    days.forEach(function (d) {
+      var k = dayNum(d.date); if (!(k <= r && k >= r - BASE_WINDOW)) return;
+      if (groupValue(d, 'own')) nOwn++;
+      if (groupValue(d, 'whoop')) nWhoop++;
+    });
+    return { group: nWhoop > nOwn ? 'whoop' : 'own', nOwn: nOwn, nWhoop: nWhoop };
+  }
+  // Days re-expressed in one group (rmssd / lnRmssd / hr replaced, days without the group dropped).
+  function groupView(days, group) {
+    var out = [];
+    days.forEach(function (d) {
+      var v = groupValue(d, group); if (!v) return;
+      out.push(Object.assign({}, d, { rmssd: v.rmssd, lnRmssd: v.lnRmssd, hr: v.hr }));
+    });
+    return out;
+  }
+  // The series used for the norm and score of `date`: the dominant source, unless that day only has the other one.
+  function viewForDate(days, date) {
+    var dom = dominantSource(days, date), group = dom.group, rec = findDay(days, date);
+    if (rec && !groupValue(rec, group)) group = group === 'own' ? 'whoop' : 'own';
+    return { group: group, dom: dom, view: groupView(days, group), label: group === 'whoop' ? 'Norma z danych WHOOP (inna metoda niż własny pomiar)' : 'Norma z własnych pomiarów' };
+  }
+  function dayStatus(days, date) {
+    var vf = viewForDate(days, date);
+    var res = dayStatusCore(vf.view, date);
+    var rec = findDay(days, date);
+    if (rec) res.rec = rec;
+    res.normSource = vf.group; res.normLabel = vf.label; res.dom = vf.dom;
+    return res;
+  }
+
+  function numOrNull(v) { v = typeof v === 'string' ? parseFloat(v.replace(',', '.')) : v; return typeof v === 'number' && isFinite(v) ? v : null; }
+  function isoOrNull(v) { return typeof v === 'string' && v.length <= 40 && isFinite(Date.parse(v)) ? v : null; }
+  // WHOOP API data kept next to a day (recovery, sleep with real stages, cycle strain).
+  function sanitizeWhoop(o) {
+    if (!o || typeof o !== 'object') return null;
+    var n = numOrNull, pos = function (v) { v = n(v); return v != null && v >= 0 ? v : null; };
+    var rec = n(o.recovery), hrv = n(o.hrv), rhr = n(o.rhr);
+    var out = {
+      recovery: rec != null && rec >= 0 && rec <= 100 ? rec : null,
+      hrv: hrv != null && hrv > 0 && hrv < 1000 ? hrv : null,
+      rhr: rhr != null && rhr > 20 && rhr < 220 ? rhr : null,
+      spo2: pos(o.spo2), skinTemp: n(o.skinTemp), calibrating: !!o.calibrating, strain: pos(o.strain), cycleId: o.cycleId != null ? String(o.cycleId).slice(0, 40) : null, sleep: null
+    };
+    var s = o.sleep;
+    if (s && typeof s === 'object') {
+      var sl = {
+        start: isoOrNull(s.start), end: isoOrNull(s.end), inBedMin: pos(s.inBedMin), awakeMin: pos(s.awakeMin), lightMin: pos(s.lightMin), deepMin: pos(s.deepMin), remMin: pos(s.remMin),
+        performance: pos(s.performance), consistency: pos(s.consistency), efficiency: pos(s.efficiency), respRate: pos(s.respRate), disturbances: pos(s.disturbances), needMin: pos(s.needMin)
+      };
+      if (sl.start && sl.end) out.sleep = sl;
+    }
+    var any = out.recovery != null || out.hrv != null || out.rhr != null || out.strain != null || out.sleep;
+    return any ? out : null;
+  }
+  // Merge new WHOOP fields over old ones: a field missing in the new data keeps its old value.
+  function mergeWhoopFields(oldW, newW) {
+    if (!oldW) return newW;
+    var out = Object.assign({}, oldW);
+    Object.keys(newW).forEach(function (k) { if (newW[k] != null && k !== 'calibrating') out[k] = newW[k]; });
+    if (newW.hrv != null || newW.recovery != null) out.calibrating = newW.calibrating;
+    return out;
+  }
+
   function sanitizeDay(o) {
     if (!o || typeof o !== 'object' || isNaN(dayNum(o.date))) return null;
     var num = function (v) { v = typeof v === 'string' ? parseFloat(v.replace(',', '.')) : v; return typeof v === 'number' && isFinite(v) ? v : null; };
@@ -485,13 +563,14 @@ canvas{display:block;width:100%;height:200px}
       whoopHrv: w != null && w > 0 ? w : null,
       sleep: o.sleep && /^\d{1,2}:\d{2}$/.test(o.sleep.bed || '') && /^\d{1,2}:\d{2}$/.test(o.sleep.wake || '') ? { bed: o.sleep.bed, wake: o.sleep.wake } : null,
       battery: num(o.battery) != null && num(o.battery) >= 0 && num(o.battery) <= 100 ? Math.round(num(o.battery)) : null,
-      source: o.source === 'noc' ? 'noc' : 'poranek',
+      source: o.source === 'noc' ? 'noc' : (o.source === 'whoop' ? 'whoop' : 'poranek'),
       validWindows: Math.round(num(o.validWindows) || 0),
       totalWindows: Math.round(num(o.totalWindows) || 0),
       sleepEstimated: !!o.sleepEstimated,
       nightSeries: cleanNightSeries(o.nightSeries),
       nightId: typeof o.nightId === 'string' ? o.nightId.slice(0, 40) : null,
-      secondary: sanitizeSecondary(o.secondary)
+      secondary: sanitizeSecondary(o.secondary),
+      whoop: sanitizeWhoop(o.whoop)
     };
   }
   // Secondary measurement kept next to a primary one (night record -> the 2-min morning measurement).
@@ -528,13 +607,13 @@ canvas{display:block;width:100%;height:200px}
   }
   function daysToCsv(days) {
     var head = ['data', 'godzina', 'rmssd_ms', 'ln_rmssd', 'tetno_bpm', 'zaklocenia_pct', 'uderzenia', 'jakosc', 'powtorzenia_whoop', 'urzadzenie',
-      'energia', 'bolesnosc', 'stres', 'motywacja', 'sen', 'tagi', 'whoop_hrv_ms', 'wynik_pct', 'zrodlo'];
+      'energia', 'bolesnosc', 'stres', 'motywacja', 'sen', 'tagi', 'whoop_hrv_ms', 'wynik_pct', 'zrodlo', 'whoop_regeneracja_pct', 'whoop_hrv_api_ms', 'whoop_rhr', 'whoop_strain'];
     var rows = [head.join(',')];
     sortDays(days).forEach(function (d) {
       var st = dayStatus(days, d.date);
       rows.push([d.date, d.time, Math.round(d.rmssd * 10) / 10, Math.round(d.lnRmssd * 1000) / 1000, d.hr, d.artifactPct, d.nBeats, d.quality, d.dupCount, d.device]
         .concat(WB_KEYS.map(function (k) { return d.wellbeing ? d.wellbeing[k] : null; }))
-        .concat([(d.tags || []).join('|'), d.whoopHrv, st.readiness, d.source || 'poranek']).map(csvCell).join(','));
+        .concat([(d.tags || []).join('|'), d.whoopHrv, st.readiness, d.source || 'poranek', d.whoop ? d.whoop.recovery : null, d.whoop ? d.whoop.hrv : null, d.whoop ? d.whoop.rhr : null, d.whoop ? d.whoop.strain : null]).map(csvCell).join(','));
     });
     return rows.join('\n') + '\n';
   }
@@ -696,19 +775,54 @@ canvas{display:block;width:100%;height:200px}
   function mergeNightRecord(existing, night) {
     var n = sanitizeDay(night); if (!n) return null;
     if (!existing) return n;
-    var out = Object.assign({}, n, { wellbeing: existing.wellbeing, tags: existing.tags, whoopHrv: existing.whoopHrv });
+    var out = Object.assign({}, n, { wellbeing: existing.wellbeing, tags: existing.tags, whoopHrv: existing.whoopHrv, whoop: existing.whoop || null });
     if (existing.source === 'noc') { out.secondary = existing.secondary || null; if (existing.sleep && !existing.sleepEstimated) { out.sleep = existing.sleep; out.sleepEstimated = false; } }
+    else if (existing.source === 'whoop') { out.secondary = null; if (existing.sleep && !existing.sleepEstimated) { out.sleep = existing.sleep; out.sleepEstimated = false; } }
     else { out.secondary = secondaryOf(existing); if (existing.sleep) { out.sleep = existing.sleep; out.sleepEstimated = false; } }
     if (existing.battery != null && out.battery == null) out.battery = existing.battery;
     return sanitizeDay(out);
   }
   // A morning record is saved while a night record of the same date exists: night stays primary, morning becomes secondary.
+  // While a WHOOP-only (or WHOOP-annotated) record exists: the own measurement becomes the primary one, WHOOP data stays attached.
   function mergeMorningRecord(existing, morning) {
     var m = sanitizeDay(morning); if (!m) return null;
-    if (!existing || existing.source !== 'noc') return m;
-    var out = Object.assign({}, existing, { wellbeing: m.wellbeing, tags: m.tags, whoopHrv: m.whoopHrv, secondary: secondaryOf(m) });
-    if (m.sleep) { out.sleep = m.sleep; out.sleepEstimated = false; }
-    return sanitizeDay(out);
+    if (!existing) return m;
+    if (existing.source === 'noc') {
+      var out = Object.assign({}, existing, { wellbeing: m.wellbeing, tags: m.tags, whoopHrv: m.whoopHrv, secondary: secondaryOf(m) });
+      if (m.sleep) { out.sleep = m.sleep; out.sleepEstimated = false; }
+      return sanitizeDay(out);
+    }
+    if (!existing.whoop) return m;
+    var o2 = Object.assign({}, m, { whoop: existing.whoop });
+    if (!o2.sleep && existing.sleep) { o2.sleep = existing.sleep; o2.sleepEstimated = existing.sleepEstimated; }
+    return sanitizeDay(o2);
+  }
+
+  // ---- WHOOP import: one patch per day -> create or merge the day record ----
+  // patch = { date, bed:'HH:MM', wake:'HH:MM', whoop:{recovery,hrv,rhr,spo2,skinTemp,calibrating,strain,cycleId,sleep:{...}} }
+  // Returns { rec, action: 'created'|'merged'|'none' }. Our own measurement stays primary; a day with none becomes source 'whoop'.
+  function mergeWhoopPatch(existing, patch) {
+    var w = sanitizeWhoop(patch && patch.whoop);
+    if (!w || !patch || isNaN(dayNum(patch.date))) return { rec: existing || null, action: 'none' };
+    var hm = function (x) { return typeof x === 'string' && /^\d{1,2}:\d{2}$/.test(x); };
+    var hasSleepTimes = hm(patch.bed) && hm(patch.wake);
+    if (!existing) {
+      if (!(w.hrv > 0)) return { rec: null, action: 'none' };
+      var rec = sanitizeDay({
+        date: patch.date, time: hm(patch.wake) ? patch.wake : '00:00', rmssd: w.hrv, lnRmssd: Math.log(w.hrv), hr: w.rhr, artifactPct: 0, nBeats: 0,
+        quality: w.calibrating ? 'niska' : 'wysoka', dupCount: 0, device: 'WHOOP', source: 'whoop',
+        sleep: hasSleepTimes ? { bed: patch.bed, wake: patch.wake } : null, sleepEstimated: false, whoop: w
+      });
+      return { rec: rec, action: rec ? 'created' : 'none' };
+    }
+    var out = Object.assign({}, existing, { whoop: mergeWhoopFields(existing.whoop, w) });
+    if (existing.source === 'whoop' && w.hrv > 0) {
+      out.rmssd = w.hrv; out.lnRmssd = Math.log(w.hrv); if (w.rhr != null) out.hr = w.rhr; out.quality = w.calibrating ? 'niska' : 'wysoka';
+      if (hm(patch.wake)) out.time = patch.wake;
+    }
+    // real sleep times replace estimated ones (and fill a missing sleep); times the user typed in are kept
+    if (hasSleepTimes && (!existing.sleep || existing.sleepEstimated || existing.source === 'whoop')) { out.sleep = { bed: patch.bed, wake: patch.wake }; out.sleepEstimated = false; }
+    return { rec: sanitizeDay(out), action: 'merged' };
   }
 
   var api = {
@@ -723,7 +837,7 @@ canvas{display:block;width:100%;height:200px}
     quadrantFor: quadrantFor, sanitizeDay: sanitizeDay, mergeDays: mergeDays, upsertDay: upsertDay, removeDay: removeDay,
     findDay: findDay, daysToCsv: daysToCsv, syntheticDays: syntheticDays, sortDays: sortDays,
     processNight: processNight, nightSeriesOf: nightSeriesOf, cleanNightSeries: cleanNightSeries, nightRecord: nightRecord, mergeNightRecord: mergeNightRecord, mergeMorningRecord: mergeMorningRecord, sanitizeSecondary: sanitizeSecondary,
-    inferCharging: inferCharging, parseBatteryPowerState: parseBatteryPowerState, parseBatteryLevelStatus: parseBatteryLevelStatus,
+    inferCharging: inferCharging, sanitizeWhoop: sanitizeWhoop, mergeWhoopPatch: mergeWhoopPatch, groupValue: groupValue, dominantSource: dominantSource, groupView: groupView, viewForDate: viewForDate, parseBatteryPowerState: parseBatteryPowerState, parseBatteryLevelStatus: parseBatteryLevelStatus,
     WB_KEYS: WB_KEYS, QUADRANTS: QUADRANTS, RECOMMENDATIONS: RECOMMENDATIONS
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
@@ -760,6 +874,16 @@ canvas{display:block;width:100%;height:200px}
     var b = parseHM(bed), w = parseHM(wake);
     if (isNaN(b) || isNaN(w)) return NaN;
     return ((w - b) % 1440 + 1440) % 1440;
+  }
+  // Minutes actually asleep when WHOOP gave real stages, else the span between the bed and wake times.
+  function recSleepMin(rec) {
+    if (!rec || !rec.sleep) return NaN;
+    var w = rec.whoop && rec.whoop.sleep;
+    if (w) {
+      var asleep = (w.lightMin || 0) + (w.deepMin || 0) + (w.remMin || 0);
+      if (asleep > 0) return asleep;
+    }
+    return sleepDurationMin(rec.sleep.bed, rec.sleep.wake);
   }
   // debt over the previous nights: mean shortfall versus the base need, over the nights that have data (<=3)
   function sleepDebt3(durationsH) {
@@ -828,12 +952,21 @@ canvas{display:block;width:100%;height:200px}
     var fromRpe = isFinite(w.rpe) && w.rpe > 0 && w.durMin > 0 ? srpeLoad(w.rpe, w.durMin) : 0;
     return { load: Math.max(fromHr, fromRpe), fromHr: fromHr, fromRpe: fromRpe, source: fromHr >= fromRpe ? 'tętno' : 'ocena wysiłku' };
   }
-  function dayLoad(workouts, date) {
-    var t = 0;
-    workouts.forEach(function (w) { if (w.date === date) t += sessionLoad(w).load; });
+  // Day load. With `days` (optional): when the day has no own heart-rate workout but WHOOP gave the day's strain, that strain is used.
+  function dayLoad(workouts, date, days) {
+    var t = 0, ownHr = false;
+    workouts.forEach(function (w) {
+      if (w.date !== date) return;
+      t += sessionLoad(w).load;
+      if (w.source !== 'whoop' && w.hasHr) ownHr = true;
+    });
+    if (days && !ownHr) {
+      var r = H.findDay(days, date), s = r && r.whoop ? r.whoop.strain : null;
+      if (s != null && s > 0) return Math.max(t, loadForStrain(Math.min(s, 20.9)));
+    }
     return t;
   }
-  function dailyStrain(workouts, date) { return strainFromLoad(dayLoad(workouts, date)); }
+  function dailyStrain(workouts, date, days) { return strainFromLoad(dayLoad(workouts, date, days)); }
   // target strain band from the recommendation colour (own choice: 14-18 green, 8-13 yellow, 0-7 red)
   function targetBand(color) {
     return color === 'zielony' ? { lo: 14, hi: 18 } : (color === 'żółty' ? { lo: 8, hi: 13 } : (color === 'czerwony' ? { lo: 0, hi: 7 } : null));
@@ -866,16 +999,16 @@ canvas{display:block;width:100%;height:200px}
   // Daily EWMA: CTL (42 d) and ATL (7 d); TSB = CTL - ATL (end of day). Series starts nDays before endDate.
   // seedDays (optional): start the averages at the mean daily load of the first seedDays days of data instead of 0,
   // so the first weeks are not read as "massive fatigue"; days before the first workout have null values.
-  function loadSeries(workouts, endDate, nDays, seedDays) {
+  function loadSeries(workouts, endDate, nDays, seedDays, days) {
     var end = H.dayNum(endDate), out = [], ctl = 0, atl = 0, first = null;
     if (seedDays && workouts.length) {
       first = Math.min.apply(null, workouts.map(function (w) { return H.dayNum(w.date); }));
       var s = 0, c = 0;
-      for (var k = first; k < first + seedDays && k <= end; k++) { s += dayLoad(workouts, H.dateFromNum(k)); c++; }
+      for (var k = first; k < first + seedDays && k <= end; k++) { s += dayLoad(workouts, H.dateFromNum(k), days); c++; }
       ctl = atl = c ? s / c : 0;
     }
     for (var i = nDays - 1; i >= 0; i--) {
-      var date = H.dateFromNum(end - i), load = dayLoad(workouts, date);
+      var date = H.dateFromNum(end - i), load = dayLoad(workouts, date, days);
       if (first != null && end - i < first) { out.push({ date: date, load: load, ctl: null, atl: null, tsb: null }); continue; }
       ctl += (load - ctl) / 42; atl += (load - atl) / 7;
       out.push({ date: date, load: load, ctl: ctl, atl: atl, tsb: ctl - atl });
@@ -899,10 +1032,10 @@ canvas{display:block;width:100%;height:200px}
     return Math.max(0, H.dayNum(today) - first + 1);
   }
   // acute:chronic load ratio = mean daily load of the last 7 days / of the last 28 days. Needs >= 14 days since the first workout.
-  function acwr(workouts, today) {
+  function acwr(workouts, today, days) {
     var d = loadDataDays(workouts, today); if (d < 14) return null;
     var n = H.dayNum(today), a = 0, c = 0, k;
-    for (k = 0; k < 28; k++) { var l = dayLoad(workouts, H.dateFromNum(n - k)); c += l; if (k < 7) a += l; }
+    for (k = 0; k < 28; k++) { var l = dayLoad(workouts, H.dateFromNum(n - k), days); c += l; if (k < 7) a += l; }
     c /= 28; a /= 7; if (!(c > 0.5)) return null;
     var ratio = a / c;
     return { ratio: ratio, acute: a, chronic: c, zone: ratio < 0.8 ? 'low' : (ratio <= 1.3 ? 'ok' : 'high') };
@@ -918,7 +1051,7 @@ canvas{display:block;width:100%;height:200px}
         o.sessions++; o.minutes += w.durMin || 0;
         if (w.type === 'gym') { o.gymSessions++; o.kg += workoutVolumeKg(w); }
         else if (w.type === 'run') { o.runMin += w.durMin || 0; o.runKm += w.distanceKm || 0; }
-        else { o.walkMin += w.durMin || 0; o.walkKm += w.distanceKm || 0; }
+        else if (w.type === 'walk') { o.walkMin += w.durMin || 0; o.walkKm += w.distanceKm || 0; }
       });
       out.push(o);
     }
@@ -929,21 +1062,23 @@ canvas{display:block;width:100%;height:200px}
   function sleepNight(days, workouts, date) {
     var rec = H.findDay(days, date);
     if (!rec || !rec.sleep) return null;
-    var durMin = sleepDurationMin(rec.sleep.bed, rec.sleep.wake);
+    var durMin = recSleepMin(rec);
     if (!isFinite(durMin) || durMin <= 0) return null;
     var t = H.dayNum(date), prevDur = [];
     for (var k = 3; k >= 1; k--) {
       var r = H.findDay(days, H.dateFromNum(t - k));
-      if (r && r.sleep) { var m = sleepDurationMin(r.sleep.bed, r.sleep.wake); if (m > 0) prevDur.push(m / 60); }
+      if (r && r.sleep) { var m = recSleepMin(r); if (m > 0) prevDur.push(m / 60); }
     }
-    var debt = sleepDebt3(prevDur), strainY = dailyStrain(workouts, H.dateFromNum(t - 1));
+    var debt = sleepDebt3(prevDur), strainY = dailyStrain(workouts, H.dateFromNum(t - 1), days);
     var need = sleepNeedHours(strainY, debt), durH = durMin / 60;
     var nights = [];
     for (var j = 6; j >= 0; j--) { var q = H.findDay(days, H.dateFromNum(t - j)); if (q && q.sleep) nights.push(q.sleep); }
     var reg = sleepRegularity(nights), perf = sleepPerformance(durH, need);
+    var ws = rec.whoop && rec.whoop.sleep, eff = ws && ws.efficiency != null ? clamp(ws.efficiency, 0, 100) : 100;
     return {
       date: date, bed: rec.sleep.bed, wake: rec.sleep.wake, durH: durH, needH: need, debt3: debt, strainY: strainY,
-      perf: perf, reg: reg.score, regInfo: reg, eff: 100, score: sleepScore(perf, reg.score, 100), shortH: Math.max(0, need - durH)
+      perf: perf, reg: reg.score, regInfo: reg, eff: eff, effReal: !!(ws && ws.efficiency != null), score: sleepScore(perf, reg.score, eff), shortH: Math.max(0, need - durH),
+      whoop: ws || null, inBedH: ws && ws.inBedMin ? ws.inBedMin / 60 : null
     };
   }
   function typicalWake(days, refDate) {
@@ -956,9 +1091,9 @@ canvas{display:block;width:100%;height:200px}
     var t = H.dayNum(today), prev = [];
     for (var k = 2; k >= 0; k--) {
       var r = H.findDay(days, H.dateFromNum(t - k));
-      if (r && r.sleep) { var m = sleepDurationMin(r.sleep.bed, r.sleep.wake); if (m > 0) prev.push(m / 60); }
+      if (r && r.sleep) { var m = recSleepMin(r); if (m > 0) prev.push(m / 60); }
     }
-    var need = sleepNeedHours(dailyStrain(workouts, today), sleepDebt3(prev));
+    var need = sleepNeedHours(dailyStrain(workouts, today, days), sleepDebt3(prev));
     return { needH: need, bed: bedtimeSuggestion(wakeHM, need), wake: wakeHM };
   }
 
@@ -1005,7 +1140,7 @@ canvas{display:block;width:100%;height:200px}
     return { date: o.date, kg: Math.round(kg * 10) / 10 };
   }
   function sanitizeWorkout(o) {
-    if (!o || typeof o !== 'object' || ['gym', 'run', 'walk'].indexOf(o.type) < 0 || isNaN(H.dayNum(o.date))) return null;
+    if (!o || typeof o !== 'object' || ['gym', 'run', 'walk', 'other'].indexOf(o.type) < 0 || isNaN(H.dayNum(o.date))) return null;
     var dur = num(o.durMin); if (dur == null || dur <= 0) return null;
     var ex = Array.isArray(o.exercises) ? o.exercises.map(function (e) {
       if (!e || typeof e.name !== 'string') return null;
@@ -1015,14 +1150,41 @@ canvas{display:block;width:100%;height:200px}
     var z = Array.isArray(o.zonesSec) && o.zonesSec.length === 6 ? o.zonesSec.map(function (v) { return Math.max(0, Math.round(num(v) || 0)); }) : null;
     var rpe = num(o.rpe);
     return {
-      id: typeof o.id === 'string' && o.id ? o.id.slice(0, 40) : 'w' + (num(o.start) || 0),
+      id: typeof o.id === 'string' && o.id ? o.id.slice(0, 64) : 'w' + (num(o.start) || 0),
       type: o.type, date: o.date, time: typeof o.time === 'string' && /^\d{2}:\d{2}$/.test(o.time) ? o.time : '00:00',
       start: num(o.start) || 0, durMin: Math.round(dur * 10) / 10,
       hrAvg: num(o.hrAvg), hrMax: num(o.hrMax), trimp: num(o.trimp), zonesSec: z,
       rpe: rpe != null && rpe >= 1 && rpe <= 10 ? Math.round(rpe) : null,
       distanceKm: num(o.distanceKm) != null && num(o.distanceKm) >= 0 ? num(o.distanceKm) : null,
-      exercises: ex, hasHr: !!o.hasHr
+      exercises: ex, hasHr: !!o.hasHr,
+      source: o.source === 'whoop' ? 'whoop' : 'forma',
+      sport: typeof o.sport === 'string' ? o.sport.slice(0, 40) : null,
+      strain: num(o.strain) != null && num(o.strain) >= 0 && num(o.strain) <= 21 ? num(o.strain) : null
     };
+  }
+  // ---------------- WHOOP workouts ----------------
+  function workoutEnd(w) { return w.start + w.durMin * 60000; }
+  // Share of the shorter workout that overlaps the other one (0..1).
+  function workoutOverlap(a, b) {
+    var lo = Math.max(a.start, b.start), hi = Math.min(workoutEnd(a), workoutEnd(b)), inter = Math.max(0, hi - lo);
+    var shorter = Math.min(a.durMin, b.durMin) * 60000;
+    return shorter > 0 ? inter / shorter : 0;
+  }
+  // existing: all stored workouts; incoming: sanitized WHOOP workouts. WHOOP ones replace earlier imports with the same id and never
+  // duplicate a Forma-logged workout overlapping by more than 50 %. Returns { items, added, updated, skipped, dropped }.
+  function mergeWhoopWorkouts(existing, incoming) {
+    var own = existing.filter(function (w) { return w.source !== 'whoop'; });
+    var byId = {}, added = 0, updated = 0, skipped = 0, dropped = 0;
+    existing.forEach(function (w) { if (w.source === 'whoop') byId[w.id] = w; });
+    var seen = {};
+    incoming.forEach(function (w) {
+      if (own.some(function (o) { return workoutOverlap(o, w) > 0.5; })) { skipped++; return; }
+      if (byId[w.id]) updated++; else if (!seen[w.id]) added++;
+      seen[w.id] = 1; byId[w.id] = w;
+    });
+    // an earlier import may overlap a workout the user logged since
+    Object.keys(byId).forEach(function (id) { if (own.some(function (o) { return workoutOverlap(o, byId[id]) > 0.5; })) { delete byId[id]; dropped++; } });
+    return { items: sortWorkouts(own.concat(Object.keys(byId).map(function (k) { return byId[k]; }))), added: added, updated: updated, skipped: skipped, dropped: dropped };
   }
   function mergeById(a, b, key) {
     var m = {}, added = 0, replaced = 0;
@@ -1120,10 +1282,190 @@ canvas{display:block;width:100%;height:200px}
     workoutVolumeKg: workoutVolumeKg, lastExercisePerformance: lastExercisePerformance, restingHr: restingHr,
     loadSeries: loadSeries, tsbPercent: tsbPercent, formZone: formZone, loadDataDays: loadDataDays, acwr: acwr, weekStart: weekStart, weeklyVolume: weeklyVolume,
     dailyNote: dailyNote, sanitizeProfile: sanitizeProfile, profileComplete: profileComplete, hrMaxOf: hrMaxOf, sanitizeWeight: sanitizeWeight, sanitizeWorkout: sanitizeWorkout, serializeSession: serializeSession, restoreSession: restoreSession, SESSION_MAX_AGE_MS: SESSION_MAX_AGE_MS,
-    mergeById: mergeById, sortWorkouts: sortWorkouts, demoData: demoData
+    recSleepMin: recSleepMin, workoutOverlap: workoutOverlap, mergeWhoopWorkouts: mergeWhoopWorkouts, mergeById: mergeById, sortWorkouts: sortWorkouts, demoData: demoData
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.FormaCore = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+<script>/* Forma - WHOOP Developer API (v2) mapping. Pure logic, no DOM, no network.
+   Input: raw API records {recovery:[], sleep:[], workout:[], cycle:[]} (as returned by GET /v2/recovery, /v2/activity/sleep,
+   /v2/activity/workout, /v2/cycle). Output: per-day patches and Forma workouts, merged through HrvCore / FormaCore.
+   Browser: window.WhoopCore (needs HrvCore and FormaCore first). Node: require. */
+(function (root) {
+  'use strict';
+  var isNode = typeof module !== 'undefined' && module.exports;
+  var H = isNode ? require('./hrv-core.js') : root.HrvCore;
+  var F = isNode ? require('./forma-core.js') : root.FormaCore;
+
+  var URLS = {
+    authorize: 'https://api.prod.whoop.com/oauth/oauth2/auth',
+    token: 'https://api.prod.whoop.com/oauth/oauth2/token',
+    base: 'https://api.prod.whoop.com/developer',
+    scopes: 'offline read:recovery read:sleep read:cycles read:workout read:profile',
+    redirectAndroid: 'pl.forma.app://whoop-callback',
+    redirectWeb: 'https://grzegorzdrozdahvac-del.github.io/FORMA/'
+  };
+  var MIN = 60000;
+  function num(v) { return typeof v === 'number' && isFinite(v) ? v : null; }
+  function milliToMin(v) { v = num(v); return v == null ? null : Math.round(v / MIN * 10) / 10; }
+  function p2(n) { return (n < 10 ? '0' : '') + n; }
+
+  // "+01:00" / "-05:30" / "Z" -> minutes east of UTC; null when absent or malformed
+  function offsetMin(s) {
+    if (typeof s !== 'string') return null;
+    if (s === 'Z') return 0;
+    var m = /^([+-])(\d{2}):?(\d{2})$/.exec(s);
+    return m ? (m[1] === '-' ? -1 : 1) * (+m[2] * 60 + +m[3]) : null;
+  }
+  // Local calendar date / time of an instant, in the record's own time zone offset (device zone when the record has none).
+  function localParts(iso, tzOffset) {
+    var t = Date.parse(iso); if (!isFinite(t)) return null;
+    var off = offsetMin(tzOffset);
+    if (off == null) { var d = new Date(t); return { date: H.localDateStr(d), time: H.localTimeStr(d), ms: t }; }
+    var u = new Date(t + off * MIN);
+    return { date: u.getUTCFullYear() + '-' + p2(u.getUTCMonth() + 1) + '-' + p2(u.getUTCDate()), time: p2(u.getUTCHours()) + ':' + p2(u.getUTCMinutes()), ms: t };
+  }
+
+  function mapRecovery(r) {
+    if (!r || typeof r !== 'object') return null;
+    var sc = r.score_state === 'SCORED' || r.score_state == null ? r.score : null;
+    if (!sc) return { cycleId: r.cycle_id, sleepId: r.sleep_id, createdAt: r.created_at, scored: false };
+    return {
+      cycleId: r.cycle_id, sleepId: r.sleep_id, createdAt: r.created_at, scored: true,
+      recovery: num(sc.recovery_score), hrv: num(sc.hrv_rmssd_milli), rhr: num(sc.resting_heart_rate),
+      spo2: num(sc.spo2_percentage), skinTemp: num(sc.skin_temp_celsius), calibrating: !!sc.user_calibrating
+    };
+  }
+  function mapSleep(s) {
+    if (!s || typeof s !== 'object' || !s.start || !s.end) return null;
+    var a = localParts(s.start, s.timezone_offset), b = localParts(s.end, s.timezone_offset);
+    if (!a || !b || b.ms <= a.ms) return null;
+    var out = { id: s.id != null ? String(s.id) : null, cycleId: s.cycle_id, nap: !!s.nap, date: b.date, bed: a.time, wake: b.time, start: s.start, end: s.end, scored: false, spanMin: (b.ms - a.ms) / MIN };
+    var sc = s.score_state === 'SCORED' || s.score_state == null ? s.score : null;
+    if (sc) {
+      var st = sc.stage_summary || {}, need = sc.sleep_needed || {};
+      var needMs = num(need.baseline_milli) == null ? null : (num(need.baseline_milli) + (num(need.need_from_sleep_debt_milli) || 0) + (num(need.need_from_recent_strain_milli) || 0) + (num(need.need_from_recent_nap_milli) || 0));
+      out.scored = true;
+      out.sleep = {
+        start: s.start, end: s.end, inBedMin: milliToMin(st.total_in_bed_time_milli), awakeMin: milliToMin(st.total_awake_time_milli),
+        lightMin: milliToMin(st.total_light_sleep_time_milli), deepMin: milliToMin(st.total_slow_wave_sleep_time_milli), remMin: milliToMin(st.total_rem_sleep_time_milli),
+        performance: num(sc.sleep_performance_percentage), consistency: num(sc.sleep_consistency_percentage), efficiency: num(sc.sleep_efficiency_percentage),
+        respRate: num(sc.respiratory_rate), disturbances: num(st.disturbance_count), needMin: needMs == null ? null : Math.round(needMs / MIN)
+      };
+    } else out.sleep = { start: s.start, end: s.end, inBedMin: Math.round(out.spanMin) };
+    return out;
+  }
+  function mapCycle(c) {
+    if (!c || typeof c !== 'object' || !c.start) return null;
+    var a = localParts(c.start, c.timezone_offset); if (!a) return null;
+    var sc = c.score_state === 'SCORED' || c.score_state == null ? c.score : null;
+    return { id: c.id, date: a.date, strain: sc ? num(sc.strain) : null };
+  }
+
+  // Build per-day patches. Each non-nap sleep defines a day (local date of its end); the longest sleep of a date wins.
+  // A recovery is matched to its sleep by sleep_id, else by cycle_id, else by the date of its created_at.
+  function buildDayPatches(data) {
+    data = data || {};
+    var sleeps = (data.sleep || []).map(mapSleep).filter(function (s) { return s && !s.nap; });
+    var recs = (data.recovery || []).map(mapRecovery).filter(Boolean);
+    var cycles = (data.cycle || []).map(mapCycle).filter(Boolean);
+    var byDate = {};
+    sleeps.forEach(function (s) { if (!byDate[s.date] || s.spanMin > byDate[s.date].spanMin) byDate[s.date] = s; });
+    var winners = Object.keys(byDate).map(function (d) { return byDate[d]; });
+    var patches = {};
+    function patch(date) { return patches[date] || (patches[date] = { date: date, bed: null, wake: null, whoop: {} }); }
+    Object.keys(byDate).forEach(function (d) {
+      var s = byDate[d], p = patch(d); p.bed = s.bed; p.wake = s.wake; p.whoop.sleep = s.sleep; p.whoop.cycleId = s.cycleId != null ? s.cycleId : null; p._sleepId = s.id;
+    });
+    recs.forEach(function (r) {
+      if (!r.scored) return;
+      var date = null, i;
+      for (i = 0; i < winners.length && date == null; i++) if (r.sleepId != null && winners[i].id === String(r.sleepId)) date = winners[i].date;
+      for (i = 0; i < winners.length && date == null; i++) if (r.cycleId != null && winners[i].cycleId === r.cycleId) date = winners[i].date;
+      if (date == null && r.createdAt) { var lp = localParts(r.createdAt, null); if (lp) date = lp.date; }
+      if (date == null) return;
+      var p = patch(date), w = p.whoop;
+      w.recovery = r.recovery; w.hrv = r.hrv; w.rhr = r.rhr; w.spo2 = r.spo2; w.skinTemp = r.skinTemp; w.calibrating = r.calibrating;
+      if (r.cycleId != null) w.cycleId = r.cycleId;
+    });
+    cycles.forEach(function (c) {
+      if (c.strain == null) return;
+      var date = null;
+      Object.keys(patches).forEach(function (d) { var cid = patches[d].whoop.cycleId; if (cid != null && cid === c.id) date = d; });
+      if (date == null) date = c.date;
+      if (patches[date] || byDate[date]) patch(date).whoop.strain = c.strain;
+    });
+    return Object.keys(patches).sort().map(function (d) { var p = patches[d]; delete p._sleepId; return p; });
+  }
+
+  // sport_name -> Forma type
+  function sportType(name) {
+    var n = String(name || '').toLowerCase().replace(/[\s_]+/g, '-');
+    if (/running|^run$/.test(n)) return 'run';
+    if (/^walking|^walk$|^hiking-walk/.test(n)) return 'walk';
+    if (/weightlifting|powerlifting|strength|functional|crossfit|weight-training/.test(n)) return 'gym';
+    return 'other';
+  }
+  function mapWorkout(w) {
+    if (!w || typeof w !== 'object' || !w.start || !w.end) return null;
+    var a = localParts(w.start, w.timezone_offset), t0 = Date.parse(w.start), t1 = Date.parse(w.end);
+    if (!a || !isFinite(t1) || t1 <= t0) return null;
+    var sc = w.score_state === 'SCORED' || w.score_state == null ? w.score : null, zd = sc && sc.zone_durations;
+    var zones = zd ? ['zone_zero_milli', 'zone_one_milli', 'zone_two_milli', 'zone_three_milli', 'zone_four_milli', 'zone_five_milli'].map(function (k) { return Math.round((num(zd[k]) || 0) / 1000); }) : null;
+    var strain = sc ? num(sc.strain) : null;
+    return F.sanitizeWorkout({
+      id: 'whoop-' + (w.id != null ? w.id : w.v1_id), type: sportType(w.sport_name), date: a.date, time: a.time, start: t0, durMin: (t1 - t0) / MIN,
+      hrAvg: sc ? num(sc.average_heart_rate) : null, hrMax: sc ? num(sc.max_heart_rate) : null,
+      trimp: strain != null && strain < 21 ? F.loadForStrain(strain) : null, zonesSec: zones, rpe: null,
+      distanceKm: sc && num(sc.distance_meter) != null ? num(sc.distance_meter) / 1000 : null, exercises: [],
+      hasHr: !!(sc && num(sc.average_heart_rate)), source: 'whoop', sport: w.sport_name || null, strain: strain
+    });
+  }
+  function buildWorkouts(data) { return ((data && data.workout) || []).map(mapWorkout).filter(Boolean); }
+
+  // Apply a sync result to days + workouts. Pure: returns new arrays and counters.
+  function applySync(days, workouts, data) {
+    var patches = buildDayPatches(data), cur = days.slice(), st = { created: 0, merged: 0, skipped: 0, workoutsAdded: 0, workoutsUpdated: 0, workoutsSkipped: 0, workoutsDropped: 0, dates: [] };
+    patches.forEach(function (p) {
+      var ex = H.findDay(cur, p.date), r = H.mergeWhoopPatch(ex, p);
+      if (r.action === 'none' || !r.rec) { st.skipped++; return; }
+      cur = H.upsertDay(cur, r.rec).days;
+      if (r.action === 'created') st.created++; else st.merged++;
+      st.dates.push(p.date);
+    });
+    var mw = F.mergeWhoopWorkouts(workouts, buildWorkouts(data));
+    st.workoutsAdded = mw.added; st.workoutsUpdated = mw.updated; st.workoutsSkipped = mw.skipped; st.workoutsDropped = mw.dropped;
+    return { days: cur, workouts: mw.items, stats: st };
+  }
+
+  // ---- sync window / state ----
+  var FIRST_SYNC_DAYS = 30, OVERLAP_DAYS = 2;
+  // since = ISO start for the API query: 30 days back on the first sync, else the last sync minus a small overlap (late-scored records).
+  function sinceFor(lastSyncMs, nowMs) {
+    var days = lastSyncMs ? Math.max(OVERLAP_DAYS, Math.min(FIRST_SYNC_DAYS, Math.ceil((nowMs - lastSyncMs) / 86400000) + OVERLAP_DAYS)) : FIRST_SYNC_DAYS;
+    return new Date(nowMs - days * 86400000).toISOString();
+  }
+  function needsSync(lastSyncMs, nowMs) { return !lastSyncMs || nowMs - lastSyncMs > 30 * MIN; }
+
+  // ---- OAuth helpers (web transport) ----
+  function randomState() {
+    var a = '', chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    try { var u = new Uint8Array(16); (root.crypto || {}).getRandomValues(u); for (var i = 0; i < u.length; i++) a += chars[u[i] % chars.length]; return a; }
+    catch (e) { for (var j = 0; j < 16; j++) a += chars[Math.floor(Math.random() * chars.length)]; return a; }
+  }
+  function authorizeUrl(clientId, redirectUri, state) {
+    return URLS.authorize + '?response_type=code&client_id=' + encodeURIComponent(clientId) + '&redirect_uri=' + encodeURIComponent(redirectUri) +
+      '&scope=' + encodeURIComponent(URLS.scopes) + '&state=' + encodeURIComponent(state);
+  }
+  function formBody(o) { return Object.keys(o).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(o[k]); }).join('&'); }
+
+  var api = {
+    URLS: URLS, offsetMin: offsetMin, localParts: localParts, mapRecovery: mapRecovery, mapSleep: mapSleep, mapCycle: mapCycle, mapWorkout: mapWorkout, sportType: sportType,
+    buildDayPatches: buildDayPatches, buildWorkouts: buildWorkouts, applySync: applySync, sinceFor: sinceFor, needsSync: needsSync,
+    randomState: randomState, authorizeUrl: authorizeUrl, formBody: formBody, FIRST_SYNC_DAYS: FIRST_SYNC_DAYS
+  };
+  if (isNode) module.exports = api; else root.WhoopCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 <script>(function () {
@@ -1251,6 +1593,7 @@ function importAll(j) {
 function wipeAll() {
   S.days = []; S.workouts = []; S.profile = null; S.weights = []; S.pending = null; S.pendingWorkout = null; S.session = null; S.resume = null; S.editDay = null;
   if (!DEMO) try { localStorage.removeItem(SKEY); localStorage.removeItem(SKEY + '.corrupt'); Object.keys(KEYS).forEach(function (k) { localStorage.removeItem(KEYS[k]); localStorage.removeItem(KEYS[k] + '.corrupt'); }); localStorage.removeItem('forma.v1.nightsDone'); } catch (e) { /* ignore */ }
+  if (typeof whoopOnWipe === 'function') whoopOnWipe();
   log('Usunięto wszystkie dane.');
   if (UI.onData) UI.onData();
 }
@@ -1597,9 +1940,9 @@ var NIGHT_MIN_MS = 30 * 60000;
 function buzz(ms) { // haptics: only when the Android bridge offers vibrate(ms)
   try { var FN = window.FormaNative; if (FN && typeof FN.vibrate === 'function') FN.vibrate(ms); } catch (e) { /* ignore */ }
 }
-function nat(m, a) {
+function nat(m) { // nat('method', arg1, arg2, ...)
   try {
-    var FN = window.FormaNative, raw = a === undefined ? FN[m]() : FN[m](a);
+    var FN = window.FormaNative, args = Array.prototype.slice.call(arguments, 1), raw = FN[m].apply(FN, args);
     if (typeof raw !== 'string') return raw == null ? null : raw;
     try { return JSON.parse(raw); } catch (e) { return raw; }
   } catch (e) { log('Błąd natywny ' + m + ': ' + (e && e.message)); return null; }
@@ -1740,7 +2083,8 @@ if (window.FormaNative) window.__formaNativeEvent = function (ev) {
       case 'warning':
         if (ev.code === 'lowBattery') { S.night.warn = 'Bateria opaski: ' + ev.level + '%. Może nie wystarczyć do rana – pomiar działa dalej.'; log(S.night.warn); if (UI.onNight) UI.onNight(); }
         break;
-      case 'appResumed': nightRefresh(); nativeSync(); checkNights(); if (UI.onNight) UI.onNight(); break;
+      case 'appResumed': nightRefresh(); nativeSync(); checkNights(); if (UI.onNight) UI.onNight(); if (typeof whoopMaybeSync === 'function') whoopMaybeSync(); break;
+      case 'whoopAuth': case 'whoopSync': if (typeof whoopNativeEvent === 'function') whoopNativeEvent(ev); break;
       case 'error': log('Błąd natywny: ' + ev.message); if (ev.message) showError(String(ev.message)); break;
       default: break;
     }
@@ -1784,6 +2128,235 @@ function startDemo() {
   if (!BATT_STATIC) setInterval(function () { if (S.battery < 100) setBattery(S.battery + 1); }, FAST ? 2500 : 60000);
 }
 
+/* ===== Forma - WHOOP Developer API (v2): connection state, web transport (fetch), Android transport (FormaNative.whoop*), sync ===== */
+var WH = window.WhoopCore;
+var WKEY = 'forma.v1.whoop'; // credentials + tokens (web only) + last sync. NOT part of KEYS: never exported, never in the repo.
+var WH_ERR = {
+  config: 'Wpisz Client ID i Client Secret z developer.whoop.com.',
+  auth: 'Sesja WHOOP wygasła albo dostęp został cofnięty. Połącz konto ponownie.',
+  offline: 'Brak połączenia z internetem. Spróbuję ponownie przy następnym otwarciu.',
+  cors: 'Przeglądarka blokuje połączenie z WHOOP – użyj aplikacji na Androida.',
+  rate: 'WHOOP ogranicza liczbę zapytań. Spróbuj za kilka minut.',
+  state: 'Nie zgadza się kod bezpieczeństwa (state). Zacznij łączenie od nowa.',
+  denied: 'WHOOP nie udzielił dostępu. Spróbuj ponownie i zaakceptuj uprawnienia.',
+  http: 'WHOOP zwrócił błąd. Spróbuj ponownie za chwilę.',
+  app: 'Nie udało się uruchomić logowania WHOOP.'
+};
+S.wh = { cfg: { configured: false, connected: false, clientId: '' }, syncing: false, connecting: false, err: null, msg: '', lastSync: null, stats: null, form: { id: '', secret: '' }, copied: null, show: 0 };
+
+// ---------- local store (web: credentials + tokens; Android: only the last sync time) ----------
+function whStore() {
+  if (DEMO) return S.whMem || {};
+  try { var o = JSON.parse(localStorage.getItem(WKEY) || '{}'); return o && typeof o === 'object' ? o : {}; } catch (e) { return {}; }
+}
+function whSave(o) { if (DEMO) { S.whMem = o; return true; } try { localStorage.setItem(WKEY, JSON.stringify(o)); return true; } catch (e) { return false; } }
+function whPatch(p) { var o = Object.assign(whStore(), p); Object.keys(p).forEach(function (k) { if (p[k] === undefined) delete o[k]; }); whSave(o); return o; }
+function whRefreshCfg() {
+  if (NATIVE) {
+    var st = nat('whoopStatus');
+    if (st && typeof st === 'object') {
+      S.wh.cfg = { configured: !!st.configured, connected: !!st.connected, clientId: String(st.clientId || '') };
+      if (st.authResult && typeof st.authResult === 'object') whoopNativeEvent(Object.assign({ type: 'whoopAuth' }, st.authResult));
+    }
+  } else {
+    var o = whStore();
+    S.wh.cfg = { configured: !!(o.clientId && o.clientSecret), connected: !!(o.refresh || o.access), clientId: o.clientId || '' };
+  }
+}
+function whSetErr(code, detail) {
+  S.wh.err = { code: code, text: WH_ERR[code] || WH_ERR.http, detail: detail || '' };
+  S.wh.syncing = false; S.wh.connecting = false;
+  log('WHOOP: błąd ' + code + (detail ? ' – ' + detail : ''));
+  if (UI.onWhoop) UI.onWhoop();
+}
+function whErr(code, status, detail) { var e = new Error(detail || code); e.code = code; e.status = status; return e; }
+function whNetErr() { return whErr(typeof navigator !== 'undefined' && navigator.onLine === false ? 'offline' : 'cors'); }
+function whHttpCode(status) { return status === 401 ? 'auth' : (status === 429 ? 'rate' : 'http'); }
+
+// ---------- web transport: OAuth + API through fetch ----------
+function whWebToken(params) {
+  var o = whStore();
+  var body = WH.formBody(Object.assign({ client_id: o.clientId, client_secret: o.clientSecret }, params));
+  return fetch(WH.URLS.token, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body }).then(function (res) {
+    return res.text().then(function (txt) {
+      var j = null; try { j = JSON.parse(txt); } catch (e) { /* not json */ }
+      if (!res.ok || !j || !j.access_token) {
+        var invalid = res.status === 400 || res.status === 401 || (j && /invalid/.test(String(j.error || '')));
+        throw whErr(invalid ? 'auth' : whHttpCode(res.status), res.status, (j && (j.error_description || j.error)) || ('HTTP ' + res.status));
+      }
+      whPatch({ access: j.access_token, refresh: j.refresh_token || o.refresh || null, expiresAt: Date.now() + (+j.expires_in || 3600) * 1000, state: undefined });
+      return j;
+    });
+  }, function () { throw whNetErr(); });
+}
+function whWebRefresh() {
+  var o = whStore(); if (!o.refresh) return Promise.reject(whErr('auth', 0, 'brak refresh tokena'));
+  return whWebToken({ grant_type: 'refresh_token', refresh_token: o.refresh, scope: 'offline' }).catch(function (e) {
+    if (e.code === 'auth') { whPatch({ access: undefined, refresh: undefined, expiresAt: undefined }); whRefreshCfg(); }
+    throw e;
+  });
+}
+function whWebAccess() {
+  var o = whStore();
+  if (o.access && (o.expiresAt || 0) - 60000 > Date.now()) return Promise.resolve(o.access);
+  return whWebRefresh().then(function () { return whStore().access; });
+}
+function whWebGet(path, params, retried) {
+  return whWebAccess().then(function (tok) {
+    var url = WH.URLS.base + path + '?' + WH.formBody(params);
+    return fetch(url, { headers: { Authorization: 'Bearer ' + tok } }).then(function (res) {
+      if (res.status === 401 && !retried) return whWebRefresh().then(function () { return whWebGet(path, params, true); });
+      if (!res.ok) throw whErr(whHttpCode(res.status), res.status, 'HTTP ' + res.status + ' ' + path);
+      return res.json();
+    }, function () { throw whNetErr(); });
+  });
+}
+function whWebAll(path, since) {
+  var out = [], pages = 0;
+  function next(token) {
+    var p = { limit: 25, start: since }; if (token) p.nextToken = token;
+    return whWebGet(path, p).then(function (j) {
+      (j && Array.isArray(j.records) ? j.records : []).forEach(function (r) { out.push(r); });
+      pages++;
+      if (j && j.next_token && pages < 20) return next(j.next_token);
+      return out;
+    });
+  }
+  return next(null);
+}
+function whWebCycles(since) { // v2 first, v1 when v2 does not exist for this app
+  return whWebAll('/v2/cycle', since).catch(function (e) { if (e.status === 404 || e.status === 400) return whWebAll('/v1/cycle', since); throw e; });
+}
+function whWebSync(since) {
+  var data = {};
+  return whWebAll('/v2/recovery', since).then(function (r) { data.recovery = r; return whWebAll('/v2/activity/sleep', since); })
+    .then(function (r) { data.sleep = r; return whWebAll('/v2/activity/workout', since); })
+    .then(function (r) { data.workout = r; return whWebCycles(since).catch(function (e) { if (e.code === 'auth' || e.code === 'cors' || e.code === 'offline') throw e; data.cycle = []; log('WHOOP: brak danych cyklu (' + e.message + ').'); return null; }); })
+    .then(function (r) { if (r) data.cycle = r; return data; });
+}
+
+// ---------- actions ----------
+function whoopLink(kind) { return kind === 'android' ? WH.URLS.redirectAndroid : WH.URLS.redirectWeb; }
+function whoopConnect(id, secret) {
+  id = String(id || '').trim(); secret = String(secret || '').trim();
+  S.wh.err = null; S.wh.msgAt = Date.now(); S.wh.msg = '';
+  var have = S.wh.cfg.configured;
+  if (!have && (!id || !secret)) { whSetErr('config'); return false; }
+  if ((id && !secret && !(have && id === S.wh.cfg.clientId)) || (!id && secret)) { whSetErr('config'); return false; }
+  if (NATIVE) {
+    if (id && secret) { var r0 = nat('whoopSetCredentials', id, secret); if (r0 && r0.ok === false) { whSetErr('app', r0.error); return false; } }
+    var r = nat('whoopAuthorize');
+    if (!r || r.ok === false) { whSetErr(r && r.code ? r.code : 'app', r && r.error); return false; }
+    S.wh.connecting = true; S.wh.form = { id: '', secret: '' }; whRefreshCfg();
+    S.wh.msgAt = Date.now(); S.wh.msg = 'Dokończ logowanie w przeglądarce, a potem wróć do Formy.';
+    if (UI.onWhoop) UI.onWhoop();
+    return true;
+  }
+  if (id && secret) whPatch({ clientId: id, clientSecret: secret });
+  var o = whStore(), state = WH.randomState();
+  whPatch({ state: state });
+  S.wh.connecting = true; S.wh.form = { id: '', secret: '' };
+  if (UI.onWhoop) UI.onWhoop();
+  try { window.location.assign(WH.authorizeUrl(o.clientId, WH.URLS.redirectWeb, state)); } catch (e) { whSetErr('app', e.message); return false; }
+  return true;
+}
+// web: called once at startup. Finishes the code exchange when the page was opened by WHOOP's redirect.
+function whoopHandleRedirect() {
+  if (NATIVE || DEMO) return;
+  var q; try { q = new URLSearchParams(location.search); } catch (e) { return; }
+  var code = q.get('code'), state = q.get('state'), error = q.get('error');
+  if (!code && !error) return;
+  ['code', 'state', 'error', 'error_description', 'scope'].forEach(function (k) { q.delete(k); });
+  var rest = q.toString();
+  try { history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '') + '#/profil'); } catch (e) { /* ignore */ }
+  var o = whStore();
+  if (error) { whPatch({ state: undefined }); whRefreshCfg(); whSetErr('denied', error); return; }
+  if (!o.state || state !== o.state) { whPatch({ state: undefined }); whRefreshCfg(); whSetErr('state'); return; }
+  S.wh.connecting = true;
+  whWebToken({ grant_type: 'authorization_code', code: code, redirect_uri: WH.URLS.redirectWeb }).then(function () {
+    S.wh.connecting = false; whRefreshCfg(); S.wh.msgAt = Date.now(); S.wh.msg = 'Połączono z WHOOP.'; log('WHOOP: połączono (web).');
+    if (UI.onWhoop) UI.onWhoop();
+    whoopSync(true);
+  }, function (e) { whRefreshCfg(); whSetErr(e.code || 'http', e.message); });
+}
+function whoopSync(manual) {
+  if (S.wh.syncing || !S.wh.cfg.connected) return false;
+  S.wh.syncing = true; S.wh.err = null; if (manual) S.wh.msgAt = Date.now(); S.wh.msg = '';
+  var since = WH.sinceFor(S.wh.lastSync, Date.now());
+  log('WHOOP: synchronizacja od ' + since.slice(0, 10) + (NATIVE ? ' (natywnie)' : ' (przeglądarka)') + '.');
+  if (UI.onWhoop) UI.onWhoop();
+  if (NATIVE) {
+    var r = nat('whoopSync', since);
+    if (!r || r.ok === false) whSetErr(r && r.code ? r.code : 'app', r && r.error);
+    return true;
+  }
+  whWebSync(since).then(whoopApplyData, function (e) { whRefreshCfg(); whSetErr(e.code || 'http', e.message); });
+  return true;
+}
+function whoopApplyData(data) {
+  var res;
+  try { res = WH.applySync(S.days, S.workouts, data || {}); }
+  catch (e) { whSetErr('http', 'Błąd przetwarzania: ' + (e && e.message)); return; }
+  S.days = res.days; S.workouts = res.workouts;
+  persist('days'); persist('workouts');
+  S.wh.lastSync = Date.now(); whPatch({ lastSync: S.wh.lastSync });
+  S.wh.stats = res.stats; S.wh.syncing = false; S.wh.err = null;
+  var st = res.stats, n = st.created + st.merged;
+  S.wh.msgAt = Date.now(); S.wh.msg = n || st.workoutsAdded || st.workoutsUpdated ? 'Pobrano: ' + n + ' ' + (n === 1 ? 'noc' : 'nocy') + (st.created ? ' (nowe dni: ' + st.created + ')' : '') + ', treningi: ' + (st.workoutsAdded + st.workoutsUpdated) + '.' : 'Brak nowych danych w WHOOP. Opaska musi najpierw zsynchronizować się z aplikacją WHOOP.';
+  log('WHOOP: ' + S.wh.msg + ' Pominięte treningi (nakładają się na własne): ' + st.workoutsSkipped + '.');
+  if (UI.onData) UI.onData();
+}
+function whoopNativeEvent(ev) {
+  if (ev.type === 'whoopAuth') {
+    S.wh.connecting = false; whRefreshCfg();
+    try { if (location.hash !== '#/profil') go('profil'); } catch (e) { /* ignore */ }
+    if (ev.ok) { S.wh.err = null; S.wh.msgAt = Date.now(); S.wh.msg = 'Połączono z WHOOP.'; log('WHOOP: połączono (Android).'); if (UI.onWhoop) UI.onWhoop(); whoopSync(true); }
+    else whSetErr(ev.code || 'denied', ev.message);
+  } else if (ev.type === 'whoopSync') {
+    if (ev.ok) whoopApplyData(ev.data);
+    else { whRefreshCfg(); whSetErr(ev.code || 'http', ev.message); }
+  }
+}
+function whoopDisconnect() {
+  if (NATIVE) nat('whoopDisconnect'); else whPatch({ access: undefined, refresh: undefined, expiresAt: undefined, state: undefined });
+  S.wh.err = null; S.wh.syncing = false; S.wh.connecting = false; S.wh.msgAt = Date.now(); S.wh.msg = 'Rozłączono. Pobrane dane zostają w Formie.';
+  whRefreshCfg(); log('WHOOP: rozłączono.');
+  if (UI.onWhoop) UI.onWhoop();
+}
+function whoopForget() { // remove stored client id/secret and tokens
+  if (NATIVE) { nat('whoopDisconnect'); nat('whoopSetCredentials', '', ''); }
+  else { var ls = whStore().lastSync; whSave(ls ? { lastSync: ls } : {}); }
+  S.wh.err = null; S.wh.msgAt = Date.now(); S.wh.msg = 'Usunięto dane logowania z tego urządzenia.'; S.wh.form = { id: '', secret: '' };
+  whRefreshCfg(); log('WHOOP: usunięto dane logowania.');
+  if (UI.onWhoop) UI.onWhoop();
+}
+function whoopMaybeSync() { // app open / resume: sync when connected and the last sync is older than 30 min
+  if (!S.wh.cfg.connected || S.wh.syncing || S.wh.connecting) return false;
+  if (S.wh.err && S.wh.err.code === 'auth') return false;
+  if (!WH.needsSync(S.wh.lastSync, Date.now())) return false;
+  return whoopSync(false);
+}
+function whoopOnWipe() { S.wh.lastSync = null; S.wh.stats = null; S.wh.msgAt = Date.now(); S.wh.msg = ''; whPatch({ lastSync: undefined }); }
+function whoopInit() {
+  S.wh.lastSync = whStore().lastSync || null;
+  whRefreshCfg();
+  try { document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && !NATIVE) whoopMaybeSync(); }); } catch (e) { /* ignore */ }
+}
+function whLastSyncText() {
+  var t = S.wh.lastSync; if (!t) return 'jeszcze nie synchronizowano';
+  var d = new Date(t), hm = C.localTimeStr(d), ds = C.localDateStr(d);
+  return ds === todayStr() ? hm : (ds === C.addDays(todayStr(), -1) ? 'wczoraj ' + hm : ds.slice(8) + '.' + ds.slice(5, 7) + ' ' + hm);
+}
+function whoopCopy(text, key) {
+  function done(ok) { S.wh.copied = ok ? key : null; if (UI.onWhoop) UI.onWhoop(); setTimeout(function () { if (S.wh.copied === key) { S.wh.copied = null; if (UI.onWhoop) UI.onWhoop(); } }, 1800); }
+  try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(function () { done(true); }, function () { fallback(); }); return; } } catch (e) { /* fall through */ }
+  fallback();
+  function fallback() {
+    try { var ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'; document.body.appendChild(ta); ta.select(); var ok = document.execCommand('copy'); ta.remove(); done(ok); }
+    catch (e) { done(false); }
+  }
+}
+
 /* ===== Forma 0.2 - UI part A: helpers, charts, shell/router, Dziś, Pomiar, Poranek ===== */
 var REDUCED = false;
 try { REDUCED = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { /* ignore */ }
@@ -1796,6 +2369,7 @@ var ICONS = {
   gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   moon: '<path d="M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10z"/>', shield: '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/>',
   sun: '<path d="M3 18h18M6 18a6 6 0 0 1 12 0M12 5v3M4.5 9.5l2 2M19.5 9.5l-2 2"/>', trend: '<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 6-6"/>',
+  other: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v4.5l3 2"/>',
   gym: '<path d="M6.5 6.5v11M17.5 6.5v11M3.5 9v6M20.5 9v6M6.5 12h11"/>',
   run: '<circle cx="14" cy="4.5" r="2"/><path d="M4 21l5-7 3 2 1 5M9 14l-1-5 5-2 2 4 3 1M8 9L5 11"/>',
   walk: '<circle cx="13" cy="4.5" r="2"/><path d="M10 21l2-7-2-3 3-3 3 3 3 1M12 14l4 2v5"/>',
@@ -1888,9 +2462,10 @@ function spark(vals, w, h, color) {
 function lastDays(n) { var t = C.dayNum(todayStr()), out = []; for (var i = n - 1; i >= 0; i--) out.push(C.dateFromNum(t - i)); return out; }
 function dayMap() { var m = {}; S.days.forEach(function (d) { m[d.date] = d; }); return m; }
 function hrvChartSvg(n, label, thin) {
-  var dates = lastDays(n), dm = dayMap(), b = C.baseline(S.days, todayStr()), has = b.n >= 5;
+  var dates = lastDays(n), vf = C.viewForDate(S.days, todayStr()), dm = {}, b = C.baseline(vf.view, todayStr()), has = b.n >= 5;
+  vf.view.forEach(function (d) { dm[d.date] = d; });
   var vals = [], line = [], mx = 40, mn = 1e9;
-  dates.forEach(function (d, i) { var r = dm[d]; if (r) { vals.push({ i: i, v: r.rmssd, q: r.quality, d: d }); mx = Math.max(mx, r.rmssd); mn = Math.min(mn, r.rmssd); var r7 = C.rolling7(S.days, d); line.push({ i: i, v: r7.meanMs }); } });
+  dates.forEach(function (d, i) { var r = dm[d]; if (r) { vals.push({ i: i, v: r.rmssd, q: r.quality, d: d }); mx = Math.max(mx, r.rmssd); mn = Math.min(mn, r.rmssd); var r7 = C.rolling7(vf.view, d); line.push({ i: i, v: r7.meanMs }); } });
   if (has) mx = Math.max(mx, b.hiMs);
   mx = Math.ceil(mx * 1.12 / 10) * 10;
   var xl = n <= 7 ? dates.map(function (d, i) { return { i: i, t: WD1[dowIdx(d)], b: i === n - 1, c: i === n - 1 ? '#fff' : '#9AA6B0' }; }) : [{ i: 0, t: n + ' dni temu', a: 'start' }, { i: n - 1, t: 'dziś', a: 'end' }];
@@ -2135,7 +2710,15 @@ function dzisStatusLine(st) {
   if (!st.hasRecord) return { dot: '#9AA6B0', text: 'Brak dzisiejszego pomiaru' };
   if (!st.scored) return { dot: '#F2A93B', text: st.label || 'Kalibracja' };
   var t = st.color === 'zielony' ? 'Zregenerowany' : (st.color === 'żółty' ? 'Umiarkowanie' : 'Do regeneracji');
-  return { dot: COL[st.color], text: t + (st.status === 'kalibracja' ? ' · wynik wstępny' : '') };
+  return { dot: COL[st.color], text: t + (st.status === 'kalibracja' ? ' · wynik wstępny' : '') + (st.rec && st.rec.source === 'whoop' ? ' · dane WHOOP' : '') };
+}
+// small chip with the day's WHOOP numbers (only when today's record is from WHOOP or carries WHOOP data)
+function whoopChipHtml(st, i) {
+  var w = st.rec && st.rec.whoop; if (!w || (w.recovery == null && w.hrv == null)) return '';
+  var parts = [];
+  if (w.recovery != null) parts.push('regeneracja ' + nf(w.recovery, 0) + '%');
+  if (w.hrv != null) parts.push('HRV ' + nf(w.hrv, 0) + ' ms');
+  return '<a href="#/regeneracja" class="fu" style="animation-delay:' + (i * 60) + 'ms;align-self:center;display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 14px;border-radius:999px;border:1px solid rgba(45,156,255,.45);background:rgba(45,156,255,.12);color:#D6EBFF;font-size:13px;font-weight:600" aria-label="WHOOP: ' + esc(parts.join(', ')) + '"><span class="dotp" style="background:#2D9CFF;animation:none"></span>WHOOP: ' + esc(parts.join(' · ')) + '</a>';
 }
 function hrTileHtml() {
   var d0 = new Date(); d0.setHours(0, 0, 0, 0);
@@ -2162,7 +2745,7 @@ function gaugeHtml(strain, band) {
 }
 function weekDayBars(today) {
   var ws = C.dayNum(FC.weekStart(today)), mx = 1, vals = [];
-  for (var i = 0; i < 7; i++) { var s = FC.dailyStrain(S.workouts, C.dateFromNum(ws + i)); vals.push(s); mx = Math.max(mx, s); }
+  for (var i = 0; i < 7; i++) { var s = FC.dailyStrain(S.workouts, C.dateFromNum(ws + i), S.days); vals.push(s); mx = Math.max(mx, s); }
   var ti = dowIdx(today);
   return '<div class="row" style="align-items:flex-end;gap:6px;height:56px">' + vals.map(function (v, i) {
     return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;justify-content:flex-end;height:100%"><div class="gy" style="width:100%;max-width:14px;border-radius:3px;height:' + Math.max(3, v / Math.max(mx, 8) * 38) + 'px;background:' + (i === ti ? '#2D9CFF' : (v > 0 ? '#5B7B99' : '#2F383F')) + '"></div><span class="xs ' + (i === ti ? '' : 'mut') + '" style="font-weight:' + (i === ti ? 700 : 400) + '">' + WD1[i] + '</span></div>';
@@ -2170,7 +2753,7 @@ function weekDayBars(today) {
 }
 function rDzis() {
   var today = todayStr(), st = todayStatus(), yday = C.addDays(today, -1);
-  var sl = FC.sleepNight(S.days, S.workouts, today), strain = FC.dailyStrain(S.workouts, today), pc = profileCtx();
+  var sl = FC.sleepNight(S.days, S.workouts, today), strain = FC.dailyStrain(S.workouts, today, S.days), pc = profileCtx();
   var line = dzisStatusLine(st), now = new Date(), i = 1;
   var h = header('Dziś', { gear: true, full: true });
   h += '<div class="body">';
@@ -2192,6 +2775,8 @@ function rDzis() {
   if (!st.hasRecord) {
     h += '<button class="btn pri big fu" data-act="measure" ' + dl(i++) + (S.connected ? '' : ' disabled') + '>Poranny pomiar (2 min)</button>';
     if (!S.connected) h += '<p class="xs mut" style="margin:-6px 0 0">Najpierw połącz opaskę.</p>';
+  } else if (st.rec.source === 'whoop' && S.connected) {
+    h += '<button class="btn full fu" data-act="measure" ' + dl(i++) + '>Dodaj własny pomiar (2 min)</button>';
   }
   // rings
   var rg = st.scored ? { v: st.readiness + '<span style="font-size:21px;font-weight:600;margin-left:2px;color:#C5CED6">%</span>', f: st.readiness / 100, c: COL[st.color] } : { v: '—', f: 0, c: '#2F383F' };
@@ -2201,8 +2786,9 @@ function rDzis() {
     '<div class="col" style="align-items:center;gap:2px"><a href="#/regeneracja" class="rlink main" aria-label="Regeneracja: ' + (st.scored ? st.readiness + '%' : 'brak wyniku') + '">' + ringHtml(128, 10, rg.f, rg.c, '<span class="n pop" style="font-size:52px;line-height:1;display:flex;align-items:baseline">' + rg.v + '</span>') + '<span class="row" style="gap:2px">Regeneracja' + ico('chev', 12) + '</span></a>' +
     '<span class="row xs sub" style="gap:6px;text-align:center"><span class="dotp" style="background:' + line.dot + '"></span>' + esc(line.text) + '</span></div>' +
     '<a href="#/trening" class="rlink" style="margin-top:22px" aria-label="Obciążenie: ' + nf(strain, 1) + ' z 21">' + ringHtml(84, 8, strain / 21, '#2D9CFF', '<span class="n pop" style="font-size:28px;line-height:1">' + nf(strain, 1) + '</span>') + '<span class="row" style="gap:2px">Obciążenie' + ico('chev', 12) + '</span></a></div>';
+  h += whoopChipHtml(st, i++);
   // daily note (template, no AI)
-  var note = FC.dailyNote(st, sl, S.workouts.length ? FC.dailyStrain(S.workouts, yday) : null);
+  var note = FC.dailyNote(st, sl, S.workouts.length || S.days.length ? FC.dailyStrain(S.workouts, yday, S.days) : null);
   h += '<div class="card fu" ' + dl(i++) + '>' + (note ? '' : '<p class="lbl">Notatka dnia</p>');
   if (note) h += '<span class="n" style="font-size:20px;line-height:1.15">' + esc(note.title) + '</span><span class="row xs mut" style="gap:6px">' + ico('spark', 14) + 'Szablon na podstawie Twoich liczb, dziś rano</span><span class="sub sm" style="line-height:1.45">' + bold(note.text) + '</span>';
   else h += '<span class="mut sm">Notatka dnia pojawi się po porannym pomiarze. Zbudujemy ją z Twoich liczb: regeneracji, HRV, snu i obciążenia.</span>';
@@ -2320,7 +2906,7 @@ function rPoranek() {
   else h += '<div class="stepper"><span class="s"><b class="ok">' + ico('check', 12) + '</b>Pomiar</span><hr><span class="s"><b class="cur">2</b><span style="color:#fff;font-weight:600">Sen i samopoczucie</span></span><hr><span class="s"><b>3</b>Tagi</span></div>';
   if (!edit) h += '<div class="card ' + (low || !ok ? 'tint-r' : 'tint-g') + '"><div class="row sp"><div><span class="n" style="font-size:18px">' + (ok ? 'Pomiar zakończony' : 'Za mało uderzeń') + '</span><div class="sm sub">' + (ok ? 'RMSSD ' + nf(p.rmssd, 0) + ' ms · tętno ' + nf(p.hr, 0) + ' · jakość <b style="color:' + QCOL[p.quality] + '">' + p.quality + '</b>' : 'Zarejestrowano ' + p.nBeats + ' uderzeń.') + '</div></div><button class="btn sm" data-act="repeat">Powtórz</button></div>' +
     (!ok ? '<p class="sm" style="margin:0;color:#FFD6DA">Za mało poprawnych uderzeń (' + p.nBeats + '). Powtórz w bezruchu.</p>' : (low ? '<p class="sm" style="margin:0;color:#FFD6DA">Pomiar niepewny (' + nf(p.artifactPct, 1) + '% zakłóceń). Powtórz w bezruchu.</p>' : '')) +
-    (dayRec(p.date) ? (dayRec(p.date).source === 'noc' ? '<p class="xs mut" style="margin:0">Masz dziś wynik nocy – on zostaje głównym wynikiem HRV, ten pomiar zapisze się jako dodatkowy.</p>' : '<p class="xs mut" style="margin:0">Masz już dziś zapisany pomiar – zapis go zastąpi.</p>') : '') + '</div>';
+    (dayRec(p.date) ? (dayRec(p.date).source === 'whoop' ? '<p class="xs mut" style="margin:0">Masz dziś dane z WHOOP – ten pomiar stanie się głównym wynikiem HRV, dane WHOOP zostaną obok do porównania.</p>' : dayRec(p.date).source === 'noc' ? '<p class="xs mut" style="margin:0">Masz dziś wynik nocy – on zostaje głównym wynikiem HRV, ten pomiar zapisze się jako dodatkowy.</p>' : '<p class="xs mut" style="margin:0">Masz już dziś zapisany pomiar – zapis go zastąpi.</p>') : '') + '</div>';
   if (ok) {
     h += '<div class="card"><p class="lbl">Sen tej nocy</p><div class="row"><label class="grow xs mut">Zasnąłem o<input class="inp num" type="time" id="inBed" data-in="bed" data-keep="1" value="' + esc(f.bed) + '"></label><label class="grow xs mut">Obudziłem się o<input class="inp num" type="time" id="inWake" data-in="wakeT" data-keep="1" value="' + esc(f.wake) + '"></label></div><p class="xs mut" style="margin:0">Podpowiedź z wczoraj albo 23:00 / 07:00. Z tego liczymy czas i wynik snu.</p></div>';
     h += '<div class="card"><p class="lbl">Jak się czujesz?</p>' + WB.map(function (w) {
@@ -2341,7 +2927,7 @@ function saveMorning() {
   if (isNaN(FC.parseHM(f.bed)) || isNaN(FC.parseHM(f.wake))) { f.err = 'Podaj godziny snu (zasnąłem / obudziłem się).'; $('pkErr').textContent = f.err; $('pkErr').hidden = false; return; }
   var est = !!(S.editDay && p.sleepEstimated && p.sleep && f.bed === p.sleep.bed && f.wake === p.sleep.wake);
   var rec = C.sanitizeDay(Object.assign({}, p, { wellbeing: f.wb, tags: f.tags, whoopHrv: w, battery: S.editDay ? p.battery : S.battery, sleep: { bed: f.bed, wake: f.wake }, sleepEstimated: est }));
-  if (rec && !S.editDay) { var exN = dayRec(rec.date); if (exN && exN.source === 'noc') rec = C.mergeMorningRecord(exN, rec) || rec; } // night stays primary, morning becomes secondary
+  if (rec && !S.editDay) { var exN = dayRec(rec.date); if (exN && (exN.source === 'noc' || exN.whoop)) rec = C.mergeMorningRecord(exN, rec) || rec; } // night stays primary, morning becomes secondary
   if (!rec) { f.err = 'Nie można zapisać tego pomiaru.'; $('pkErr').textContent = f.err; $('pkErr').hidden = false; return; }
   var wasEdit = !!S.editDay, r = commitDay(rec); S.form = null; S.editDay = null; buzz(30);
   S.flash = { to: 'dzis', text: wasEdit ? 'Zapisano zmiany w porannym zapisie (' + rec.time + ').' : 'Zapisano poranek (' + rec.time + ').' + (r.replaced ? ' Zastąpiono dzisiejszy pomiar.' : '') + (r.saved ? '' : ' Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie') + (DEMO ? ' (demo – tylko w pamięci)' : '') };
@@ -2353,12 +2939,28 @@ UI.onMeasureTick = function () { };
 UI.onBattery = function () { renderBattery(); var top = stack[stack.length - 1]; if (top && top.path === 'pomiar' && !S.measure) rerender(); };
 UI.onConn = function () { var top = stack[stack.length - 1]; if (top && /^(dzis|pomiar|profil|diagnostyka)$/.test(top.path)) rerender(); };
 UI.onData = function () { rerender(); };
+UI.onWhoop = function () { var top = stack[stack.length - 1]; if (top && top.path === 'profil') rerender(); };
 
 /* ===== Forma 0.2 - UI part B: Regeneracja, Sen, Trening, sesje, Forma, Trendy, Profil, Diagnostyka, events, init ===== */
 function weekdayShort(date) { return WD1[dowIdx(date)]; }
 
 // ====================== REGENERACJA ======================
 var ZONE_TXT = { zielony: 'Zielona strefa. Organizm dobrze zregenerowany – gotowy na mocny wysiłek.', 'żółty': 'Żółta strefa. Umiarkowana regeneracja – trenuj z głową.', czerwony: 'Czerwona strefa. Organizm potrzebuje odpoczynku.' };
+// "Nasz pomiar vs WHOOP": same night, two methods, side by side
+function compareCardHtml(st, rec) {
+  var w = rec.whoop; if (!w || (w.hrv == null && w.recovery == null && w.rhr == null)) return '';
+  var own = rec.source !== 'whoop';
+  var cell = function (v, d, u) { return v == null || !isFinite(v) ? '<span class="mut">—</span>' : '<span class="n" style="font-size:22px">' + nf(v, d) + '</span><span class="xs mut"> ' + u + '</span>'; };
+  var row = function (label, a, b) { return '<span class="sm sub">' + label + '</span><span style="text-align:right">' + a + '</span><span style="text-align:right">' + b + '</span>'; };
+  return '<div class="card fu js-cmp" ' + dl(2) + '><p class="lbl">Nasz pomiar vs WHOOP</p>' +
+    '<div style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr);gap:8px 6px;align-items:baseline">' +
+    '<span></span><span class="xs mut" style="text-align:right">Forma</span><span class="xs" style="text-align:right;color:#2D9CFF;font-weight:600">WHOOP</span>' +
+    row('HRV (RMSSD)', cell(own ? rec.rmssd : null, 0, 'ms'), cell(w.hrv, 0, 'ms')) +
+    row('Tętno spoczynk.', cell(own ? rec.hr : null, 0, 'ud/min'), cell(w.rhr, 0, 'ud/min')) +
+    row('Regeneracja', cell(own && st.scored ? st.readiness : null, 0, '%'), cell(w.recovery, 0, '%')) + '</div>' +
+    ((w.spo2 != null || w.skinTemp != null) ? '<p class="xs sub" style="margin:0">WHOOP dodatkowo: ' + [w.spo2 != null ? 'SpO₂ ' + nf(w.spo2, 0) + '%' : '', w.skinTemp != null ? 'temp. skóry ' + nf(w.skinTemp, 1) + ' °C' : ''].filter(Boolean).join(' · ') + '</p>' : '') +
+    '<p class="xs mut" style="margin:0">' + (own ? 'To inna metoda i inna pora pomiaru – porównuj trend, nie pojedyncze liczby.' : 'Brak własnego pomiaru z tej doby: wynik Formy liczymy z danych WHOOP. Własny pomiar dodasz przyciskiem wyżej.') + '</p></div>';
+}
 function rRegen() {
   var st = todayStatus(), h = header('Regeneracja', { back: 'dzis' }) + '<div class="body">';
   if (!st.hasRecord) return h + emptyCard('Brak pomiaru z dzisiaj', 'Regeneracja liczy się z porannego pomiaru HRV i tętna spoczynkowego.', '<button class="btn pri full" data-act="measure"' + (S.connected ? '' : ' disabled') + '>Poranny pomiar (2 min)</button>' + (S.connected ? '' : '<p class="xs mut" style="margin:0">Najpierw połącz opaskę (zakładka Dziś).</p>')) + '<a href="#/pomiary" class="btn full">Wszystkie pomiary</a></div>';
@@ -2366,18 +2968,21 @@ function rRegen() {
   h += '<div class="row fu" style="gap:16px">' + ringHtml(128, 10, st.scored ? st.readiness / 100 : 0, st.scored ? COL[st.color] : '#2F383F', '<span class="n pop" style="font-size:46px;line-height:1">' + (st.scored ? st.readiness + '<span style="font-size:20px;color:#C5CED6">%</span>' : '—') + '</span>') +
     '<p class="sub" style="margin:0;font-size:15px">' + (st.scored ? ZONE_TXT[st.color] : esc(st.label || '')) + (st.scored && st.status === 'kalibracja' ? ' <span class="mut">(' + esc(st.label) + ')</span>' : '') + '</p></div>';
   var diff = st.today.rmssd - st.usual.rmssd, inBand = b.n >= 5 && st.today.rmssd >= b.loMs && st.today.rmssd <= b.hiMs;
-  h += '<div class="card fu" ' + dl(1) + '><p class="lbl">HRV – 7 ostatnich nocy</p><div class="row" style="align-items:baseline;gap:10px"><span class="n" style="font-size:36px">' + nf(rec.rmssd, 0) + ' ms</span>' +
+  h += '<div class="card fu" ' + dl(1) + '><p class="lbl">HRV – 7 ostatnich nocy</p><div class="row" style="align-items:baseline;gap:10px"><span class="n" style="font-size:36px">' + nf(st.today.rmssd, 0) + ' ms</span>' +
     (b.n >= 1 ? '<span class="sm" style="color:' + (inBand ? '#C5CED6' : (diff > 0 ? '#2EE86B' : '#F2A93B')) + '">' + (inBand ? 'w normie' : (diff > 0 ? '+' : '−') + nf(Math.abs(diff), 0) + ' ms ' + (diff > 0 ? 'ponad normę' : 'poniżej normy')) + '</span>' : '') + '</div>' +
     '<span class="xs mut">RMSSD, ms' + (b.n >= 5 ? ' · norma ' + nf(b.loMs, 0) + '–' + nf(b.hiMs, 0) : ' · norma po 5 pomiarach') + '</span>' +
-    '<div class="row sp xs"><span style="color:#2EE86B;font-weight:600">' + (b.n >= 5 ? 'Twoja norma (60 dni)' : '') + '</span><span class="mut">— średnia 7 dni: ' + nf(st.r7.meanMs, 0) + (isFinite(st.r7.cvPct) ? ' · CV ' + nf(st.r7.cvPct, 0) + '%' : '') + '</span></div>' + hrvChartSvg(7, 'HRV z 7 ostatnich nocy') + '</div>';
-  var qn = { 'wysoka': 'Pomiar HRV wiarygodny', 'średnia': 'Pomiar HRV średniej jakości', 'niska': 'Pomiar HRV niepewny' }[rec.quality];
+    '<div class="row sp xs"><span style="color:#2EE86B;font-weight:600">' + (b.n >= 5 ? 'Twoja norma (60 dni)' : '') + '</span><span class="mut">— średnia 7 dni: ' + nf(st.r7.meanMs, 0) + (isFinite(st.r7.cvPct) ? ' · CV ' + nf(st.r7.cvPct, 0) + '%' : '') + '</span></div>' + hrvChartSvg(7, 'HRV z 7 ostatnich nocy') + '<span class="xs mut">' + esc(st.normLabel || '') + '</span></div>';
+  var qn = rec.source === 'whoop' ? (rec.quality === 'niska' ? 'WHOOP jeszcze się kalibruje – dane orientacyjne' : 'Dane HRV z WHOOP') : { 'wysoka': 'Pomiar HRV wiarygodny', 'średnia': 'Pomiar HRV średniej jakości', 'niska': 'Pomiar HRV niepewny' }[rec.quality];
   h += '<div class="card ' + (rec.quality === 'niska' ? 'tint-r' : 'tint-g') + ' fu" ' + dl(2) + '><div class="row">' + ico('shield', 24) + '<span class="n" style="font-size:18px">' + qn + '</span></div>' +
-    (rec.source === 'noc'
+    (rec.source === 'whoop'
+      ? '<p class="sm sub" style="margin:0"><b style="color:#fff">Źródło: WHOOP (oficjalne API)</b> · HRV i tętno spoczynkowe z nocy, policzone przez WHOOP' + (rec.whoop && rec.whoop.sleep ? ', sen z jego pomiaru' : '') + '. To inna metoda niż pomiar z opaski w Formie, dlatego norma i wynik liczą się osobno z danych WHOOP.</p>'
+      : rec.source === 'noc'
       ? '<p class="sm sub" style="margin:0"><b style="color:#fff">Źródło: noc (WHOOP)</b> · ' + esc(rec.device || 'Opaska') + ' · okna 5 min poprawne: ' + rec.validWindows + ' z ' + rec.totalWindows + ' · ' + rec.nBeats + ' uderzeń, ' + nf(rec.artifactPct, 1) + '% zakłóceń usuniętych · pominięte powtórzenia WHOOP: ' + rec.dupCount + (rec.sleepEstimated ? ' · sen z czasu startu i pobudki' : '') + '</p>' +
         (rec.secondary ? '<p class="sm" style="margin:0;color:#C5CED6">Pomiar poranny (2 min, ' + rec.secondary.time + '): ' + nf(rec.secondary.rmssd, 0) + ' ms – dodatkowy, wynik nocy jest główny</p>' : '')
       : '<p class="sm sub" style="margin:0">' + esc(rec.device || 'Opaska') + ' · 2 min w bezruchu, ' + rec.time + ' · ' + rec.nBeats + ' uderzeń, ' + nf(rec.artifactPct, 1) + '% zakłóceń usuniętych · pominięte powtórzenia WHOOP: ' + rec.dupCount + '</p>') +
     (rec.whoopHrv != null ? '<p class="sm" style="margin:0;color:#C5CED6">WHOOP tej nocy: ' + nf(rec.whoopHrv, 0) + ' ms (inna metoda – porównuj trend, nie liczby)</p>' : '') +
-    '<button class="btn sm" data-act="measure"' + (S.connected ? '' : ' disabled') + ' style="align-self:flex-start">' + (rec.source === 'noc' ? 'Dodaj pomiar poranny (2 min)' : 'Zmierz ponownie') + '</button></div>';
+    '<button class="btn sm" data-act="measure"' + (S.connected ? '' : ' disabled') + ' style="align-self:flex-start">' + (rec.source === 'noc' ? 'Dodaj pomiar poranny (2 min)' : (rec.source === 'whoop' ? 'Dodaj własny pomiar (2 min)' : 'Zmierz ponownie')) + '</button></div>';
+  h += compareCardHtml(st, rec);
   if (st.scored) {
     h += '<div class="card fu" ' + dl(3) + '><p class="lbl">Co złożyło się na wynik</p><div class="g2" style="gap:12px 18px"><div><div class="row sp"><span class="sm sub">HRV · 75%</span><span class="n" style="font-size:22px">' + Math.round(st.cHrv) + '</span></div>' + factorBar(st.cHrv) + '</div>' +
       '<div><div class="row sp"><span class="sm sub">Tętno spocz. · 25%</span><span class="n" style="font-size:22px">' + Math.round(st.cRhr) + '</span></div>' + factorBar(st.cRhr) + '</div></div>' +
@@ -2421,6 +3026,26 @@ function sleepHrCard(today) {
     icon(6, false) + '<text x="38" y="164" font-size="13" fill="#C5CED6">' + esc(bed) + '</text><text x="284" y="164" text-anchor="end" font-size="13" fill="#C5CED6">' + esc(wake) + '</text>' + icon(290, true) + '</svg>';
   return head + s + '<span class="xs mut">Różowe pole: 5 minut spokojnego, głębokiego snu, z których liczymy HRV.' + (r.date !== today ? ' Noc z ' + ddmm(r.date) + '.' : '') + '</span>';
 }
+var STAGE_COL = { deep: '#8B5CF6', rem: '#E07BF0', light: '#6C86A8', awake: '#F2A93B' };
+function sleepStagesCard(sl, idx) {
+  var w = sl && sl.whoop; if (!w || w.lightMin == null) return '';
+  var seg = [['deep', 'Głęboki', w.deepMin || 0], ['rem', 'REM', w.remMin || 0], ['light', 'Lekki', w.lightMin || 0], ['awake', 'Przebudzenia', w.awakeMin || 0]];
+  var tot = seg.reduce(function (a, x) { return a + x[2]; }, 0); if (!(tot > 0)) return '';
+  var dur = function (m) { return FC.fmtDur(m / 60); };
+  var aria = 'Fazy snu: ' + seg.map(function (x) { return x[1] + ' ' + dur(x[2]); }).join(', ');
+  var h = '<div class="card fu js-stages" ' + dl(idx) + '><div class="row sp"><p class="lbl">Fazy snu</p><span class="xs" style="color:#2D9CFF;font-weight:600">WHOOP</span></div>' +
+    '<div role="img" aria-label="' + esc(aria) + '" style="display:flex;gap:2px;height:16px">' + seg.map(function (x) { return x[2] > 0 ? '<i class="gx" style="flex:' + x[2].toFixed(1) + ';min-width:4px;border-radius:4px;background:' + STAGE_COL[x[0]] + '"></i>' : ''; }).join('') + '</div>' +
+    '<div class="g2" style="gap:8px 12px">' + seg.map(function (x) { return '<div><div class="row" style="gap:6px"><span class="dotp" style="background:' + STAGE_COL[x[0]] + ';animation:none"></span><span class="sm sub">' + x[1] + '</span></div><span class="n" style="font-size:20px">' + dur(x[2]) + '</span> <span class="xs mut">' + nf(x[2] / tot * 100, 0) + '%</span></div>'; }).join('') + '</div>';
+  var facts = [];
+  if (w.inBedMin != null) facts.push(['W łóżku', dur(w.inBedMin)]);
+  if (w.efficiency != null) facts.push(['Efektywność', nf(w.efficiency, 0) + '%']);
+  if (w.respRate != null) facts.push(['Oddech', nf(w.respRate, 1) + ' odd./min']);
+  if (w.disturbances != null) facts.push(['Zakłócenia snu', nf(w.disturbances, 0)]);
+  if (w.performance != null) facts.push(['Wydajność (WHOOP)', nf(w.performance, 0) + '%']);
+  if (w.consistency != null) facts.push(['Regularność (WHOOP)', nf(w.consistency, 0) + '%']);
+  if (facts.length) h += '<div class="g2" style="gap:6px 12px;border-top:1px solid rgba(255,255,255,.08);padding-top:8px">' + facts.map(function (f) { return '<div class="row sp xs"><span class="mut">' + f[0] + '</span><b>' + f[1] + '</b></div>'; }).join('') + '</div>';
+  return h + '<p class="xs mut" style="margin:0">Czas snu w Formie to czas faktycznie przespany (bez przebudzeń). Godziny snu pochodzą z pomiaru WHOOP.</p></div>';
+}
 function rSen() {
   var today = todayStr(), sl = FC.sleepNight(S.days, S.workouts, today), h = header('Sen', { back: 'dzis' }) + '<div class="body">';
   var tp = FC.tonightPlan(S.days, S.workouts, today, plannedWake());
@@ -2429,15 +3054,16 @@ function rSen() {
     h += '<div class="card fu"><div class="row sp"><div><p class="lbl">Godziny snu</p><div class="n" style="font-size:36px;line-height:1.15;white-space:nowrap">' + FC.fmtDur(sl.durH) + '</div><div class="sub">z ' + FC.fmtDur(sl.needH) + ' potrzeby</div></div>' +
       '<div style="text-align:right"><div class="xs mut" style="letter-spacing:.1em">WYNIK SNU</div><div class="n" style="font-size:36px;color:#E07BF0">' + sl.score + '%</div><div class="xs mut">' + (sl.shortH > 0.02 ? 'dług snu ' + FC.fmtDur(sl.shortH) : 'potrzeba pokryta') + '</div></div></div>';
     h += sleepHrCard(today) + '</div>';
+    h += sleepStagesCard(sl, 1);
     var dates = lastDays(7), bars = [], need = [];
     dates.forEach(function (d, i) { var n = FC.sleepNight(S.days, S.workouts, d); if (n) { bars.push({ i: i, v: n.durH, color: '#E07BF0', op: d === today ? 1 : 0.5 }); need.push({ i: i, v: n.needH }); } });
     h += '<div class="card fu" ' + dl(1) + '><div class="row sp xs mut"><span>Czas snu, 7 ostatnich nocy</span><span>--- potrzeba</span></div>' + chart({ n: 7, ymax: 10, ticks: [0, 4, 8], label: 'Czas snu z 7 ostatnich nocy', bars: bars, lines: [{ pts: need, color: '#C5CED6', w: 1.5, dash: true }], tickFmt: function (t) { return t + ' h'; }, xl: dates.map(function (d, i) { return { i: i, t: weekdayShort(d), b: i === 6, c: i === 6 ? '#fff' : '#9AA6B0' }; }) }) +
-      '<p class="xs mut" style="margin:0">Poszedłeś spać ' + esc(sl.bed) + ', wstałeś ' + esc(sl.wake) + (sl.estimated ? ' (z zapisu nocy)' : '') + '.</p></div>';
+      '<p class="xs mut" style="margin:0">Poszedłeś spać ' + esc(sl.bed) + ', wstałeś ' + esc(sl.wake) + (sl.whoop ? ' (pomiar WHOOP)' : '') + '.</p></div>';
     var r = sl.regInfo;
     h += '<div class="card fu" ' + dl(1) + '><p class="lbl">Składniki wyniku snu</p>' +
       '<div class="row sp"><span class="sm sub">Wydajność · 60%</span><span class="n" style="font-size:22px">' + Math.round(sl.perf) + '</span></div>' + factorBar(sl.perf) +
       '<div class="row sp"><span class="sm sub">Regularność · 20%</span><span class="n" style="font-size:22px">' + (sl.reg == null ? '—' : Math.round(sl.reg)) + '</span></div>' + (sl.reg == null ? '<p class="xs mut" style="margin:0 0 6px">Potrzeba co najmniej 3 nocy z godzinami snu (masz ' + r.n + '). Do czasu zebrania danych wynik liczymy bez tego składnika.</p>' : factorBar(sl.reg) + '<p class="xs mut" style="margin:0">Odchylenie godzin: zasypianie ±' + nf(r.sdBed, 0) + ' min, pobudka ±' + nf(r.sdWake, 0) + ' min (−10 pkt za każde 30 min).</p>') +
-      '<div class="row sp"><span class="sm sub">Efektywność · 20%</span><span class="n" style="font-size:22px">100</span></div>' + factorBar(100) + '<p class="xs mut" style="margin:0">Brak danych o czasie w łóżku – przyjęto 100.</p></div>';
+      '<div class="row sp"><span class="sm sub">Efektywność · 20%</span><span class="n" style="font-size:22px">' + Math.round(sl.eff) + '</span></div>' + factorBar(sl.eff) + '<p class="xs mut" style="margin:0">' + (sl.effReal ? 'Efektywność snu z pomiaru WHOOP.' : 'Brak danych o czasie w łóżku – przyjęto 100.') + '</p></div>';
     h += '<div class="card fu" ' + dl(2) + '><p class="lbl">Skąd ta potrzeba snu</p><p class="sm sub" style="margin:0">8,0 h podstawy + 0,05 h × (wczorajsze obciążenie ' + nf(sl.strainY, 1) + ' − 10, minimum 0) + 0,5 × dług z ostatnich nocy (' + nf(sl.debt3, 2) + ' h) = <b style="color:#fff">' + nf(sl.needH, 2) + ' h</b>.</p></div>';
   }
   h += '<div class="card tint-p fu" ' + dl(3) + '><span class="n" style="font-size:20px">Dziś połóż się o ' + esc(tp.bed || '—') + '</span><span class="sm sub">Tak, by przespać ok. ' + FC.fmtDur(tp.needH) + ' i wstać o ' + esc(tp.wake) + (S.profile && S.profile.plannedWake ? '' : ' (przyjęta pobudka – zmienisz ją na ekranie Dziś)') + '. Godzina = pobudka − potrzeba snu − 15 min na zaśnięcie.</span></div>';
@@ -2446,7 +3072,8 @@ function rSen() {
 ROUTES.sen = { tab: 'dzis', depth: 1, parent: 'dzis', render: rSen, mount: renderBattery };
 
 // ====================== TRENING (Obciążenie dnia) ======================
-var WK_NAME = { gym: 'Siłownia', run: 'Bieg', walk: 'Spacer' };
+var WK_NAME = { gym: 'Siłownia', run: 'Bieg', walk: 'Spacer', other: 'Inne' };
+function sportPretty(n) { n = String(n || '').replace(/[-_]+/g, ' ').trim(); return n ? n.charAt(0).toUpperCase() + n.slice(1) : ''; }
 var ZCOL = ['#566067', '#8A96A0', '#4C9EFF', '#2D9CFF', '#F2A93B', '#FF4D5E'];
 function wkWhen(date) { var t = todayStr(); return date === t ? 'Dziś' : (date === C.addDays(t, -1) ? 'Wczoraj' : ddmm(date)); }
 function zonesHtml(z) {
@@ -2455,23 +3082,23 @@ function zonesHtml(z) {
 }
 function workoutRow(w, open) {
   var sl = FC.sessionLoad(w), strain = FC.strainFromLoad(sl.load), vol = FC.workoutVolumeKg(w);
-  var meta = wkWhen(w.date) + ', ' + w.time + ' · ' + nf(w.durMin, 0) + ' min' + (w.hrAvg ? ' · śr. ' + Math.round(w.hrAvg) + ' ud/min' : '');
-  var sum = w.type === 'gym' ? w.exercises.length + ' ćw. · ' + nfi(vol) + ' kg' : (w.distanceKm ? nf(w.distanceKm, 1) + ' km' : 'dystans nie podany');
+  var meta = wkWhen(w.date) + ', ' + w.time + ' · ' + nf(w.durMin, 0) + ' min' + (w.hrAvg ? ' · śr. ' + Math.round(w.hrAvg) + ' ud/min' : '') + (w.source === 'whoop' ? ' · WHOOP' : '');
+  var sum = w.source === 'whoop' ? [sportPretty(w.sport) || WK_NAME[w.type], w.distanceKm ? nf(w.distanceKm, 1) + ' km' : ''].filter(Boolean).join(' · ') : (w.type === 'gym' ? w.exercises.length + ' ćw. · ' + nfi(vol) + ' kg' : (w.distanceKm ? nf(w.distanceKm, 1) + ' km' : 'dystans nie podany'));
   return '<details class="card wk fu"' + (open ? ' open' : '') + '><summary><span style="color:#2D9CFF">' + ico(w.type, 26) + '</span><span class="grow"><span class="n" style="font-size:17px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + WK_NAME[w.type] + ' · ' + sum + '</span><span class="xs mut">' + meta + '</span></span><span class="n" style="font-size:24px;color:#2D9CFF">' + nf(strain, 1) + '</span></summary>' +
     '<div class="col" style="margin-top:8px">' + (w.zonesSec ? '<p class="lbl" style="font-size:12px">Czas w strefach tętna</p>' + zonesHtml(w.zonesSec) : '<p class="xs mut" style="margin:0">' + (w.hasHr ? 'Strefy tętna wymagają profilu i tętna spoczynkowego.' : 'Bez tętna z opaski – obciążenie z oceny wysiłku.') + '</p>') +
-    '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ': z tętna ' + (sl.fromHr ? nf(FC.strainFromLoad(sl.fromHr), 1) : 'brak') + ' · z oceny wysiłku ' + (sl.fromRpe ? nf(FC.strainFromLoad(sl.fromRpe), 1) + ' (RPE ' + w.rpe + ')' : 'brak') + '</p>' +
+    (w.source === 'whoop' ? '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ' = strain z WHOOP' + (w.hrMax ? ' · maks. tętno ' + Math.round(w.hrMax) : '') + '. Trening zaimportowany z WHOOP.</p>' : '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ': z tętna ' + (sl.fromHr ? nf(FC.strainFromLoad(sl.fromHr), 1) : 'brak') + ' · z oceny wysiłku ' + (sl.fromRpe ? nf(FC.strainFromLoad(sl.fromRpe), 1) + ' (RPE ' + w.rpe + ')' : 'brak') + '</p>') +
     (w.exercises.length ? '<p class="xs sub" style="margin:0">' + w.exercises.map(function (e) { return esc(e.name) + ' ' + e.sets.map(function (s) { return nf(s.kg, 1).replace(',0', '') + '×' + s.reps; }).join(', '); }).join('<br>') + '</p>' : '') +
-    '<button class="btn sm danger" style="align-self:flex-start" data-act="delWorkout" data-id="' + esc(w.id) + '" data-confirm="Usuń">Usuń</button></div></details>';
+    (w.source === 'whoop' ? '' : '<button class="btn sm danger" style="align-self:flex-start" data-act="delWorkout" data-id="' + esc(w.id) + '" data-confirm="Usuń">Usuń</button>') + '</div></details>';
 }
 function balanceCard(today) {
-  var r = FC.acwr(S.workouts, today);
+  var r = FC.acwr(S.workouts, today, S.days);
   var h = '<div class="card fu"><div class="row sp"><div><p class="lbl">Bilans obciążenia</p><span class="xs mut">(7 dni / 28 dni)</span></div><span class="n" style="font-size:26px">' + (r ? nf(r.ratio, 2) : '—') + '</span></div>';
   if (!r) return h + '<p class="xs mut" style="margin:0">Bilans pojawi się po 14 dniach z treningami (masz ' + FC.loadDataDays(S.workouts, today) + '). To średnie dzienne obciążenie z 7 dni podzielone przez średnią z 28 dni.</p></div>';
   var cols = [OR_, OR_, OR_, GY_, GY_, GR_, GR_, GR_, GY_, GY_, OR_, OR_];
   return h + segScale(r.ratio / 2, cols, { valueLabel: nf(r.ratio, 2), lo: '0', hi: '2,0', mid: 'bezpiecznie 0,8–1,3' }) + '<p class="sm sub" style="margin:2px 0 0">' + ({ low: 'Obciążenie spada – forma może się obniżać.', ok: 'Obciążenie rośnie w bezpiecznym tempie.', high: 'Obciążenie rośnie szybko – ryzyko przeciążenia.' })[r.zone] + '</p></div>';
 }
 function rTrening() {
-  var today = todayStr(), st = todayStatus(), strain = FC.dailyStrain(S.workouts, today), tb = FC.targetBand(st.scored ? st.color : null);
+  var today = todayStr(), st = todayStatus(), strain = FC.dailyStrain(S.workouts, today, S.days), tb = FC.targetBand(st.scored ? st.color : null);
   var h = header('Obciążenie dnia') + '<div class="body">';
   if (S.flash && S.flash.to === 'trening') h += '<div class="note ok" role="status">' + esc(S.flash.text) + '</div>';
   h += resumeBanner();
@@ -2564,7 +3191,7 @@ function rForma() {
   var td = todayStr(), data = FC.loadDataDays(S.workouts, td), st = todayStatus(), h = header('Forma i HRV', { back: 'trendy' }) + '<div class="body">';
   if (data < 7) h += emptyCard('Kondycja, zmęczenie, forma', 'Potrzeba 7 dni danych treningowych (masz ' + data + ' z 7). Zapisz trening w zakładce Trening – obciążenie liczymy z tętna i oceny wysiłku.', '<a class="btn" href="#/trening">Do treningów</a>');
   else {
-    var ser = FC.loadSeries(S.workouts, td, 42, 14), last = ser[ser.length - 1], pct = FC.tsbPercent(last), z = FC.formZone(pct);
+    var ser = FC.loadSeries(S.workouts, td, 42, 14, S.days), last = ser[ser.length - 1], pct = FC.tsbPercent(last), z = FC.formZone(pct);
     var mx = Math.ceil(Math.max.apply(null, ser.map(function (p) { return Math.max(p.ctl || 0, p.atl || 0); })) * 1.15 / 10) * 10 || 10;
     var tm = Math.ceil(Math.max.apply(null, ser.map(function (p) { return Math.abs(p.tsb || 0); })) * 1.1 / 5) * 5 || 5;
     h += '<div class="card fu"><p class="lbl">Kondycja, zmęczenie, forma</p>' + (pct != null ? '<span style="align-self:flex-start;background:' + z.color + ';color:#0B0E11;font-weight:700;border-radius:999px;padding:4px 12px;font-size:13px">Forma ' + (pct >= 0 ? '+' : '−') + Math.abs(Math.round(pct)) + '% · ' + z.label + '</span>' : '') +
@@ -2574,7 +3201,7 @@ function rForma() {
   }
   if (S.days.length < 7) h += emptyCard('HRV – 60 dni', 'Potrzeba 7 dni porannych pomiarów (masz ' + S.days.length + ' z 7).', '<button class="btn pri full" data-act="measure"' + (S.connected ? '' : ' disabled') + '>Poranny pomiar (2 min)</button>');
   else {
-    var b = C.baseline(S.days, td);
+    var b = C.baseline(C.viewForDate(S.days, td).view, td);
     h += '<div class="card fu" ' + dl(1) + '><p class="lbl">HRV – 60 dni</p>' + (b.n >= 5 ? '<span class="sm" style="color:#2EE86B;font-weight:600">Twoja norma ' + nf(b.loMs, 0) + '–' + nf(b.hiMs, 0) + ' ms</span>' : '') + hrvChartSvg(60, 'HRV z 60 dni', true) +
       '<div class="row xs mut" style="flex-wrap:wrap;gap:4px 12px"><span style="color:#2CE8B5">— średnia 7 dni</span><span>● dzienny RMSSD</span></div></div>';
     if (st.scored) {
@@ -2609,7 +3236,7 @@ function rTrendy() {
   h += '<a href="#/forma" class="card fu" ' + dl(1) + '><div class="row sp"><div><p class="lbl">Forma i HRV</p><span class="sm sub">Kondycja, zmęczenie, forma i ćwiartka HRV × tętno</span></div>' + ico('chev', 20) + '</div></a>';
   if (n < 7) h += emptyCard('HRV – 90 dni', 'Potrzeba 7 dni porannych pomiarów (masz ' + n + ' z 7).');
   else {
-    var b = C.baseline(S.days, td), tr = '', first = S.days.slice(-14), l7 = C.rolling7(S.days, S.days[n - 1].date).meanMs;
+    var nv = C.viewForDate(S.days, td).view, b = C.baseline(nv, td), tr = '', first = S.days.slice(-14), l7 = C.rolling7(nv, S.days[n - 1].date).meanMs;
     h += '<div class="card fu" ' + dl(2) + '><div class="row sp"><p class="lbl">HRV – 90 dni</p><span class="xs" style="color:#2CE8B5">średnia 7 dni: ' + nf(l7, 0) + ' ms</span></div>' + hrvChartSvg(90, 'HRV z 90 dni', true) + '</div>';
     var dates = lastDays(90), dm = dayMap(), pts = [], hv = [];
     dates.forEach(function (d, i) { if (dm[d] && dm[d].hr != null) { pts.push({ i: i, v: dm[d].hr }); hv.push(dm[d].hr); } });
@@ -2635,10 +3262,10 @@ ROUTES.trendy = { tab: 'trendy', depth: 0, render: rTrendy, mount: renderBattery
 function pomiarRow(d, today) {
   var sl = d.sleep ? '<span class="xs mut">sen ' + esc(d.sleep.bed) + '–' + esc(d.sleep.wake) + '</span>' : '';
   var wbv = FC_wbCount(d);
-  return '<div class="card" style="gap:6px"><div class="row sp"><b>' + ddmm(d.date) + '.' + d.date.slice(0, 4) + (d.date === today ? ' <span class="xs" style="color:#2CE8B5">dziś</span>' : '') + ' <span class="xs mut">' + d.time + '</span>' + (d.source === 'noc' ? ' <span class="xs" style="color:#2D9CFF">noc (WHOOP)</span>' : '') + '</b>' +
-    '<span class="xs" style="color:' + QCOL[d.quality] + ';font-weight:700">jakość ' + d.quality + '</span></div>' +
+  return '<div class="card" style="gap:6px"><div class="row sp"><b>' + ddmm(d.date) + '.' + d.date.slice(0, 4) + (d.date === today ? ' <span class="xs" style="color:#2CE8B5">dziś</span>' : '') + ' <span class="xs mut">' + d.time + '</span>' + (d.source === 'noc' ? ' <span class="xs" style="color:#2D9CFF">noc (WHOOP)</span>' : (d.source === 'whoop' ? ' <span class="xs" style="color:#2D9CFF">WHOOP (API)</span>' : '')) + '</b>' +
+    (d.source === 'whoop' ? '<span class="xs mut">' + (d.quality === 'niska' ? 'kalibracja WHOOP' : 'dane z chmury WHOOP') + '</span>' : '<span class="xs" style="color:' + QCOL[d.quality] + ';font-weight:700">jakość ' + d.quality + '</span>') + '</div>' +
     '<div class="row" style="gap:18px;flex-wrap:wrap"><span><b class="n" style="font-size:22px">' + nf(d.rmssd, 0) + '</b> <span class="xs mut">ms RMSSD</span></span><span><b class="n" style="font-size:22px">' + (d.hr != null ? nf(d.hr, 0) : '—') + '</b> <span class="xs mut">ud/min</span></span>' + sl + '</div>' +
-    '<div class="xs mut">' + (d.tags.length ? esc(d.tags.join(' · ')) : 'Bez tagów') + (wbv ? ' · samopoczucie: ' + wbv + '/5 ocen' : '') + '</div>' +
+    '<div class="xs mut">' + (d.tags.length ? esc(d.tags.join(' · ')) : 'Bez tagów') + (wbv ? ' · samopoczucie: ' + wbv + '/5 ocen' : '') + (d.whoop && d.source !== 'whoop' && d.whoop.hrv != null ? ' · WHOOP: HRV ' + nf(d.whoop.hrv, 0) + ' ms' : '') + '</div>' +
     '<div class="row" style="flex-wrap:wrap">' + (d.date === today ? '<button class="btn sm grow" data-act="editDay">Edytuj samopoczucie i sen</button>' : '') +
     '<button class="btn sm' + (d.date === today ? '' : ' grow') + '" data-act="delDay" data-d="' + d.date + '" data-confirm="Usuń">Usuń</button></div></div>';
 }
@@ -2653,6 +3280,53 @@ function rPomiary() {
   return h + '</div>';
 }
 ROUTES.pomiary = { tab: null, depth: 1, parent: 'dzis', render: rPomiary, mount: renderBattery };
+
+// ====================== KONTO WHOOP (Profil) ======================
+function whoopUriRow(kind, label) {
+  var uri = whoopLink(kind), on = S.wh.copied === kind;
+  return '<div class="col" style="gap:4px"><span class="xs mut">' + label + '</span><div class="row"><code class="sel grow" style="font-size:12px;line-height:1.3;overflow-wrap:anywhere;background:#161B1F;border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:8px 10px;color:#E9EEF2" data-uri="' + kind + '">' + esc(uri) + '</code>' +
+    '<button class="btn sm" data-act="whCopy" data-v="' + kind + '" aria-label="Kopiuj adres: ' + label + '" style="flex:none;min-width:96px;' + (on ? 'border-color:#2CE8B5;color:#2CE8B5' : '') + '">' + (on ? 'Skopiowano' : 'Kopiuj') + '</button></div></div>';
+}
+function whoopUrisHtml() {
+  return '<div class="col" style="gap:10px"><p class="xs sub" style="margin:0">Adres przekierowania (Redirect URL) wklej w ustawieniach aplikacji w WHOOP. Możesz dodać oba.</p>' +
+    whoopUriRow('android', 'Aplikacja na Androida') + whoopUriRow('web', 'Przeglądarka (GitHub Pages)') + '</div>';
+}
+function whoopCardHtml() {
+  var w = S.wh, cfg = w.cfg, f = w.form || { id: '', secret: '' };
+  var state = w.err ? 'err' : (cfg.connected ? 'on' : 'off'), msg = Date.now() - (w.msgAt || 0) < 20000 ? w.msg : '';
+  var pill = { err: ['Błąd', '#FF8A96'], on: ['Połączono', '#2EE86B'], off: ['Niepołączono', '#9AA6B0'] }[state];
+  var h = '<div class="card js-whoop" data-live="whoop" data-state="' + (cfg.connected ? 'connected' : (cfg.configured ? 'ready' : 'setup')) + '"><div class="row sp"><p class="lbl">Konto WHOOP</p><span class="row xs" style="gap:6px;color:' + pill[1] + ';font-weight:600"><span class="dotp" style="background:' + pill[1] + ';animation:none"></span>' + pill[0] + '</span></div>';
+  if (w.err) h += '<div class="note err" role="alert" data-whoop="err">' + esc(w.err.text) + (w.err.detail && w.err.code !== 'cors' ? '<div class="xs" style="opacity:.8;margin-top:2px">' + esc(w.err.detail) + '</div>' : '') + '</div>';
+  else if (w.connecting) h += '<div class="note ok" role="status">' + esc(msg || 'Łączę z WHOOP…') + '</div>';
+  else if (msg) h += '<div class="note ok" role="status" data-whoop="msg">' + esc(msg) + '</div>';
+  if (cfg.connected) {
+    h += '<p class="sm sub" style="margin:0">Opaska zapisuje noc nawet bez telefonu. Aplikacja WHOOP wysyła ją do chmury, a Forma pobiera z niej liczby: regenerację, HRV, sen z fazami i treningi.</p>' +
+      '<p class="sm" style="margin:0" data-whoop="last">Ostatnia synchronizacja WHOOP: <b>' + esc(whLastSyncText()) + '</b></p>' +
+      '<div class="row" style="flex-wrap:wrap"><button class="btn pri grow" data-act="whSync"' + (w.syncing ? ' disabled' : '') + '>' + (w.syncing ? 'Synchronizuję…' : 'Synchronizuj') + '</button><button class="btn grow" data-act="whDisc" data-confirm="Rozłącz">Rozłącz</button></div>' +
+      '<details class="xs mut"><summary style="min-height:44px;display:flex;align-items:center;cursor:pointer">Adresy przekierowania i dane logowania</summary><div class="col" style="gap:12px">' + whoopUrisHtml() + '<button class="btn sm danger" style="align-self:flex-start" data-act="whForget" data-confirm="Usuń">Usuń dane logowania</button></div></details>';
+  } else if (cfg.configured) {
+    h += '<p class="sm sub" style="margin:0">Dane logowania są zapisane na tym urządzeniu' + (cfg.clientId ? ' (Client ID ' + esc(String(cfg.clientId).slice(0, 4)) + '…)' : '') + '. Połącz konto, aby pobrać noc z WHOOP.</p>' +
+      '<button class="btn pri full" data-act="whConnect"' + (w.connecting ? ' disabled' : '') + '>Połącz z WHOOP</button>' +
+      '<details class="xs mut"><summary style="min-height:44px;display:flex;align-items:center;cursor:pointer">Adresy przekierowania</summary>' + whoopUrisHtml() + '</details>' +
+      '<button class="btn sm danger" style="align-self:flex-start" data-act="whForget" data-confirm="Usuń">Usuń dane logowania</button>';
+  } else {
+    h += '<p class="sm sub" style="margin:0">Gdy telefon nie był z Tobą albo był offline, opaska i tak zapisze noc. Aplikacja WHOOP wyśle ją do chmury, a Forma pobierze liczby z oficjalnego API.</p>' +
+      '<ol class="sm sub" style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px">' +
+      '<li>Wejdź na developer.whoop.com (przycisk poniżej), zaloguj się kontem WHOOP i utwórz własną aplikację.</li>' +
+      '<li>Jako Redirect URL wklej adres z sekcji poniżej i zaznacz uprawnienia: regeneracja, sen, cykle, treningi, profil oraz offline.</li>' +
+      '<li>Skopiuj Client ID i Client Secret i wklej je tutaj.</li>' +
+      '<li>Naciśnij „Zapisz i połącz” i zaakceptuj dostęp w WHOOP.</li></ol>' +
+      '<a class="btn sm" href="https://developer.whoop.com" target="_blank" rel="noopener">Otwórz developer.whoop.com</a>' +
+      whoopUrisHtml() +
+      '<label class="col sm sub" style="gap:4px">Client ID<input class="inp" id="whId" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" data-in="whId" data-keep="1" data-whoop="1" value="' + esc(f.id) + '" placeholder="wklej Client ID"></label>' +
+      '<label class="col sm sub" style="gap:4px">Client Secret<input class="inp" id="whSecret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" data-in="whSecret" data-keep="1" data-whoop="1" value="' + esc(f.secret) + '" placeholder="wklej Client Secret"></label>' +
+      '<p class="xs" style="margin:0;color:#2CE8B5">Dane logowania zostają tylko na tym urządzeniu.</p>' +
+      '<button class="btn pri full" data-act="whConnect"' + (w.connecting ? ' disabled' : '') + '>Zapisz i połącz</button>' +
+      (NATIVE ? '' : '<p class="xs mut" style="margin:0">W przeglądarce WHOOP może zablokować połączenie (CORS). Wtedy użyj aplikacji na Androida.</p>');
+  }
+  if (cfg.connected || cfg.configured) h += '<p class="xs" style="margin:0;color:#2CE8B5">Dane logowania zostają tylko na tym urządzeniu.</p>';
+  return h + '</div>';
+}
 
 function rProfil() {
   var p = S.profile || {}, pc = profileCtx(), w = S.weights, hm = FC.hrMaxOf(p), last = S.days[S.days.length - 1];
@@ -2672,10 +3346,12 @@ function rProfil() {
   h += '<div class="card"><p class="lbl">Źródła danych</p><div class="row" style="align-items:flex-start"><span class="dotp" style="background:' + (S.connected ? '#2EE86B' : '#8A96A0') + ';margin-top:7px"></span><div class="grow"><b>' + esc(S.connected ? S.name : (S.device ? S.device.name : 'Opaska')) + '</b><div class="xs mut">' + (S.connected ? 'połączony' : 'niepołączony') + (last ? ' · ostatni pomiar HRV: jakość ' + last.quality + ' (' + last.date + ')' : ' · brak pomiarów HRV') + '</div>' +
     (S.connected && S.battery != null ? '<div class="row" style="margin-top:6px"><div class="bar grow"><i style="width:' + S.battery + '%;background:' + battColor(S.battery) + '"></i></div><b style="color:' + battColor(S.battery) + ';font-size:18px">' + S.battery + '%</b>' + (ch.on ? '<span class="xs" style="color:#2CE8B5">⚡ Ładowanie</span>' : '') + '</div>' + (ch.on ? '<div class="xs" style="color:#2CE8B5">' + (ch.src === 'status' ? 'ładowanie zgłoszone przez opaskę' : 'wykryte po wzroście poziomu') + '</div>' : '') : '') + '</div></div>' +
     '<div class="js-conn">' + connHtml() + '</div>' + (S.connected && !DEMO ? '<button class="btn full" data-act="disconnect">Rozłącz</button>' : '') +
+    '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:' + (S.wh.cfg.connected ? '#2EE86B' : '#6E7A84') + ';margin-top:7px;animation:none"></span><div class="grow"><b>WHOOP (chmura)</b><div class="xs mut">' + (S.wh.cfg.connected ? 'połączono · ostatnia synchronizacja ' + esc(whLastSyncText()) : 'konto WHOOP poniżej') + '</div></div></div>' +
     '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:#6E7A84;margin-top:7px;animation:none"></span><div class="grow"><b>Health Connect</b><div class="xs mut">kroki, waga · w przygotowaniu (wersja Android)</div></div></div>' +
     '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:#6E7A84;margin-top:7px;animation:none"></span><div class="grow"><b>intervals.icu</b><div class="xs mut">w przygotowaniu</div></div></div></div>';
+  h += whoopCardHtml();
   h += '<div class="card"><p class="lbl">Asystent AI</p><div class="row sp"><span>Poranna notatka AI</span><span class="tgl" role="switch" aria-checked="false" aria-disabled="true" aria-label="Poranna notatka AI – wkrótce"><i></i></span></div><p class="xs mut" style="margin:0">Asystent AI – wkrótce. Dziś notatka dnia powstaje z szablonu, bez wysyłania danych gdziekolwiek.</p></div>';
-  h += '<div class="card"><p class="lbl">Kopia zapasowa</p><p class="xs mut" style="margin:0">Eksport zawiera wszystko: pomiary poranne (z godzinami snu), treningi, profil i wagi.</p><div class="row" style="flex-wrap:wrap"><button class="btn grow" data-act="expAll">Eksportuj kopię (JSON)</button><button class="btn grow" data-act="impAll">Wczytaj kopię (JSON)</button></div><input id="fileImport" type="file" accept=".json,application/json" hidden><p class="sm" id="bkMsg" role="status" hidden></p></div>';
+  h += '<div class="card"><p class="lbl">Kopia zapasowa</p><p class="xs mut" style="margin:0">Eksport zawiera wszystko: pomiary poranne (z godzinami snu i danymi WHOOP), treningi, profil i wagi. Dane logowania WHOOP nigdy nie trafiają do kopii.</p><div class="row" style="flex-wrap:wrap"><button class="btn grow" data-act="expAll">Eksportuj kopię (JSON)</button><button class="btn grow" data-act="impAll">Wczytaj kopię (JSON)</button></div><input id="fileImport" type="file" accept=".json,application/json" hidden><p class="sm" id="bkMsg" role="status" hidden></p></div>';
   h += '<a href="#/pomiary" class="card"><div class="row sp"><div><p class="lbl">Pomiary poranne</p><span class="xs mut">' + S.days.length + ' zapisanych dni · usuwanie i edycja dzisiejszego zapisu</span></div>' + ico('chev', 20) + '</div></a>';
   h += '<a href="#/diagnostyka" class="card"><div class="row sp"><div><p class="lbl">Diagnostyka</p><span class="xs mut">Tętno na żywo, tachogram, surowe dane CSV, dziennik zdarzeń</span></div>' + ico('chev', 20) + '</div></a>';
   h += '<div class="card tint-r"><p class="lbl">Usuń wszystkie dane</p><p class="xs" style="margin:0;color:#FFD6DA">Kasuje pomiary, treningi, profil i wagi z tej przeglądarki. Tego nie da się cofnąć – najpierw zrób kopię. Aby potwierdzić, wpisz słowo USUŃ.</p><input class="inp" id="wipeWord" type="text" autocomplete="off" data-in="wipe" data-keep="1" placeholder="USUŃ" aria-label="Wpisz USUŃ, aby potwierdzić"><button class="btn danger full" id="wipeBtn" data-act="wipe" disabled>Usuń wszystkie dane</button></div>';
@@ -2840,6 +3516,15 @@ var ACT = {
   kgDel: function (el) { S.weights = S.weights.filter(function (x) { return x.date !== el.dataset.d; }); persist('weights'); UI.onData(); },
   expAll: function () { exportAll(); showMsg('bkMsg', 'Wyeksportowano: ' + S.days.length + ' dni, ' + S.workouts.length + ' treningów, ' + S.weights.length + ' ważeń.', 'ok'); },
   impAll: function () { $('fileImport').click(); },
+  whConnect: function () {
+    var a = $('whId'), b = $('whSecret');
+    if (a) S.wh.form.id = a.value; if (b) S.wh.form.secret = b.value;
+    whoopConnect(S.wh.form.id, S.wh.form.secret);
+  },
+  whSync: function () { whoopSync(true); },
+  whDisc: function () { whoopDisconnect(); },
+  whForget: function () { whoopForget(); },
+  whCopy: function (el) { whoopCopy(whoopLink(el.dataset.v), el.dataset.v); },
   wipe: function () { var w = $('wipeWord'); if (!w || w.value.trim().toUpperCase() !== 'USUŃ') return; wipeAll(); S.flash = { to: 'dzis', text: 'Usunięto wszystkie dane.' }; go('dzis'); }
 };
 document.addEventListener('click', function (e) {
@@ -2860,6 +3545,8 @@ $('stack').addEventListener('input', function (e) {
   if (k === 'bed' || k === 'wakeT' || k === 'whoop') { var f = curForm(); if (f) { if (k === 'bed') f.bed = el.value; else if (k === 'wakeT') f.wake = el.value; else f.whoop = el.value; } }
   else if (k === 'setkg' || k === 'setreps') { var st = S.session && S.session.exercises[+el.dataset.e].sets[+el.dataset.s]; if (st) { st[k === 'setkg' ? 'kg' : 'reps'] = el.value; tickSession(); saveSession(); } }
   else if (k === 'km' && S.session) { S.session.distance = el.value; saveSession(); }
+  else if (k === 'whId') S.wh.form.id = el.value;
+  else if (k === 'whSecret') S.wh.form.secret = el.value;
   else if (k === 'wipe') { var b = $('wipeBtn'); if (b) b.disabled = el.value.trim().toUpperCase() !== 'USUŃ'; }
 });
 $('stack').addEventListener('change', function (e) {
@@ -2889,15 +3576,17 @@ setInterval(function () {
   var t = pageTop(); if (t && ROUTES[t.path].tick) ROUTES[t.path].tick(t.el);
 }, 250);
 setInterval(renderBattery, 3000);
-storageProbe(); loadAll();
+storageProbe(); loadAll(); whoopInit();
 log('Gotowe. Forma 0.2.');
 if (DEMO) startDemo();
 else if (window.top !== window.self) { showError(IFRAME_MSG); }
 else if (!navigator.bluetooth && !NATIVE) showError(NOBT_MSG);
+whoopHandleRedirect();
 if (!location.hash || location.hash === '#') history.replaceState(null, '', '#/dzis');
 route();
 renderBattery();
 nativeInit();
+whoopMaybeSync();
 
 })();</script>
 </body>
