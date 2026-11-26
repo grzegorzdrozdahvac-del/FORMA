@@ -1468,6 +1468,356 @@ canvas{display:block;width:100%;height:200px}
   if (isNode) module.exports = api; else root.WhoopCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
+<script>/* Forma - import of the official WHOOP "Data Export" (CSV files / ZIP). Pure logic, no DOM, no network.
+   Output uses the SAME day-patch model as the API import (WhoopCore): { date, bed, wake, whoop{recovery,hrv,rhr,spo2,skinTemp,strain,sleep{...}} }
+   merged through HrvCore.mergeWhoopPatch, and workouts (source 'whoop') merged through FormaCore.mergeWhoopWorkouts.
+   Headers are matched by keyword rules (case/units/punctuation ignored); the exact WHOOP header strings are NOT assumed.
+   Browser: window.WhoopExport (needs HrvCore, FormaCore, WhoopCore first). Node: require. */
+(function (root) {
+  'use strict';
+  var isNode = typeof module !== 'undefined' && module.exports;
+  var H = isNode ? require('./hrv-core.js') : root.HrvCore;
+  var F = isNode ? require('./forma-core.js') : root.FormaCore;
+  var W = isNode ? require('./whoop-core.js') : root.WhoopCore;
+  var MIN = 60000;
+
+  // ---------------- CSV ----------------
+  // Delimiter: the most frequent of , ; TAB outside quotes in the first non-empty line (comma wins ties).
+  function detectDelimiter(text) {
+    var line = '', q = false, i, c;
+    for (i = 0; i < text.length && i < 20000; i++) {
+      c = text.charAt(i);
+      if (c === '"') q = !q;
+      if ((c === '\n' || c === '\r') && !q) { if (line.trim()) break; line = ''; continue; }
+      line += c;
+    }
+    var counts = { ',': 0, ';': 0, '\t': 0 }; q = false;
+    for (i = 0; i < line.length; i++) { c = line.charAt(i); if (c === '"') q = !q; else if (!q && counts[c] !== undefined) counts[c]++; }
+    var best = ',', n = counts[','];
+    if (counts[';'] > n) { best = ';'; n = counts[';']; }
+    if (counts['\t'] > n) best = '\t';
+    return best;
+  }
+  // RFC-4180-ish: quotes, "" escapes, newlines inside quotes, CRLF/LF/CR, BOM. Returns { delimiter, rows } (blank lines dropped).
+  function parseCsv(text, delimiter) {
+    text = String(text == null ? '' : text);
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    var d = delimiter || detectDelimiter(text), rows = [], row = [], f = '', q = false, i = 0, n = text.length, c;
+    function endField() { row.push(f); f = ''; }
+    function endRow() { endField(); if (!(row.length === 1 && row[0].trim() === '')) rows.push(row); row = []; }
+    while (i < n) {
+      c = text.charAt(i);
+      if (q) {
+        if (c === '"') { if (text.charAt(i + 1) === '"') { f += '"'; i += 2; continue; } q = false; i++; continue; }
+        f += c; i++; continue;
+      }
+      if (c === '"' && f === '') { q = true; i++; continue; }
+      if (c === d) { endField(); i++; continue; }
+      if (c === '\r') { endRow(); i += text.charAt(i + 1) === '\n' ? 2 : 1; continue; }
+      if (c === '\n') { endRow(); i++; continue; }
+      f += c; i++;
+    }
+    if (f !== '' || row.length) endRow();
+    return { delimiter: d, rows: rows };
+  }
+
+  // ---------------- value parsing ----------------
+  function num(s) {
+    if (s == null) return null;
+    s = String(s).replace(/[\s ]/g, '').replace(/%$/, '');
+    if (s === '' || /^(nan|null|n\/a|na|-|--)$/i.test(s)) return null;
+    if (s.indexOf(',') >= 0 && s.indexOf('.') >= 0) s = s.replace(/,/g, '');
+    else if (s.indexOf(',') >= 0) s = s.replace(',', '.');
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(s)) return null;
+    var v = parseFloat(s); return isFinite(v) ? v : null;
+  }
+  function p2(n) { return (n < 10 ? '0' : '') + n; }
+  // "UTC+01:00", "+01:00", "GMT-5", "UTC+0530", "Z" -> minutes east of UTC; null when absent / not an offset
+  function parseTz(s) {
+    if (s == null) return null; s = String(s).trim();
+    if (/^(z|utc|gmt)$/i.test(s)) return 0;
+    var m = /^(?:utc|gmt)?\s*([+−-])\s*(\d{1,2})(?::?(\d{2}))?$/i.exec(s);
+    if (!m) return null;
+    var v = +m[2] * 60 + (m[3] ? +m[3] : 0);
+    return (m[1] === '+' ? 1 : -1) * v;
+  }
+  // "2026-11-25 23:41:00" / "2026-11-25 23:41" / "2026-11-25T23:41:00Z" / "2026-11-25T23:41:00+01:00"
+  // -> { date:'YYYY-MM-DD', time:'HH:MM', ms } ; local wall time is read in tzMin (device zone when null) unless the string has its own offset.
+  function parseStamp(s, tzMin) {
+    if (s == null) return null;
+    var m = /^\s*(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?)?\s*(Z|[+-]\d{2}:?\d{2})?\s*$/i.exec(String(s));
+    if (!m) return null;
+    var y = +m[1], mo = +m[2], d = +m[3], hh = m[4] != null ? +m[4] : 0, mi = m[5] != null ? +m[5] : 0, ss = m[6] != null ? +m[6] : 0;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31 || hh > 23 || mi > 59 || ss > 59) return null;
+    var off = m[7] ? parseTz(m[7].toUpperCase() === 'Z' ? 'Z' : m[7]) : tzMin;
+    var ms = off == null ? new Date(y, mo - 1, d, hh, mi, ss).getTime() : Date.UTC(y, mo - 1, d, hh, mi, ss) - off * MIN;
+    if (!isFinite(ms)) return null;
+    return { date: y + '-' + p2(mo) + '-' + p2(d), time: p2(hh) + ':' + p2(mi), ms: ms };
+  }
+
+  // ---------------- header matching ----------------
+  function norm(h) { return String(h == null ? '' : h).toLowerCase().replace(/[^a-z0-9ąćęłńóśźż]+/g, ' ').replace(/\s+/g, ' ').trim(); }
+  // [field, regex on the normalised header], first match wins. Order = specific before generic.
+  var RULES = [
+    ['workoutStart', /workout start|activity start/], ['workoutEnd', /workout end|activity end/],
+    ['cycleStart', /cycle start/], ['cycleEnd', /cycle end/], ['tz', /time ?zone|\btz\b/],
+    ['recovery', /recovery/], ['rhr', /resting (heart rate|hr)|\brhr\b/], ['hrv', /heart rate variability|\bhrv\b|rmssd/],
+    ['skinTemp', /skin temp/], ['spo2', /blood oxygen|spo2|oxygen sat/],
+    ['workoutStrain', /activity strain|workout strain/], ['dayStrain', /day strain/], ['strain', /^strain\b/],
+    ['energy', /energy burned|calorie|kcal|kilojoule/],
+    ['sleepOnset', /sleep onset|fell asleep|bed ?time/], ['wakeOnset', /wake onset|woke up|wake ?time/],
+    ['performance', /sleep performance/], ['efficiency', /sleep efficiency/], ['consistency', /sleep consistency/],
+    ['respRate', /respiratory|breath/],
+    ['asleep', /asleep duration|total sleep|time asleep/], ['inBed', /in bed duration|time in bed/],
+    ['light', /light sleep|\blight\b/], ['deep', /\bdeep\b|\bsws\b|slow wave/], ['rem', /\brem\b/], ['awake', /awake duration|time awake|\bawake\b/],
+    ['need', /sleep need/], ['debt', /sleep debt/], ['nap', /^nap$|\bnap\b/],
+    ['maxHr', /max(imum)? (hr|heart)/], ['avgHr', /(average|avg|mean) (hr|heart)/],
+    ['zone', /zone ?[0-5]\b/], ['duration', /^duration|workout duration/], ['sport', /activity name|^activity$|sport|workout type/], ['distance', /distance/]
+  ];
+  // Maps the headers of one file. Returns { cols:{field:index}, recognized:[headerNames], unrecognized:[headerNames], zones:{n:{idx,unit}}, distUnit }.
+  function mapHeaders(headers) {
+    var cols = {}, zones = {}, rec = [], unrec = [], distUnit = 'm';
+    headers.forEach(function (raw, idx) {
+      var name = String(raw == null ? '' : raw).replace(/^﻿/, '').trim(), n = norm(name), field = null, i;
+      if (!n) return;
+      for (i = 0; i < RULES.length; i++) if (RULES[i][1].test(n)) { field = RULES[i][0]; break; }
+      if (field === 'zone') {
+        var zm = /zone ?([0-5])\b/.exec(n), zn = zm ? +zm[1] : -1;
+        if (zn >= 0 && !zones[zn]) { zones[zn] = { idx: idx, unit: /%|percent/i.test(name) ? 'pct' : (/\bsec/i.test(name) ? 'sec' : (/\bmin/i.test(name) ? 'min' : 'pct')) }; rec.push(name); } else unrec.push(name);
+        return;
+      }
+      if (field && cols[field] === undefined) {
+        cols[field] = idx; rec.push(name);
+        if (field === 'distance') distUnit = /kilomet|\bkm\b/i.test(name) ? 'km' : (/mile|\bmi\b/i.test(name) ? 'mi' : 'm');
+      } else unrec.push(name);
+    });
+    return { cols: cols, zones: zones, recognized: rec, unrecognized: unrec, distUnit: distUnit };
+  }
+  // File kind from its headers (file name as the tie-breaker): 'workouts' | 'cycles' | 'sleeps' | 'journal' | 'unknown'
+  function classify(map, name) {
+    var c = map.cols, fn = String(name || '').toLowerCase();
+    if (c.workoutStart !== undefined || (c.sport !== undefined && c.duration !== undefined)) return 'workouts';
+    if (/journal/.test(fn)) return 'journal';
+    var hasSleep = c.sleepOnset !== undefined || c.wakeOnset !== undefined;
+    var hasDay = c.recovery !== undefined || c.hrv !== undefined || c.rhr !== undefined || c.dayStrain !== undefined;
+    if (hasSleep && hasDay) return 'cycles';
+    if (hasSleep && (c.nap !== undefined || /sleep/.test(fn))) return 'sleeps';
+    if (hasDay && c.cycleStart !== undefined) return 'cycles';
+    if (hasSleep) return /cycle/.test(fn) ? 'cycles' : 'sleeps';
+    if (/workout/.test(fn) && c.cycleStart !== undefined) return 'workouts';
+    return 'unknown';
+  }
+
+  // ---------------- rows -> records ----------------
+  function cell(row, map, f) { var i = map.cols[f]; return i === undefined ? null : (row[i] == null ? null : String(row[i]).trim()); }
+  function ncell(row, map, f) { return num(cell(row, map, f)); }
+  function truthy(s) { return s != null && /^(true|yes|1|tak|y)$/i.test(String(s).trim()); }
+  function minOrNull(v) { return v != null && v >= 0 ? Math.round(v * 10) / 10 : null; }
+
+  // One cycle / sleep row -> { date, bed, wake, sleep{...}|null, spanMin, nap, vals{recovery,hrv,rhr,spo2,skinTemp,strain} }; null when no usable date.
+  function readDayRow(row, map) {
+    var tz = parseTz(cell(row, map, 'tz'));
+    var onset = parseStamp(cell(row, map, 'sleepOnset'), tz), wake = parseStamp(cell(row, map, 'wakeOnset'), tz);
+    var cEnd = parseStamp(cell(row, map, 'cycleEnd'), tz), cStart = parseStamp(cell(row, map, 'cycleStart'), tz);
+    var key = wake || cEnd || cStart; if (!key) return null;
+    var out = { date: key.date, bed: null, wake: null, sleep: null, spanMin: 0, nap: truthy(cell(row, map, 'nap')), sortMs: (cStart || onset || key).ms, vals: {} };
+    var v = out.vals;
+    v.recovery = ncell(row, map, 'recovery'); v.hrv = ncell(row, map, 'hrv'); v.rhr = ncell(row, map, 'rhr'); v.spo2 = ncell(row, map, 'spo2'); v.skinTemp = ncell(row, map, 'skinTemp');
+    v.strain = ncell(row, map, 'dayStrain'); if (v.strain == null) v.strain = ncell(row, map, 'strain');
+    if (onset && wake && wake.ms > onset.ms) {
+      var span = (wake.ms - onset.ms) / MIN, inBed = ncell(row, map, 'inBed'), asleep = ncell(row, map, 'asleep'), awake = ncell(row, map, 'awake');
+      if (inBed == null && asleep != null) inBed = asleep + (awake || 0);
+      var need = ncell(row, map, 'need');
+      out.bed = onset.time; out.wake = wake.time; out.spanMin = inBed != null && inBed > 0 ? inBed : span;
+      out.sleep = {
+        start: new Date(onset.ms).toISOString(), end: new Date(wake.ms).toISOString(), inBedMin: minOrNull(inBed != null ? inBed : Math.round(span)),
+        awakeMin: minOrNull(awake), lightMin: minOrNull(ncell(row, map, 'light')), deepMin: minOrNull(ncell(row, map, 'deep')), remMin: minOrNull(ncell(row, map, 'rem')),
+        performance: ncell(row, map, 'performance'), consistency: ncell(row, map, 'consistency'), efficiency: ncell(row, map, 'efficiency'),
+        respRate: ncell(row, map, 'respRate'), disturbances: null, needMin: need != null && need >= 0 ? Math.round(need) : null
+      };
+    }
+    return out;
+  }
+  var VAL_KEYS = ['recovery', 'hrv', 'rhr', 'spo2', 'skinTemp', 'strain'];
+  // Day patches from cycle rows and sleep rows (same shape as WhoopCore.buildDayPatches). The longest non-nap sleep of a date wins.
+  function buildDayPatches(dayRows) {
+    var byDate = {}, order = [];
+    function P(d) { if (!byDate[d]) { byDate[d] = { date: d, bed: null, wake: null, whoop: {}, _span: -1 }; order.push(d); } return byDate[d]; }
+    dayRows.slice().sort(function (a, b) { return a.sortMs - b.sortMs; }).forEach(function (r) {
+      if (r.nap) return;
+      var p = P(r.date);
+      VAL_KEYS.forEach(function (k) { if (r.vals[k] != null && p.whoop[k] == null) p.whoop[k] = r.vals[k]; });
+      if (r.sleep && r.spanMin > p._span) { p._span = r.spanMin; p.bed = r.bed; p.wake = r.wake; p.whoop.sleep = r.sleep; }
+    });
+    return order.sort().map(function (d) {
+      var p = byDate[d]; delete p._span; p.whoop.calibrating = false;
+      return p;
+    }).filter(function (p) { return !!H.sanitizeWhoop(p.whoop); });
+  }
+
+  function readWorkoutRow(row, map) {
+    var tz = parseTz(cell(row, map, 'tz'));
+    var a = parseStamp(cell(row, map, 'workoutStart'), tz); if (!a) return null;
+    var b = parseStamp(cell(row, map, 'workoutEnd'), tz), dur = ncell(row, map, 'duration');
+    if (dur == null || dur <= 0) dur = b && b.ms > a.ms ? (b.ms - a.ms) / MIN : null;
+    if (dur == null || dur <= 0) return null;
+    var sport = cell(row, map, 'sport') || '', strain = ncell(row, map, 'workoutStrain'); if (strain == null) strain = ncell(row, map, 'strain');
+    var zones = null, z, any = false, sumPct = 0, secs = [];
+    for (z = 0; z <= 5; z++) {
+      var zi = map.zones[z], v = zi ? num(row[zi.idx]) : null;
+      if (v == null) { secs.push(null); continue; }
+      any = true;
+      if (zi.unit === 'pct') { sumPct += v; secs.push(Math.round(v / 100 * dur * 60)); } else secs.push(Math.round(zi.unit === 'min' ? v * 60 : v));
+    }
+    if (any) {
+      zones = secs.map(function (x) { return x == null ? 0 : x; });
+      if (secs[0] == null && map.zones[1] && map.zones[1].unit === 'pct' && sumPct < 100) zones[0] = Math.round((100 - sumPct) / 100 * dur * 60); // remainder = below zone 1
+    }
+    var dist = ncell(row, map, 'distance'), km = dist == null ? null : (map.distUnit === 'km' ? dist : (map.distUnit === 'mi' ? dist * 1.609344 : dist / 1000));
+    var avg = ncell(row, map, 'avgHr'), mx = ncell(row, map, 'maxHr');
+    return F.sanitizeWorkout({
+      id: 'whoop-csv-' + a.ms, type: W.sportType(sport), date: a.date, time: a.time, start: a.ms, durMin: dur,
+      hrAvg: avg, hrMax: mx, trimp: strain != null && strain >= 0 && strain < 21 ? F.loadForStrain(strain) : null, zonesSec: zones, rpe: null,
+      distanceKm: km != null && km > 0 ? Math.round(km * 1000) / 1000 : null, exercises: [], hasHr: !!(avg && avg > 0),
+      source: 'whoop', sport: sport || null, strain: strain
+    });
+  }
+
+  // files: [{ name, text }]. Returns { patches, workouts, files:[{name,kind,rows,bad,delimiter}], recognized:[], unrecognized:[], ignored:[names], dayCount, workoutCount }
+  function buildFromFiles(files) {
+    var dayRows = [], wk = [], seenW = {}, rec = [], unrec = [], ignored = [], info = [];
+    function addU(arr, x) { if (arr.indexOf(x) < 0) arr.push(x); }
+    (files || []).forEach(function (f) {
+      var parsed = parseCsv(f.text), rows = parsed.rows, fi = { name: f.name, kind: 'unknown', rows: 0, bad: 0, delimiter: parsed.delimiter };
+      info.push(fi);
+      if (rows.length < 1) { ignored.push(f.name); return; }
+      var map = mapHeaders(rows[0]); fi.kind = classify(map, f.name);
+      if (fi.kind === 'unknown' || fi.kind === 'journal') { ignored.push(f.name); return; }
+      map.recognized.forEach(function (x) { addU(rec, x); }); map.unrecognized.forEach(function (x) { addU(unrec, x); });
+      rows.slice(1).forEach(function (row) {
+        if (fi.kind === 'workouts') {
+          var w = readWorkoutRow(row, map);
+          if (!w) { fi.bad++; return; }
+          fi.rows++; if (!seenW[w.id]) { seenW[w.id] = 1; wk.push(w); }
+        } else {
+          var r = readDayRow(row, map);
+          if (!r) { fi.bad++; return; }
+          fi.rows++; dayRows.push(r);
+        }
+      });
+    });
+    var patches = buildDayPatches(dayRows);
+    wk.sort(function (a, b) { return a.start - b.start; });
+    return { patches: patches, workouts: wk, files: info, recognized: rec, unrecognized: unrec, ignored: ignored, dayCount: patches.length, workoutCount: wk.length };
+  }
+
+  function plDays(n) { return n + (n === 1 ? ' dzień' : ' dni'); }
+  function plWorkouts(n) { var m = n % 100, l = n % 10; return n + (n === 1 ? ' trening' : (l >= 2 && l <= 4 && !(m >= 12 && m <= 14) ? ' treningi' : ' treningów')); }
+  function headline(b) { return 'Znaleziono ' + plDays(b.dayCount) + ', ' + plWorkouts(b.workoutCount) + '.'; }
+  function summaryText(b) {
+    return headline(b) + ' Rozpoznane kolumny: ' + (b.recognized.length ? b.recognized.join(', ') : 'brak') + ', nierozpoznane: ' + (b.unrecognized.length ? b.unrecognized.join(', ') : 'brak') + '.';
+  }
+
+  // Apply to stored days / workouts. Pure: returns new arrays and counters. Idempotent (same files twice -> same result).
+  // Own measurements stay primary (mergeWhoopPatch); a WHOOP workout overlapping a Forma one by >50 % is skipped (mergeWhoopWorkouts);
+  // an already stored WHOOP workout (e.g. from the API) overlapping an incoming one by >50 % is updated in place instead of duplicated.
+  function applyExport(days, workouts, built) {
+    var cur = days.slice(), st = { created: 0, merged: 0, unchanged: 0, noHrv: 0, workoutsAdded: 0, workoutsUpdated: 0, workoutsUnchanged: 0, workoutsSkipped: 0, workoutsDropped: 0 };
+    built.patches.forEach(function (p) {
+      var ex = H.findDay(cur, p.date), r = H.mergeWhoopPatch(ex, p);
+      if (r.action === 'none' || !r.rec) { st.noHrv++; return; }
+      if (ex && JSON.stringify(ex) === JSON.stringify(r.rec)) { st.unchanged++; return; }
+      cur = H.upsertDay(cur, r.rec).days;
+      if (r.action === 'created') st.created++; else st.merged++;
+    });
+    var stored = workouts.filter(function (w) { return w.source === 'whoop'; });
+    var byId = {}; stored.forEach(function (w) { byId[w.id] = w; });
+    var incoming = built.workouts.map(function (w) {
+      var twin = byId[w.id] ? byId[w.id] : stored.filter(function (s) { return F.workoutOverlap(s, w) > 0.5; })[0];
+      if (twin) { w = Object.assign({}, w, { id: twin.id }); if (JSON.stringify(twin) === JSON.stringify(w)) st.workoutsUnchanged++; }
+      return w;
+    });
+    var mw = F.mergeWhoopWorkouts(workouts, incoming);
+    st.workoutsAdded = mw.added; st.workoutsUpdated = Math.max(0, mw.updated - st.workoutsUnchanged); st.workoutsSkipped = mw.skipped; st.workoutsDropped = mw.dropped;
+    return { days: cur, workouts: mw.items, stats: st };
+  }
+  // Human line about what changed ("Dodano 3 nowe dni ...").
+  function resultText(st) {
+    var parts = [];
+    if (st.created) parts.push('nowe dni: ' + st.created);
+    if (st.merged) parts.push('uzupełnione dni: ' + st.merged);
+    if (st.unchanged) parts.push('bez zmian: ' + st.unchanged);
+    var w = [];
+    if (st.workoutsAdded) w.push('nowe ' + st.workoutsAdded);
+    if (st.workoutsUpdated) w.push('zaktualizowane ' + st.workoutsUpdated);
+    if (st.workoutsUnchanged) w.push('bez zmian ' + st.workoutsUnchanged);
+    if (st.workoutsSkipped) w.push('pominięte, bo masz własny trening w tym czasie: ' + st.workoutsSkipped);
+    var out = (parts.length ? 'Dni: ' + parts.join(', ') + '. ' : '') + (w.length ? 'Treningi: ' + w.join(', ') + '.' : '');
+    if (st.noHrv) out += (out ? ' ' : '') + 'Dni bez HRV z WHOOP (np. nieoceniona regeneracja) nie tworzą nowego dnia: ' + st.noHrv + '.';
+    return out.trim();
+  }
+
+  // ---------------- ZIP (STORE + DEFLATE) ----------------
+  function u16(b, o) { return b[o] | (b[o + 1] << 8); }
+  function u32(b, o) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16)) + b[o + 3] * 16777216; }
+  function zipErr(code, msg) { var e = new Error(msg); e.code = code; return e; }
+  // Default inflate (raw DEFLATE) through the browser / Node 18+ DecompressionStream. Rejects with code 'nodeflate' when unavailable.
+  function inflateRaw(bytes) {
+    if (typeof DecompressionStream === 'undefined' || typeof Response === 'undefined' || typeof Blob === 'undefined') return Promise.reject(zipErr('nodeflate', 'Ta przeglądarka nie potrafi rozpakować ZIP. Rozpakuj plik i wybierz pliki CSV.'));
+    try {
+      var ds = new DecompressionStream('deflate-raw');
+      return new Response(new Blob([bytes]).stream().pipeThrough(ds)).arrayBuffer().then(function (ab) { return new Uint8Array(ab); }, function () { throw zipErr('badzip', 'Uszkodzony plik ZIP.'); });
+    } catch (e) { return Promise.reject(zipErr('nodeflate', 'Ta przeglądarka nie potrafi rozpakować ZIP. Rozpakuj plik i wybierz pliki CSV.')); }
+  }
+  // bytes: Uint8Array of a .zip. Returns Promise<[{ name, bytes }]> for the .csv entries (directories, __MACOSX and other files skipped).
+  // inflate(bytes) -> Promise<Uint8Array> may be injected (tests). No ZIP64, no encryption.
+  function unzip(bytes, inflate) {
+    inflate = inflate || inflateRaw;
+    var n = bytes.length, eocd = -1, i;
+    for (i = n - 22; i >= Math.max(0, n - 22 - 65535); i--) if (u32(bytes, i) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) return Promise.reject(zipErr('badzip', 'To nie wygląda na plik ZIP.'));
+    var total = u16(bytes, eocd + 10), cdSize = u32(bytes, eocd + 12), cdOff = u32(bytes, eocd + 16);
+    if (total === 0xFFFF || cdOff === 0xFFFFFFFF || cdSize === 0xFFFFFFFF) return Promise.reject(zipErr('zip64', 'ZIP64 nie jest obsługiwany. Rozpakuj plik i wybierz pliki CSV.'));
+    var entries = [], p = cdOff, k;
+    for (k = 0; k < total; k++) {
+      if (p + 46 > n || u32(bytes, p) !== 0x02014b50) return Promise.reject(zipErr('badzip', 'Uszkodzony spis plików w ZIP.'));
+      var flags = u16(bytes, p + 8), method = u16(bytes, p + 10), csize = u32(bytes, p + 20), usize = u32(bytes, p + 24), nl = u16(bytes, p + 28), el = u16(bytes, p + 30), cl = u16(bytes, p + 32), lho = u32(bytes, p + 42);
+      var name = decodeName(bytes.subarray(p + 46, p + 46 + nl), flags);
+      entries.push({ name: name, flags: flags, method: method, csize: csize, usize: usize, lho: lho });
+      p += 46 + nl + el + cl;
+    }
+    var wanted = entries.filter(function (e) { return /\.csv$/i.test(e.name) && !/(^|\/)(__MACOSX|\.)/.test(e.name) && e.name.slice(-1) !== '/'; });
+    var out = [], chain = Promise.resolve();
+    wanted.forEach(function (e) {
+      chain = chain.then(function () {
+        if (e.flags & 1) throw zipErr('encrypted', 'ZIP jest zaszyfrowany hasłem.');
+        if (u32(bytes, e.lho) !== 0x04034b50) throw zipErr('badzip', 'Uszkodzony nagłówek pliku w ZIP.');
+        var start = e.lho + 30 + u16(bytes, e.lho + 26) + u16(bytes, e.lho + 28), raw = bytes.subarray(start, start + e.csize);
+        if (e.method === 0) { out.push({ name: e.name, bytes: raw }); return null; }
+        if (e.method === 8) return inflate(raw).then(function (u) { out.push({ name: e.name, bytes: u }); });
+        throw zipErr('method', 'Nieobsługiwana metoda kompresji w ZIP (' + e.method + ').');
+      });
+    });
+    return chain.then(function () { return out; });
+  }
+  function decodeName(b, flags) {
+    try { if (typeof TextDecoder !== 'undefined') return new TextDecoder(flags & 0x800 ? 'utf-8' : 'utf-8').decode(b); } catch (e) { /* fall through */ }
+    var s = ''; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return s;
+  }
+  function decodeText(bytes) {
+    if (typeof TextDecoder !== 'undefined') return new TextDecoder('utf-8').decode(bytes);
+    var s = ''; for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return s;
+  }
+
+  var api = {
+    detectDelimiter: detectDelimiter, parseCsv: parseCsv, parseTz: parseTz, parseStamp: parseStamp, num: num, norm: norm,
+    mapHeaders: mapHeaders, classify: classify, readDayRow: readDayRow, readWorkoutRow: readWorkoutRow, buildDayPatches: buildDayPatches,
+    buildFromFiles: buildFromFiles, applyExport: applyExport, headline: headline, summaryText: summaryText, resultText: resultText,
+    unzip: unzip, inflateRaw: inflateRaw, decodeText: decodeText
+  };
+  if (isNode) module.exports = api; else root.WhoopExport = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
 <script>(function () {
 'use strict';
 /* ===== Forma 0.2 - base: state, storage, battery, Bluetooth, measurement engine, sessions, demo ===== */
@@ -2129,7 +2479,7 @@ function startDemo() {
 }
 
 /* ===== Forma - WHOOP Developer API (v2): connection state, web transport (fetch), Android transport (FormaNative.whoop*), sync ===== */
-var WH = window.WhoopCore;
+var WH = window.WhoopCore, WE = window.WhoopExport;
 var WKEY = 'forma.v1.whoop'; // credentials + tokens (web only) + last sync. NOT part of KEYS: never exported, never in the repo.
 var WH_ERR = {
   config: 'Wpisz Client ID i Client Secret z developer.whoop.com.',
@@ -2142,7 +2492,8 @@ var WH_ERR = {
   http: 'WHOOP zwrócił błąd. Spróbuj ponownie za chwilę.',
   app: 'Nie udało się uruchomić logowania WHOOP.'
 };
-S.wh = { cfg: { configured: false, connected: false, clientId: '' }, syncing: false, connecting: false, err: null, msg: '', lastSync: null, stats: null, form: { id: '', secret: '' }, copied: null, show: 0 };
+S.wh = { cfg: { configured: false, connected: false, clientId: '' }, syncing: false, connecting: false, err: null, msg: '', lastSync: null, stats: null, form: { id: '', secret: '' }, copied: null, show: 0,
+  csv: { busy: false, err: null, result: null, last: null, lastDays: 0, lastWorkouts: 0 } }; // csv = import of the WHOOP Data Export (no developer account)
 
 // ---------- local store (web: credentials + tokens; Android: only the last sync time) ----------
 function whStore() {
@@ -2325,7 +2676,7 @@ function whoopDisconnect() {
 }
 function whoopForget() { // remove stored client id/secret and tokens
   if (NATIVE) { nat('whoopDisconnect'); nat('whoopSetCredentials', '', ''); }
-  else { var ls = whStore().lastSync; whSave(ls ? { lastSync: ls } : {}); }
+  else { var o0 = whStore(), keep = {}; ['lastSync', 'lastCsv', 'lastCsvDays', 'lastCsvWorkouts'].forEach(function (k) { if (o0[k] != null) keep[k] = o0[k]; }); whSave(keep); }
   S.wh.err = null; S.wh.msgAt = Date.now(); S.wh.msg = 'Usunięto dane logowania z tego urządzenia.'; S.wh.form = { id: '', secret: '' };
   whRefreshCfg(); log('WHOOP: usunięto dane logowania.');
   if (UI.onWhoop) UI.onWhoop();
@@ -2336,9 +2687,10 @@ function whoopMaybeSync() { // app open / resume: sync when connected and the la
   if (!WH.needsSync(S.wh.lastSync, Date.now())) return false;
   return whoopSync(false);
 }
-function whoopOnWipe() { S.wh.lastSync = null; S.wh.stats = null; S.wh.msgAt = Date.now(); S.wh.msg = ''; whPatch({ lastSync: undefined }); }
+function whoopOnWipe() { S.wh.lastSync = null; S.wh.stats = null; S.wh.msgAt = Date.now(); S.wh.msg = ''; S.wh.csv = { busy: false, err: null, result: null, last: null, lastDays: 0, lastWorkouts: 0 }; whPatch({ lastSync: undefined, lastCsv: undefined, lastCsvDays: undefined, lastCsvWorkouts: undefined }); }
 function whoopInit() {
-  S.wh.lastSync = whStore().lastSync || null;
+  var st0 = whStore(); S.wh.lastSync = st0.lastSync || null;
+  S.wh.csv.last = st0.lastCsv || null; S.wh.csv.lastDays = st0.lastCsvDays || 0; S.wh.csv.lastWorkouts = st0.lastCsvWorkouts || 0;
   whRefreshCfg();
   try { document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && !NATIVE) whoopMaybeSync(); }); } catch (e) { /* ignore */ }
 }
@@ -2355,6 +2707,62 @@ function whoopCopy(text, key) {
     try { var ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0'; document.body.appendChild(ta); ta.select(); var ok = document.execCommand('copy'); ta.remove(); done(ok); }
     catch (e) { done(false); }
   }
+}
+
+// ---------- import of the official WHOOP "Data Export" (CSV files or ZIP). Works without a developer account, entirely on this device ----------
+var WCSV_ERR = {
+  none: 'Nie znalazłem w tych plikach danych WHOOP. Wybierz physiological_cycles.csv, sleeps.csv i workouts.csv albo cały plik ZIP z eksportu.',
+  nodeflate: 'Ta przeglądarka nie potrafi rozpakować ZIP. Rozpakuj plik na telefonie lub komputerze i wybierz pliki CSV.',
+  badzip: 'Nie udało się odczytać pliku ZIP (jest uszkodzony albo to nie jest ZIP). Spróbuj rozpakować go i wybrać pliki CSV.',
+  read: 'Nie udało się odczytać wybranych plików.'
+};
+function wcsvReadBuf(file) {
+  if (file && typeof file.arrayBuffer === 'function') return file.arrayBuffer();
+  return new Promise(function (res, rej) { var r = new FileReader(); r.onload = function () { res(r.result); }; r.onerror = function () { rej(new Error('read')); }; r.readAsArrayBuffer(file); });
+}
+// files: array of File. Reads CSV directly, unpacks ZIP, parses, merges into days/workouts, stores the import date.
+function whoopImportFiles(files) {
+  var c = S.wh.csv; if (c.busy || !files || !files.length) return false;
+  c.busy = true; c.err = null; c.result = null; if (UI.onWhoop) UI.onWhoop();
+  var entries = [], problems = [];
+  var chain = Promise.resolve();
+  files.forEach(function (f) {
+    chain = chain.then(function () {
+      var name = String(f.name || 'plik');
+      return wcsvReadBuf(f).then(function (buf) {
+        var bytes = new Uint8Array(buf);
+        var isZip = /\.zip$/i.test(name) || (bytes.length > 3 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 3 && bytes[3] === 4);
+        if (!isZip) { entries.push({ name: name, text: WE.decodeText(bytes) }); return null; }
+        return WE.unzip(bytes).then(function (list) {
+          if (!list.length) problems.push(name + ': w ZIP nie ma plików CSV.');
+          list.forEach(function (x) { entries.push({ name: x.name.split('/').pop(), text: WE.decodeText(x.bytes) }); });
+        });
+      }).catch(function (e) { problems.push(e && e.code && WCSV_ERR[e.code] ? WCSV_ERR[e.code] : (name + ': ' + (e && e.message ? e.message : 'błąd odczytu'))); if (e && e.code === 'nodeflate') c.zipFail = true; });
+    });
+  });
+  chain.then(function () {
+    var built = WE.buildFromFiles(entries);
+    if (!built.dayCount && !built.workoutCount) {
+      c.busy = false; c.err = { text: c.zipFail && !entries.length ? WCSV_ERR.nodeflate : (problems.length && !entries.length ? problems[0] : WCSV_ERR.none), detail: entries.length ? WE.summaryText(built) : problems.slice(1).join(' ') };
+      c.zipFail = false; log('WHOOP CSV: brak danych (' + entries.length + ' plików).'); if (UI.onWhoop) UI.onWhoop(); return;
+    }
+    var res;
+    try { res = WE.applyExport(S.days, S.workouts, built); }
+    catch (e) { c.busy = false; c.err = { text: 'Błąd przetwarzania eksportu.', detail: e && e.message }; if (UI.onWhoop) UI.onWhoop(); return; }
+    S.days = res.days; S.workouts = res.workouts; persist('days'); persist('workouts');
+    c.last = Date.now(); c.lastDays = built.dayCount; c.lastWorkouts = built.workoutCount;
+    whPatch({ lastCsv: c.last, lastCsvDays: c.lastDays, lastCsvWorkouts: c.lastWorkouts });
+    c.result = { headline: WE.headline(built), text: WE.summaryText(built), details: WE.resultText(res.stats), recognized: built.recognized, unrecognized: built.unrecognized, problems: problems, ignored: built.ignored, stats: res.stats };
+    c.busy = false; c.zipFail = false;
+    log('WHOOP CSV: ' + c.result.headline + ' ' + c.result.details);
+    if (UI.onData) UI.onData();
+  }).catch(function (e) { c.busy = false; c.err = { text: WCSV_ERR.read, detail: e && e.message }; if (UI.onWhoop) UI.onWhoop(); });
+  return true;
+}
+function whCsvLastText() {
+  var t = S.wh.csv.last; if (!t) return '';
+  var d = new Date(t), ds = C.localDateStr(d), hm = C.localTimeStr(d);
+  return (ds === todayStr() ? 'dziś' : (ds === C.addDays(todayStr(), -1) ? 'wczoraj' : ds.slice(8) + '.' + ds.slice(5, 7) + '.' + ds.slice(0, 4))) + ' ' + hm;
 }
 
 /* ===== Forma 0.2 - UI part A: helpers, charts, shell/router, Dziś, Pomiar, Poranek ===== */
@@ -3291,6 +3699,40 @@ function whoopUrisHtml() {
   return '<div class="col" style="gap:10px"><p class="xs sub" style="margin:0">Adres przekierowania (Redirect URL) wklej w ustawieniach aplikacji w WHOOP. Możesz dodać oba.</p>' +
     whoopUriRow('android', 'Aplikacja na Androida') + whoopUriRow('web', 'Przeglądarka (GitHub Pages)') + '</div>';
 }
+var WCSV_ACCEPT = '.csv,.zip,text/csv,text/comma-separated-values,application/csv,application/zip,application/x-zip-compressed,application/vnd.ms-excel';
+function whoopCsvStep(n, html) {
+  return '<div class="row" style="align-items:flex-start;gap:12px"><span aria-hidden="true" style="flex:none;width:26px;height:26px;border-radius:50%;border:1.5px solid #2CE8B5;color:#2CE8B5;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center;margin-top:1px">' + n + '</span><div class="sm sub grow" style="line-height:1.45">' + html + '</div></div>';
+}
+function whoopCsvStatusHtml() {
+  var c = S.wh.csv, h = '';
+  if (c.busy) return '<div class="note ok" role="status" data-whoop="csv-busy">Importuję dane z eksportu…</div>';
+  if (c.err) h += '<div class="note err" role="alert" data-whoop="csv-err">' + esc(c.err.text) + (c.err.detail ? '<div class="xs" style="opacity:.8;margin-top:4px;overflow-wrap:anywhere">' + esc(c.err.detail) + '</div>' : '') + '</div>';
+  var r = c.result;
+  if (r) {
+    var cols = 'Rozpoznane kolumny: ' + (r.recognized.length ? r.recognized.join(', ') : 'brak') + ', nierozpoznane: ' + (r.unrecognized.length ? r.unrecognized.join(', ') : 'brak') + '.';
+    h += '<div class="note ok col" role="status" data-whoop="csv-summary" style="gap:6px"><b style="font-size:15px;color:#fff" data-whoop="csv-headline">' + esc(r.headline) + '</b>' +
+      (r.details ? '<div class="sm" data-whoop="csv-details">' + esc(r.details) + '</div>' : '') +
+      (r.problems.length ? '<div class="xs" style="color:#FFE2B8">' + esc(r.problems.join(' ')) + '</div>' : '') +
+      (r.ignored.length ? '<div class="xs" style="opacity:.85">Pominięto pliki bez danych dziennych: ' + esc(r.ignored.join(', ')) + '.</div>' : '') +
+      '<details class="xs" style="opacity:.9"><summary style="min-height:44px;display:flex;align-items:center;cursor:pointer">Kolumny: ' + r.recognized.length + ' rozpoznanych, ' + r.unrecognized.length + ' nierozpoznanych</summary><div data-whoop="csv-cols" style="overflow-wrap:anywhere;padding-bottom:6px">' + esc(cols) + '</div></details></div>';
+  }
+  return h;
+}
+function whoopCsvHtml() {
+  var c = S.wh.csv;
+  return '<div class="col" data-whoop="csv" style="gap:12px;border-top:1px solid rgba(255,255,255,.1);padding-top:16px;margin-top:4px">' +
+    '<b style="font-size:15px;color:#fff;line-height:1.3">Bez konta deweloperskiego: import z eksportu WHOOP</b>' +
+    '<p class="sm sub" style="margin:0">Nie możesz założyć konta na developer.whoop.com? Pobierz z WHOOP własny eksport danych i wczytaj go tutaj. Te same dane (regeneracja, HRV, sen z fazami, treningi), bez logowania.</p>' +
+    '<div class="col" style="gap:10px">' +
+    whoopCsvStep(1, 'W aplikacji WHOOP: <b style="color:#E9EEF2">Więcej</b> (More) → <b style="color:#E9EEF2">Ustawienia aplikacji</b> (App Settings) → <b style="color:#E9EEF2">Eksport danych</b> (Data Export) → <b style="color:#E9EEF2">Utwórz eksport</b> (Create Export).') +
+    whoopCsvStep(2, 'Poczekaj na e-mail od WHOOP i pobierz z niego plik z danymi (ZIP).') +
+    whoopCsvStep(3, 'Wróć tu i naciśnij „Wybierz pliki”. Wskaż ZIP albo pliki CSV (physiological_cycles, sleeps, workouts), możesz kilka naraz.') + '</div>' +
+    '<button class="btn pri full" data-act="whCsvPick"' + (c.busy ? ' disabled' : '') + '>' + (c.busy ? 'Importuję…' : 'Wybierz pliki') + '</button>' +
+    '<input id="whFile" type="file" multiple accept="' + WCSV_ACCEPT + '" hidden data-keep="1">' +
+    whoopCsvStatusHtml() +
+    (c.last ? '<p class="xs mut" style="margin:0" data-whoop="csv-last">Ostatni import z eksportu: <b style="color:#C5CED6">' + esc(whCsvLastText()) + '</b> (' + esc(WE.headline({ dayCount: c.lastDays, workoutCount: c.lastWorkouts }).replace(/^Znaleziono /, '').replace(/\.$/, '')) + ')</p>' : '') +
+    '<p class="xs" style="margin:0;color:#2CE8B5">Pliki są czytane tylko na tym urządzeniu. Ten sam eksport możesz wczytać ponownie: nic się nie zdubluje, a Twoje własne pomiary zostają ważniejsze.</p></div>';
+}
 function whoopCardHtml() {
   var w = S.wh, cfg = w.cfg, f = w.form || { id: '', secret: '' };
   var state = w.err ? 'err' : (cfg.connected ? 'on' : 'off'), msg = Date.now() - (w.msgAt || 0) < 20000 ? w.msg : '';
@@ -3325,7 +3767,7 @@ function whoopCardHtml() {
       (NATIVE ? '' : '<p class="xs mut" style="margin:0">W przeglądarce WHOOP może zablokować połączenie (CORS). Wtedy użyj aplikacji na Androida.</p>');
   }
   if (cfg.connected || cfg.configured) h += '<p class="xs" style="margin:0;color:#2CE8B5">Dane logowania zostają tylko na tym urządzeniu.</p>';
-  return h + '</div>';
+  return h + whoopCsvHtml() + '</div>';
 }
 
 function rProfil() {
@@ -3524,6 +3966,7 @@ var ACT = {
   whSync: function () { whoopSync(true); },
   whDisc: function () { whoopDisconnect(); },
   whForget: function () { whoopForget(); },
+  whCsvPick: function () { var f = $('whFile'); if (f && !S.wh.csv.busy) f.click(); },
   whCopy: function (el) { whoopCopy(whoopLink(el.dataset.v), el.dataset.v); },
   wipe: function () { var w = $('wipeWord'); if (!w || w.value.trim().toUpperCase() !== 'USUŃ') return; wipeAll(); S.flash = { to: 'dzis', text: 'Usunięto wszystkie dane.' }; go('dzis'); }
 };
@@ -3553,6 +3996,10 @@ $('stack').addEventListener('change', function (e) {
   var el = e.target;
   if (el.dataset && el.dataset.in === 'wake' && !isNaN(FC.parseHM(el.value))) { el.blur(); applyProfile({ plannedWake: el.value }); }
   if (el.dataset && el.dataset.in === 'nightWake' && /^\d{2}:\d{2}$/.test(el.value)) setNightWake(el.value);
+  if (el.id === 'whFile' && el.files && el.files.length) {
+    var picked = Array.prototype.slice.call(el.files); el.value = '';
+    whoopImportFiles(picked);
+  }
   if (el.id === 'fileImport' && el.files && el.files[0]) {
     var f = el.files[0], rd = new FileReader();
     rd.onerror = function () { showMsg('bkMsg', 'Nie udało się odczytać pliku.', 'err'); };

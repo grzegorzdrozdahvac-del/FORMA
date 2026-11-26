@@ -8,6 +8,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.webkit.WebResourceRequest
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -32,6 +34,19 @@ class MainActivity : AppCompatActivity() {
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
             bridge.emitPermissions()
+        }
+
+    /** Pending <input type=file> request from the WebView; exactly one onReceiveValue per request (null = cancelled). */
+    private var fileCallback: ValueCallback<Array<Uri>>? = null
+
+    private val fileChooserLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val cb = fileCallback
+            fileCallback = null
+            if (cb != null) {
+                // parseResult returns null for RESULT_CANCELED / no data
+                cb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data))
+            }
         }
 
     fun askPermissions(perms: Array<String>) {
@@ -95,6 +110,30 @@ class MainActivity : AppCompatActivity() {
                     } catch (e: Exception) {
                         // no browser available: ignore
                     }
+                }
+                return true
+            }
+        }
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: WebChromeClient.FileChooserParams?
+            ): Boolean {
+                if (filePathCallback == null) return false
+                fileCallback?.onReceiveValue(null) // a previous request that never finished
+                fileCallback = filePathCallback
+                val intent: Intent? = fileChooserParams?.createIntent()
+                if (intent == null) {
+                    fileCallback = null
+                    filePathCallback.onReceiveValue(null)
+                    return true
+                }
+                try {
+                    fileChooserLauncher.launch(intent)
+                } catch (e: Exception) {
+                    fileCallback = null
+                    filePathCallback.onReceiveValue(null)
                 }
                 return true
             }
@@ -166,6 +205,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        fileCallback?.onReceiveValue(null)
+        fileCallback = null
         BleManager.removeListener(bridge.listener)
         webView.destroy()
         super.onDestroy()
