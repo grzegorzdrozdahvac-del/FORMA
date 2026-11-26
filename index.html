@@ -205,6 +205,26 @@ canvas{display:block;width:100%;height:200px}
 .hb{animation:hb .9s ease-in-out infinite;display:inline-flex}
 .noanim *{animation:none!important}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* etap 5 */
+.segtabs{display:flex;gap:2px;padding:3px;border-radius:14px;background:#161B1F;border:1px solid rgba(255,255,255,.10)}
+.segtabs button{flex:1 1 0;min-width:0;min-height:44px;border:0;border-radius:10px;background:transparent;color:#C5CED6;font:600 12px var(--fb,inherit);letter-spacing:-.01em;cursor:pointer;padding:0;white-space:nowrap}
+.segtabs button.on{background:#14382F;color:#2CE8B5}
+.rec-badge{display:inline-flex;align-items:center;min-height:20px;padding:0 8px;border-radius:999px;background:linear-gradient(160deg,#FFE08A,#F2B53B);color:#3B2412;font-size:11px;font-weight:800;letter-spacing:.02em}
+.print-only{display:none}
+@media print{
+  html,body{height:auto!important;overflow:visible!important;background:#fff!important;color:#111!important}
+  #app{position:static!important;height:auto!important;overflow:visible!important;display:block!important}
+  #stack{position:static!important;height:auto!important;overflow:visible!important;display:block!important}
+  #tabbar,.hd,.no-print,button,.ib{display:none!important}
+  .screen{position:static!important;display:none!important;height:auto!important;overflow:visible!important;transform:none!important}
+  .screen[data-path="raport"]{display:block!important}
+  .body{position:static!important;overflow:visible!important;height:auto!important;padding:0!important}
+  .print-only{display:block!important;color:#111!important}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact;animation:none!important;color:#111!important;box-shadow:none!important;text-shadow:none!important}
+  .card,.stat{background:#fff!important;border:1px solid #bbb!important;break-inside:avoid}
+  .mut,.sub,.xs{color:#444!important}
+  svg text{fill:#333!important}
+}
 </style>
 </head>
 <body>
@@ -3372,6 +3392,558 @@ canvas{display:block;width:100%;height:200px}
   if (isNode) module.exports = api; else root.HcCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
+<script>/* Forma Etap 5 - goals, badges and challenges, weekly report, heart-health entries (blood pressure, glucose, HR recovery), macros. Pure logic, no DOM.
+   Browser: window.E5Core (needs HrvCore, FormaCore, AlarmCore, TipCore). Node: require('./e5-core.js').
+   Everything here is NaN-safe: with little or no data the functions return "has: false" style answers, never NaN / undefined / divisions by zero. */
+(function (root) {
+  'use strict';
+  var node = typeof module !== 'undefined' && module.exports;
+  var H = node ? require('./hrv-core.js') : root.HrvCore;
+  var F = node ? require('./forma-core.js') : root.FormaCore;
+  var A = node ? require('./alarm-core.js') : root.AlarmCore;
+  var T = node ? require('./tip-core.js') : root.TipCore;
+
+  function fin(v) { return typeof v === 'number' && isFinite(v); }
+  function num(v) { v = typeof v === 'string' ? parseFloat(v.replace(/\s/g, '').replace(',', '.')) : v; return fin(v) ? v : null; }
+  function clamp(x, a, b) { return Math.min(b, Math.max(a, x)); }
+  function mean(a) { a = a.filter(fin); if (!a.length) return null; var s = 0; a.forEach(function (v) { s += v; }); return s / a.length; }
+  function sum(a) { var s = 0; a.forEach(function (v) { if (fin(v)) s += v; }); return s; }
+  function r1(v) { return fin(v) ? Math.round(v * 10) / 10 : null; }
+  function roundTo(v, step) { return Math.round(v / step) * step; }
+  function isDate(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(H.dayNum(s)); }
+  function fmtInt(v) { return fin(v) ? String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') : '—'; }
+  function pl1(v) { return fin(v) ? (Math.round(v * 10) / 10).toString().replace('.', ',') : '—'; }
+  var DOW_PL = ['niedziela', 'poniedziałek', 'wtorek', 'środa', 'czwartek', 'piątek', 'sobota'];
+  var DOW_CAP = DOW_PL.map(function (s) { return s.charAt(0).toUpperCase() + s.slice(1); });
+  var MON_SHORT = ['sty', 'lut', 'mar', 'kwi', 'maj', 'cze', 'lip', 'sie', 'wrz', 'paź', 'lis', 'gru'];
+  function dowIdx(date) { return ((H.dayNum(date) % 7) + 4 + 7) % 7; } // 0 = Sunday (1970-01-01 was a Thursday)
+  function dowName(date) { return DOW_PL[dowIdx(date)]; }
+  function dayShort(date) { var p = date.split('-'); return +p[2] + ' ' + MON_SHORT[+p[1] - 1]; }
+  function diffDays(a, b) { return H.dayNum(a) - H.dayNum(b); }
+  function weekStart(date) { return F.weekStart(date); }
+
+  // ============================== goals ==============================
+  var GOAL_DEFS = {
+    steps: { label: 'Kroki', unit: 'kroków', min: 1000, max: 50000, step: 500, def: 10000, dec: 0 },
+    walkMin: { label: 'Spacer', unit: 'min', min: 5, max: 300, step: 5, def: 45, dec: 0 },
+    sleepH: { label: 'Sen', unit: 'h', min: 4, max: 12, step: 0.25, def: 8, dec: 2 },
+    kcalActive: { label: 'Kalorie aktywne', unit: 'kcal', min: 50, max: 3000, step: 50, def: 600, dec: 0 },
+    strain: { label: 'Wysiłek dnia', unit: 'pkt', min: 1, max: 21, step: 1, def: 10, dec: 0 },
+    gym: { label: 'Siłownia', unit: '× w tygodniu', min: 1, max: 7, step: 1, def: 3, dec: 0 },
+    saunaMin: { label: 'Sauna (min)', unit: '×', min: 0, max: 7, step: 1, def: 1, dec: 0 },
+    saunaMax: { label: 'Sauna (maks.)', unit: '×', min: 1, max: 7, step: 1, def: 2, dec: 0 },
+    zonesMin: { label: 'Strefy 1–2', unit: 'min w tygodniu', min: 10, max: 1200, step: 10, def: 150, dec: 0 }
+  };
+  var GOAL_KEYS = Object.keys(GOAL_DEFS);
+  function defaultGoals() { var g = { morning: true }; GOAL_KEYS.forEach(function (k) { g[k] = GOAL_DEFS[k].def; }); return g; }
+  function cleanGoals(o) {
+    var g = defaultGoals();
+    if (o && typeof o === 'object') {
+      GOAL_KEYS.forEach(function (k) {
+        var v = num(o[k]), d = GOAL_DEFS[k];
+        if (v != null && v >= d.min && v <= d.max) g[k] = Math.round(v * 100) / 100;
+      });
+      if (typeof o.morning === 'boolean') g.morning = o.morning;
+    }
+    if (g.saunaMax < g.saunaMin) g.saunaMax = g.saunaMin;
+    if (g.saunaMax < 1) g.saunaMax = 1;
+    return g;
+  }
+  // raw: what the user typed. Returns { ok, value } or { ok:false, error } (Polish text).
+  function validateGoal(key, raw) {
+    var d = GOAL_DEFS[key]; if (!d) return { ok: false, error: 'Nieznany cel.' };
+    var v = num(raw);
+    if (v == null) return { ok: false, error: 'Wpisz liczbę.' };
+    if (v < d.min || v > d.max) return { ok: false, error: 'Podaj wartość od ' + fmtInt(d.min) + ' do ' + fmtInt(d.max) + '.' };
+    return { ok: true, value: d.dec ? Math.round(v * 100) / 100 : Math.round(v) };
+  }
+  function goalText(key, v) {
+    var d = GOAL_DEFS[key]; if (!d || !fin(v)) return '—';
+    if (key === 'sleepH') return F.fmtDur(v);
+    return fmtInt(v) + ' ' + (key === 'steps' ? '' : (key === 'gym' ? '×' : (key === 'zonesMin' || key === 'walkMin' ? 'min' : d.unit))).trim();
+  }
+
+  // progress of one number against a goal
+  function prog(v, goal) {
+    var has = fin(v), g = fin(goal) && goal > 0 ? goal : null;
+    return { v: has ? v : null, goal: g, has: has, frac: has && g ? clamp(v / g, 0, 1) : 0, pct: has && g ? Math.round(clamp(v / g, 0, 9.99) * 100) : null, done: !!(has && g && v >= g) };
+  }
+  function walkMinOn(workouts, date) { var m = 0; (workouts || []).forEach(function (w) { if (w.date === date && w.type === 'walk') m += fin(w.durMin) ? w.durMin : 0; }); return m; }
+  // ctx: { days, sleepDays, workouts, stepsOn(date) -> number|null, kcalActiveOn(date) -> number|null }
+  function dayProgress(date, ctx, goals) {
+    goals = goals || defaultGoals(); ctx = ctx || {};
+    var days = ctx.days || [], ws = ctx.workouts || [];
+    var steps = typeof ctx.stepsOn === 'function' ? ctx.stepsOn(date) : null;
+    var sl = F.sleepNight(ctx.sleepDays || days, ws, date);
+    var kc = typeof ctx.kcalActiveOn === 'function' ? ctx.kcalActiveOn(date) : null;
+    var strain = F.dailyStrain(ws, date, days);
+    var walk = walkMinOn(ws, date);
+    return {
+      date: date, steps: prog(steps, goals.steps), walk: prog(walk, goals.walkMin),
+      sleep: Object.assign(prog(sl ? sl.durH : null, goals.sleepH), { needH: sl ? sl.needH : null }), kcal: prog(kc, goals.kcalActive), strain: prog(fin(strain) ? strain : null, goals.strain),
+      morning: { on: goals.morning !== false, done: !!H.findDay(days, date) }
+    };
+  }
+  // one ISO week (Mon..Sun) against the weekly goals
+  function weekProgress(startDate, ctx, goals) {
+    goals = goals || defaultGoals(); ctx = ctx || {};
+    var a = H.dayNum(startDate), b = a + 6, gym = 0, sauna = 0, zones = 0;
+    (ctx.workouts || []).forEach(function (w) {
+      var k = H.dayNum(w.date); if (k < a || k > b) return;
+      if (w.type === 'gym') gym++;
+      if (w.type === 'sauna') { sauna++; return; }
+      if (w.zonesSec) zones += ((w.zonesSec[1] || 0) + (w.zonesSec[2] || 0)) / 60;
+    });
+    var sv = sauna, st = sv < goals.saunaMin ? 'below' : (sv > goals.saunaMax ? 'above' : 'ok');
+    return {
+      start: startDate, gym: prog(gym, goals.gym), zones: prog(Math.round(zones), goals.zonesMin),
+      sauna: { v: sv, min: goals.saunaMin, max: goals.saunaMax, state: st, frac: clamp(sv / Math.max(1, goals.saunaMax), 0, 1), done: sv >= goals.saunaMin }
+    };
+  }
+  // consecutive days with a measurement (morning, night or WHOOP record). Today not measured yet does not break the streak.
+  function morningStreak(days, today) {
+    var have = {}; (days || []).forEach(function (d) { if (d && d.date) have[d.date] = 1; });
+    var t = H.dayNum(today), doneToday = !!have[today], k = doneToday ? t : t - 1, n = 0;
+    while (have[H.dateFromNum(k)] && n < 3650) { n++; k--; }
+    var last7 = []; for (var i = 6; i >= 0; i--) { var d = H.dateFromNum(t - i); last7.push({ date: d, done: !!have[d], today: i === 0, dow: dowIdx(d) }); }
+    return { streak: n, doneToday: doneToday, last7: last7 };
+  }
+  // Suggestions from the last 14 days / 4 full weeks. Returns { ok, items:[{key,label,current,suggested,reason}], note }
+  function suggestGoals(ctx, today, goals) {
+    goals = goals || defaultGoals(); ctx = ctx || {};
+    var items = [], days = ctx.days || [], ws = ctx.workouts || [], t = H.dayNum(today);
+    var stepsV = []; for (var i = 1; i <= 14; i++) { var s = typeof ctx.stepsOn === 'function' ? ctx.stepsOn(H.dateFromNum(t - i)) : null; if (fin(s) && s > 0) stepsV.push(s); }
+    if (stepsV.length >= 5) {
+      var av = mean(stepsV), sug = clamp(roundTo(av * 1.15, 500), 4000, 20000);
+      if (Math.abs(sug - goals.steps) >= 500) items.push({ key: 'steps', label: 'Kroki', current: goals.steps, suggested: sug, reason: 'Średnio ' + fmtInt(av) + ' kroków dziennie (' + stepsV.length + ' z 14 dni). Cel o ok. 15% wyżej.' });
+    }
+    var wk = []; for (var j = 1; j <= 14; j++) { var m = walkMinOn(ws, H.dateFromNum(t - j)); if (m > 0) wk.push(m); }
+    if (wk.length >= 3) {
+      var aw = mean(wk), sw = clamp(roundTo(aw * 1.1, 5), 15, 90);
+      if (Math.abs(sw - goals.walkMin) >= 5) items.push({ key: 'walkMin', label: 'Spacer', current: goals.walkMin, suggested: sw, reason: 'W dni ze spacerem chodzisz średnio ' + Math.round(aw) + ' min.' });
+    }
+    var needs = []; for (var q = 1; q <= 7; q++) { var n = F.sleepNight(ctx.sleepDays || days, ws, H.dateFromNum(t - q)); if (n && fin(n.needH)) needs.push(n.needH); }
+    if (needs.length >= 3) {
+      var sn = clamp(roundTo(mean(needs), 0.25), 7, 9);
+      if (Math.abs(sn - goals.sleepH) >= 0.25) items.push({ key: 'sleepH', label: 'Sen', current: goals.sleepH, suggested: sn, reason: 'Twoja potrzeba snu z ostatnich ' + needs.length + ' nocy to średnio ' + F.fmtDur(mean(needs)) + '.' });
+    }
+    var ws0 = H.dayNum(weekStart(today)), gymW = [], zoneW = [];
+    for (var w = 1; w <= 4; w++) { var p = weekProgress(H.dateFromNum(ws0 - 7 * w), ctx, goals); gymW.push(p.gym.v); zoneW.push(p.zones.v); }
+    var wData = ws.some(function (x) { var k = H.dayNum(x.date); return k >= ws0 - 28 && k < ws0 && x.type !== 'sauna'; });
+    if (wData) {
+      var ag = mean(gymW), sg = clamp(Math.round(ag + 0.4), 1, 5);
+      if (ag > 0 && sg !== goals.gym) items.push({ key: 'gym', label: 'Siłownia', current: goals.gym, suggested: sg, reason: 'Treningów siłowych tygodniowo w ostatnich 4 tygodniach: średnio ' + pl1(ag) + '.' });
+      var az = mean(zoneW), sz = clamp(roundTo(az * 1.15, 10), 60, 600);
+      if (az > 0 && Math.abs(sz - goals.zonesMin) >= 10) items.push({ key: 'zonesMin', label: 'Strefy 1–2', current: goals.zonesMin, suggested: sz, reason: 'Minut w strefach 1–2 tygodniowo: średnio ' + Math.round(az) + '.' });
+    }
+    var hist = stepsV.length >= 5 || wk.length >= 3 || needs.length >= 3 || wData;
+    return { ok: hist, items: items, note: hist ? (items.length ? '' : 'Twoje cele pasują do historii. Nic nie zmieniamy.') : 'Za mało historii, żeby cokolwiek podpowiedzieć. Wróć po kilku dniach z danymi (kroki, sen, treningi).' };
+  }
+
+  // ============================== records ("Rekord") ==============================
+  function e1rm(kg, reps) { return kg > 0 && reps > 0 ? kg * (1 + Math.min(reps, 12) / 30) : 0; }
+  // A record is only claimed against earlier sessions of the same kind: the first sessions are never a "record".
+  // Returns { workoutId: { kind, text } }
+  function recordFlags(workouts) {
+    var list = (workouts || []).filter(function (w) { return w && w.type !== 'sauna' && w.id; }).slice().sort(function (a, b) { return a.start !== b.start ? a.start - b.start : (a.date < b.date ? -1 : 1); });
+    var out = {}, gymN = 0, gymMax = 0, exBest = {}, dist = { run: { n: 0, max: 0 }, walk: { n: 0, max: 0 } };
+    list.forEach(function (w) {
+      if (w.type === 'gym') {
+        var vol = F.workoutVolumeKg(w), flag = null;
+        if (gymN >= 2 && vol > gymMax + 1) flag = { kind: 'volume', text: 'Rekord objętości: ' + fmtInt(vol) + ' kg' };
+        (w.exercises || []).forEach(function (e) {
+          var best = 0; (e.sets || []).forEach(function (s) { best = Math.max(best, e1rm(s.kg, s.reps)); });
+          var key = String(e.name || '').toLowerCase();
+          if (!flag && best > 0 && exBest[key] != null && best > exBest[key] + 0.5) flag = { kind: 'e1rm', text: 'Rekord: ' + e.name };
+          if (best > 0) exBest[key] = Math.max(exBest[key] || 0, best);
+        });
+        if (flag) out[w.id] = flag;
+        gymN++; gymMax = Math.max(gymMax, vol);
+      } else if (w.type === 'run' || w.type === 'walk') {
+        var d = dist[w.type], km = fin(w.distanceKm) ? w.distanceKm : 0;
+        if (km > 0) {
+          if (d.n >= 2 && km > d.max + 0.05) out[w.id] = { kind: 'distance', text: 'Najdłuższy ' + (w.type === 'run' ? 'bieg' : 'spacer') + ': ' + pl1(km) + ' km' };
+          d.n++; d.max = Math.max(d.max, km);
+        }
+      }
+    });
+    return out;
+  }
+  function setsCount(w) { var n = 0; (w.exercises || []).forEach(function (e) { n += (e.sets || []).length; }); return n; }
+
+  // ============================== badges ==============================
+  var BADGES = [
+    { id: 'pomiary14', key: true, title: '14 dni pomiarów', shape: 'hex', icon: 'calendar', tone: 'amber', goal: 14, unit: 'dni' },
+    { id: 'noc1', title: 'Pierwsza noc z opaską', shape: 'shield', icon: 'moon', tone: 'silver', goal: 1, unit: '' },
+    { id: 'rekordSil', title: 'Rekord siłowni', shape: 'circle', icon: 'gym', tone: 'gold', goal: 1, unit: '' },
+    { id: 'km100', title: '100 km spacerów', shape: 'hex', icon: 'walk', tone: 'copper', goal: 100, unit: 'km' },
+    { id: 'tydz3', title: 'Tydzień 3× siłownia', shape: 'circle', icon: 'gym', tone: 'silver', goal: 3, unit: '×' },
+    { id: 'hrv7', title: 'HRV powyżej normy 7 dni', shape: 'shield', icon: 'pulse', tone: 'copper', goal: 7, unit: 'dni' }
+  ];
+  // longest and current run of consecutive days with HRV above the personal norm (needs a norm from >= 5 days)
+  function hrvAboveRuns(days, today) {
+    var vf = H.viewForDate(days || [], today), view = vf.view, t = H.dayNum(today), best = 0, run = 0, have = {};
+    view.forEach(function (d) { have[d.date] = d; });
+    for (var k = t - 120; k <= t; k++) {
+      var d = have[H.dateFromNum(k)];
+      if (d && fin(d.lnRmssd)) {
+        var b = H.baseline(view, d.date), ok = b.n >= 5 && fin(b.mean) && d.lnRmssd > b.mean;
+        if (ok) { run++; best = Math.max(best, run); } else run = 0;
+      } else if (k < t) run = 0; // a day without a measurement breaks the run; today not measured yet does not
+    }
+    return { best: best, cur: run };
+  }
+  function bestGymWeek(workouts, today) {
+    var per = {}; (workouts || []).forEach(function (w) { if (w.type === 'gym') { var s = weekStart(w.date); per[s] = (per[s] || 0) + 1; } });
+    var best = 0, cur = per[weekStart(today)] || 0; Object.keys(per).forEach(function (k) { best = Math.max(best, per[k]); });
+    return { best: best, cur: cur };
+  }
+  // ctx: { days, workouts }; saved: { badgeId: 'YYYY-MM-DD' } (earned badges stay earned). Returns the list with progress.
+  function evaluateBadges(ctx, today, saved) {
+    ctx = ctx || {}; saved = saved || {};
+    var days = ctx.days || [], ws = ctx.workouts || [];
+    var al = A.alarmStatus(days, today), alN = al ? al.n : 0;
+    var rec = recordFlags(ws), gymRec = ws.filter(function (w) { return w.type === 'gym' && rec[w.id]; }).length;
+    var km = sum(ws.filter(function (w) { return w.type === 'walk'; }).map(function (w) { return w.distanceKm; }));
+    var gw = bestGymWeek(ws, today), hr = hrvAboveRuns(days, today);
+    var night = days.some(function (d) { return d.source === 'noc'; });
+    var raw = {
+      pomiary14: { v: Math.min(alN, A.NEED_DAYS), earned: alN >= A.NEED_DAYS, goal: A.NEED_DAYS },
+      noc1: { v: night ? 1 : 0, earned: night },
+      rekordSil: { v: Math.min(gymRec, 1), earned: gymRec >= 1 },
+      km100: { v: Math.min(r1(km) || 0, 100), earned: km >= 100 },
+      tydz3: { v: Math.min(gw.cur, 3), earned: gw.best >= 3 },
+      hrv7: { v: Math.min(hr.cur, 7), earned: hr.best >= 7 }
+    };
+    return BADGES.map(function (b) {
+      var r = raw[b.id], goal = r.goal || b.goal, earned = !!saved[b.id] || r.earned, v = earned ? goal : r.v;
+      return Object.assign({}, b, { goal: goal, v: v, frac: goal > 0 ? clamp(v / goal, 0, 1) : 0, earned: earned, earnedOn: saved[b.id] || (r.earned ? today : null), isNew: !saved[b.id] && r.earned });
+    });
+  }
+  // saved map after an evaluation: newly earned ones get today's date
+  function syncBadges(saved, list, today) {
+    var out = Object.assign({}, saved || {}), added = [];
+    list.forEach(function (b) { if (b.earned && !out[b.id]) { out[b.id] = today; added.push(b.id); } });
+    return { saved: out, added: added };
+  }
+  function cleanBadges(o) { var out = {}; if (o && typeof o === 'object') BADGES.forEach(function (b) { if (isDate(o[b.id])) out[b.id] = o[b.id]; }); return out; }
+  function badgeProgressText(b) {
+    if (b.earned) return 'zdobyta' + (b.earnedOn ? ' ' + dayShort(b.earnedOn) : '');
+    if (b.id === 'km100') return pl1(b.v) + ' / 100 km';
+    if (b.id === 'pomiary14') return b.v + ' / ' + b.goal + ' dni';
+    if (b.id === 'hrv7') return b.v + ' / 7 dni z rzędu';
+    if (b.id === 'tydz3') return b.v + ' / 3 w tym tygodniu';
+    return b.v + ' / ' + b.goal;
+  }
+
+  // ============================== challenges ==============================
+  var CHALLENGES = {
+    km300: { id: 'km300', title: '300 km marszu w miesiącu', short: '300 km marszu', days: 30, goalKm: 300, text: 'Chodź przez 30 dni. Liczymy kilometry ze spacerów zapisanych w Formie (także z Health Connect i WHOOP).' },
+    alk14: { id: 'alk14', title: 'Bez alkoholu 14 dni', short: 'Bez alkoholu', days: 14, text: 'Przez 14 dni bez alkoholu. Zobaczysz, jak zmienia się Twoje HRV. Alkohol zaznaczasz w tagach porannego pomiaru.' }
+  };
+  function cleanChallenges(o) {
+    var out = {};
+    Object.keys(CHALLENGES).forEach(function (id) {
+      var c = o && o[id]; if (!c || !isDate(c.start)) return;
+      out[id] = { start: c.start, stopped: isDate(c.stopped) ? c.stopped : null, doneOn: isDate(c.doneOn) ? c.doneOn : null, failedOn: isDate(c.failedOn) ? c.failedOn : null };
+    });
+    return out;
+  }
+  function walkKmBetween(ws, from, to) { var a = H.dayNum(from), b = H.dayNum(to); return sum(ws.filter(function (w) { var k = H.dayNum(w.date); return w.type === 'walk' && k >= a && k <= b; }).map(function (w) { return w.distanceKm; })); }
+  // st: { start, stopped, doneOn, failedOn } | undefined. state: idle | active | done | ended | stopped | failed
+  function challengeStatus(id, st, ctx, today) {
+    var def = CHALLENGES[id], base = { id: id, def: def, state: 'idle', frac: 0, text: '', detail: '', start: null };
+    if (!def || !st || !isDate(st.start)) { base.text = def ? def.text : ''; return base; }
+    ctx = ctx || {}; var ws = ctx.workouts || [], days = ctx.days || [];
+    var end = H.addDays(st.start, def.days - 1), elapsed = clamp(diffDays(today, st.start) + 1, 1, def.days), left = Math.max(0, diffDays(end, today));
+    base.start = st.start; base.end = end; base.elapsed = elapsed; base.daysLeft = left;
+    if (id === 'km300') {
+      var stopAt = st.stopped || today, to = H.dayNum(stopAt) < H.dayNum(end) ? stopAt : end, km = walkKmBetween(ws, st.start, to);
+      base.km = r1(km) || 0; base.frac = clamp(km / def.goalKm, 0, 1);
+      if (km >= def.goalKm) { base.state = 'done'; base.text = 'Zaliczone: ' + pl1(km) + ' km'; }
+      else if (st.stopped) { base.state = 'stopped'; base.text = 'Zatrzymane ' + dayShort(st.stopped) + ': ' + pl1(km) + ' z 300 km'; }
+      else if (H.dayNum(today) > H.dayNum(end)) { base.state = 'ended'; base.text = 'Zakończone: ' + pl1(km) + ' z 300 km'; }
+      else {
+        base.state = 'active'; base.text = pl1(km) + ' / 300 km';
+        var need = (def.goalKm - km) / Math.max(1, left + 1);
+        base.detail = 'Dzień ' + elapsed + ' z 30 · zostało ' + (left + 1) + ' dni · potrzeba średnio ' + pl1(need) + ' km dziennie';
+      }
+      return base;
+    }
+    // alk14: a morning record with the tag Alkohol dated after the start day breaks the challenge (the tag describes the evening before)
+    var broken = null; days.forEach(function (d) { if (d.tags && d.tags.indexOf('Alkohol') >= 0 && diffDays(d.date, st.start) >= 1 && diffDays(d.date, today) <= 0 && (!st.stopped || diffDays(d.date, st.stopped) <= 0)) { if (!broken || d.date < broken) broken = d.date; } });
+    var okDays = broken ? Math.max(0, diffDays(broken, st.start) - 1) : clamp(diffDays(st.stopped || today, st.start), 0, def.days);
+    base.okDays = okDays; base.frac = clamp(okDays / def.days, 0, 1); base.hrv = hrvImpact(days, st.start, broken ? H.addDays(broken, -1) : (st.stopped || today));
+    if (broken) { base.state = 'failed'; base.failedOn = broken; base.text = 'Alkohol zapisany ' + dayShort(broken) + ' – wyzwanie przerwane po ' + okDays + ' dniach'; }
+    else if (okDays >= def.days) { base.state = 'done'; base.text = 'Zaliczone: 14 dni bez alkoholu'; }
+    else if (st.stopped) { base.state = 'stopped'; base.text = 'Zatrzymane ' + dayShort(st.stopped) + ' po ' + okDays + ' dniach'; }
+    else { base.state = 'active'; base.text = 'Dzień ' + (okDays + 1) + ' z 14 · bez alkoholu: ' + okDays + ' dni'; base.detail = ''; }
+    return base;
+  }
+  // HRV during the challenge (records dated start+1 .. to) against the 14 days before the start. Needs >= 3 records in both.
+  function hrvImpact(days, start, to) {
+    var view = H.viewForDate(days || [], to).view, a = H.dayNum(start);
+    var before = view.filter(function (d) { var k = H.dayNum(d.date); return k >= a - 14 && k < a && fin(d.rmssd); }).map(function (d) { return d.rmssd; });
+    var during = view.filter(function (d) { var k = H.dayNum(d.date); return k > a && k <= H.dayNum(to) && fin(d.rmssd); }).map(function (d) { return d.rmssd; });
+    if (before.length < 3 || during.length < 3) return { ok: false, nBefore: before.length, nDuring: during.length };
+    var b = mean(before), d = mean(during);
+    return { ok: true, before: b, during: d, pct: (d / b - 1) * 100, nBefore: before.length, nDuring: during.length };
+  }
+
+  // ============================== HR recovery (HRR) ==============================
+  function hrrLabel(drop) {
+    if (!fin(drop)) return { key: 'brak', label: '—', color: '#9AA6B0' };
+    if (drop >= 25) return { key: 'bdobry', label: 'bardzo dobry', color: '#2EE86B' };
+    if (drop >= 18) return { key: 'dobry', label: 'dobry', color: '#2EE86B' };
+    if (drop >= 12) return { key: 'przecietny', label: 'przeciętny', color: '#F7D23E' };
+    return { key: 'niski', label: 'niski', color: '#F2A93B' };
+  }
+  // samples: 1 Hz bpm of the session (0 = none); hrLog: [{t, hr}] (every ~5 s) which kept running after the session; endT: ms.
+  // HRR1 = HR at the end of the effort - HR one minute later. Needs an end HR of >= 100 (the number is meaningless after a light effort).
+  function computeHrr(samples, hrLog, endT) {
+    var tail = (samples || []).slice(-20).filter(function (v) { return fin(v) && v > 0; });
+    if (tail.length < 5) return { ok: false, reason: 'za mało próbek tętna na końcu treningu' };
+    var end = Math.round(mean(tail.slice(-10)));
+    if (end < 100) return { ok: false, reason: 'tętno na koniec treningu poniżej 100 – wynik byłby niepewny' };
+    var best = null; (hrLog || []).forEach(function (p) { if (!p || !fin(p.t) || !fin(p.hr)) return; var off = Math.abs(p.t - (endT + 60000)); if (off <= 15000 && (!best || off < best.off)) best = { off: off, hr: p.hr }; });
+    if (!best) return { ok: false, reason: 'brak tętna minutę po treningu' };
+    var drop = end - best.hr;
+    if (drop < 0 || drop > 90 || best.hr < 30) return { ok: false, reason: 'nieprawdopodobny odczyt' };
+    return { ok: true, end: end, at60: Math.round(best.hr), drop: Math.round(drop) };
+  }
+  function cleanHrr(o) {
+    var out = {}; if (!o || typeof o !== 'object') return out;
+    Object.keys(o).slice(-200).forEach(function (id) { var h = o[id]; if (h && isDate(h.date) && fin(h.drop) && fin(h.end) && fin(h.at60)) out[String(id).slice(0, 64)] = { date: h.date, end: Math.round(h.end), at60: Math.round(h.at60), drop: Math.round(h.drop) }; });
+    return out;
+  }
+  function hrrList(store, n) {
+    return Object.keys(store || {}).map(function (id) { var h = store[id]; return { id: id, date: h.date, end: h.end, at60: h.at60, drop: h.drop, lab: hrrLabel(h.drop) }; })
+      .sort(function (a, b) { return a.date !== b.date ? (a.date < b.date ? 1 : -1) : (a.id < b.id ? 1 : -1); }).slice(0, n || 10);
+  }
+
+  // ============================== blood pressure / glucose ==============================
+  var BP_DISCLAIMER = 'To nie jest diagnoza. Forma nie mierzy ciśnienia ani cukru – wpisujesz wyniki z własnego ciśnieniomierza lub glukometru. O interpretacji wyników rozmawiaj z lekarzem.';
+  function validateBp(raw) {
+    var s = num(raw && raw.sys), d = num(raw && raw.dia), p = raw && raw.pulse !== '' && raw.pulse != null ? num(raw.pulse) : null;
+    if (s == null || d == null) return { ok: false, error: 'Wpisz ciśnienie skurczowe i rozkurczowe (np. 120 i 80).' };
+    s = Math.round(s); d = Math.round(d);
+    if (s < 60 || s > 260) return { ok: false, error: 'Ciśnienie skurczowe: 60–260 mmHg.' };
+    if (d < 30 || d > 160) return { ok: false, error: 'Ciśnienie rozkurczowe: 30–160 mmHg.' };
+    if (s <= d) return { ok: false, error: 'Skurczowe musi być wyższe od rozkurczowego.' };
+    if (raw && raw.pulse !== '' && raw.pulse != null) { if (p == null || p < 30 || p > 250) return { ok: false, error: 'Tętno: 30–250 ud/min.' }; p = Math.round(p); }
+    return { ok: true, sys: s, dia: d, pulse: p };
+  }
+  function bpCategory(sys, dia) {
+    if (!fin(sys) || !fin(dia)) return { key: 'brak', label: '—', tone: 'recon', color: '#9AA6B0' };
+    if (sys >= 180 || dia >= 110) return { key: 'bwysokie', label: 'bardzo wysokie', tone: 'alarm', color: '#FF4D5E', advice: 'Jeśli masz objawy (ból w klatce, duszność, silny ból głowy), zadzwoń po pomoc. W innym wypadku skontaktuj się z lekarzem.' };
+    if (sys >= 140 || dia >= 90) return { key: 'wysokie', label: 'podwyższone', tone: 'warn', color: '#F2A93B', advice: 'Powtórz pomiar po 5 minutach spokoju. Jeśli tak jest częściej, powiedz o tym lekarzowi.' };
+    if (sys >= 130 || dia >= 85) return { key: 'wnorm', label: 'wysokie prawidłowe', tone: 'unsure', color: '#F7D23E', advice: '' };
+    if (sys >= 120 || dia >= 80) return { key: 'prawidlowe', label: 'prawidłowe', tone: 'ok', color: '#2EE86B', advice: '' };
+    if (sys < 90 || dia < 60) return { key: 'niskie', label: 'niskie', tone: 'warn', color: '#F2A93B', advice: 'Jeśli masz zawroty głowy lub omdlenia, skonsultuj się z lekarzem.' };
+    return { key: 'optymalne', label: 'optymalne', tone: 'ok', color: '#2EE86B', advice: '' };
+  }
+  var GLU_CTX = { fasting: 'na czczo', after: 'po posiłku' };
+  function validateGlucose(raw) {
+    var v = num(raw && raw.mgdl), c = raw && raw.ctx;
+    if (v == null) return { ok: false, error: 'Wpisz wynik w mg/dL (np. 95).' };
+    v = Math.round(v);
+    if (v < 20 || v > 600) return { ok: false, error: 'Glukoza: 20–600 mg/dL.' };
+    if (!GLU_CTX[c]) return { ok: false, error: 'Wybierz: na czczo albo po posiłku.' };
+    return { ok: true, mgdl: v, ctx: c };
+  }
+  function mgdlToMmol(v) { return fin(v) ? v / 18.016 : null; }
+  function glucoseCategory(mgdl, ctx) {
+    if (!fin(mgdl)) return { key: 'brak', label: '—', tone: 'recon', color: '#9AA6B0' };
+    if (mgdl < 70) return { key: 'niska', label: 'niska', tone: 'warn', color: '#F2A93B', advice: 'Jeśli masz objawy (drżenie, pocenie się, osłabienie), zjedz coś słodkiego i skonsultuj się z lekarzem.' };
+    if (ctx === 'after') {
+      if (mgdl >= 200) return { key: 'wysoka', label: 'wysoka', tone: 'alarm', color: '#FF4D5E', advice: 'Wynik po posiłku jest wysoki. Skontaktuj się z lekarzem.' };
+      if (mgdl >= 140) return { key: 'podwyzszona', label: 'podwyższona', tone: 'warn', color: '#F2A93B', advice: 'Jeśli tak jest częściej, powiedz o tym lekarzowi.' };
+      return { key: 'typowa', label: 'typowa', tone: 'ok', color: '#2EE86B', advice: '' };
+    }
+    if (mgdl >= 126) return { key: 'wysoka', label: 'wysoka', tone: 'alarm', color: '#FF4D5E', advice: 'Wynik na czczo jest wysoki. Skontaktuj się z lekarzem.' };
+    if (mgdl >= 100) return { key: 'podwyzszona', label: 'podwyższona', tone: 'warn', color: '#F2A93B', advice: 'Jeśli tak jest częściej, powiedz o tym lekarzowi.' };
+    return { key: 'typowa', label: 'typowa', tone: 'ok', color: '#2EE86B', advice: '' };
+  }
+  function entryTime(date, time) { var p = date.split('-'), m = /^(\d{2}):(\d{2})$/.exec(time || ''); return new Date(+p[0], +p[1] - 1, +p[2], m ? +m[1] : 12, m ? +m[2] : 0).getTime(); }
+  function cleanBp(list) {
+    var out = [], seen = {};
+    (Array.isArray(list) ? list : []).forEach(function (e) {
+      if (!e || !isDate(e.date)) return; var v = validateBp(e); if (!v.ok) return;
+      var t = fin(+e.t) ? +e.t : entryTime(e.date, e.time), id = typeof e.id === 'string' && e.id ? e.id.slice(0, 40) : 'b' + t; if (seen[id]) return; seen[id] = 1;
+      out.push({ id: id, t: t, date: e.date, time: /^\d{2}:\d{2}$/.test(e.time || '') ? e.time : '12:00', sys: v.sys, dia: v.dia, pulse: v.pulse });
+    });
+    out.sort(function (a, b) { return a.t - b.t; }); return out.slice(-500);
+  }
+  function cleanGlu(list) {
+    var out = [], seen = {};
+    (Array.isArray(list) ? list : []).forEach(function (e) {
+      if (!e || !isDate(e.date)) return; var v = validateGlucose(e); if (!v.ok) return;
+      var t = fin(+e.t) ? +e.t : entryTime(e.date, e.time), id = typeof e.id === 'string' && e.id ? e.id.slice(0, 40) : 'g' + t; if (seen[id]) return; seen[id] = 1;
+      out.push({ id: id, t: t, date: e.date, time: /^\d{2}:\d{2}$/.test(e.time || '') ? e.time : '12:00', mgdl: v.mgdl, ctx: v.ctx });
+    });
+    out.sort(function (a, b) { return a.t - b.t; }); return out.slice(-500);
+  }
+  function mergeById(a, b) { var m = {}; a.concat(b).forEach(function (e) { m[e.id] = e; }); return Object.keys(m).map(function (k) { return m[k]; }).sort(function (x, y) { return x.t - y.t; }); }
+  // Records for Health Connect (blood pressure / glucose), only entries from the last 60 days that are not in the ledger yet.
+  // ledger: { cid: {ver, sig} } (the same ledger as the other records). perms: { bp: bool, glucose: bool }
+  function hcRecords(bp, glu, ledger, perms, nowMs) {
+    ledger = ledger || {}; perms = perms || {}; nowMs = nowMs || Date.now();
+    var from = nowMs - 60 * 86400000, out = [];
+    function add(rec, sig) { var prev = ledger[rec.cid]; if (prev && prev.sig === sig) return; rec.ver = Math.max(nowMs, prev ? prev.ver + 1 : 0); rec.sig = sig; out.push(rec); }
+    function off(t) { return -new Date(t).getTimezoneOffset() * 60; }
+    if (perms.bp) (bp || []).forEach(function (e) { if (e.t >= from && e.t <= nowMs + 3600000) add({ kind: 'bp', cid: 'forma-bp-' + e.id, t: e.t, off: off(e.t), sys: e.sys, dia: e.dia }, e.t + '|' + e.sys + '|' + e.dia); });
+    if (perms.glucose) (glu || []).forEach(function (e) { if (e.t >= from && e.t <= nowMs + 3600000) add({ kind: 'glucose', cid: 'forma-glu-' + e.id, t: e.t, off: off(e.t), mgdl: e.mgdl, rel: e.ctx === 'fasting' ? 'fasting' : 'after' }, e.t + '|' + e.mgdl + '|' + e.ctx); });
+    return out;
+  }
+  function hhPerms(granted) {
+    var P = 'android.permission.health.', set = {}; (Array.isArray(granted) ? granted : []).forEach(function (p) { if (typeof p === 'string') set[p.indexOf(P) === 0 ? p : P + p] = 1; });
+    return { bp: !!set[P + 'WRITE_BLOOD_PRESSURE'], glucose: !!set[P + 'WRITE_BLOOD_GLUCOSE'] };
+  }
+
+  // ============================== macros ==============================
+  function cleanMacros(o) {
+    var out = {}; if (!o || typeof o !== 'object') return out;
+    Object.keys(o).sort().slice(-400).forEach(function (d) {
+      if (!isDate(d) || !o[d] || typeof o[d] !== 'object') return;
+      var e = o[d], g = function (v, mx) { v = num(v); return v != null && v >= 0 && v <= mx ? Math.round(v * 10) / 10 : null; };
+      var m = { kcal: g(e.kcal, 10000), p: g(e.p, 1000), c: g(e.c, 2000), f: g(e.f, 1000) };
+      if (m.kcal != null || m.p != null || m.c != null || m.f != null) { m.kcal = m.kcal != null ? Math.round(m.kcal) : null; m.derived = !!e.derived && m.kcal != null; out[d] = m; }
+    });
+    return out;
+  }
+  function kcalFromMacros(p, c, f) { return Math.round(4 * (p || 0) + 4 * (c || 0) + 9 * (f || 0)); }
+  // raw: { kcal, p, c, f } as typed. At least one value; kcal missing but macros given -> kcal = 4P + 4C + 9F (marked as derived).
+  function validateMacros(raw) {
+    raw = raw || {}; var vals = {}, lim = { kcal: [0, 10000, 'Kalorie: 0–10 000 kcal.'], p: [0, 1000, 'Białko: 0–1000 g.'], c: [0, 2000, 'Węglowodany: 0–2000 g.'], f: [0, 1000, 'Tłuszcze: 0–1000 g.'] }, any = false, err = null;
+    ['kcal', 'p', 'c', 'f'].forEach(function (k) {
+      var r = raw[k]; if (r === '' || r == null) { vals[k] = null; return; }
+      var v = num(r); if (v == null || v < lim[k][0] || v > lim[k][1]) { if (!err) err = lim[k][2]; vals[k] = null; return; }
+      vals[k] = k === 'kcal' ? Math.round(v) : Math.round(v * 10) / 10; any = true;
+    });
+    if (err) return { ok: false, error: err };
+    if (!any) return { ok: false, error: 'Wpisz co najmniej jedną wartość.' };
+    var derived = false;
+    if (vals.kcal == null && (vals.p != null || vals.c != null || vals.f != null)) { vals.kcal = kcalFromMacros(vals.p, vals.c, vals.f); derived = true; }
+    vals.derived = derived;
+    return { ok: true, value: vals };
+  }
+  // mean of the entered kcal over [from, to]; used as "typical intake" for the calorie calibration (needs >= minDays entered days)
+  function intakeFromMacros(macros, from, to, minDays) {
+    var vals = []; if (macros && isDate(from) && isDate(to)) for (var k = H.dayNum(from); k <= H.dayNum(to); k++) { var m = macros[H.dateFromNum(k)]; if (m && fin(m.kcal) && m.kcal > 0) vals.push(m.kcal); }
+    var need = minDays || 7;
+    return { ok: vals.length >= need, n: vals.length, need: need, mean: vals.length ? mean(vals) : null };
+  }
+  function macroShare(m) {
+    if (!m) return null;
+    var p = (m.p || 0) * 4, c = (m.c || 0) * 4, f = (m.f || 0) * 9, tot = p + c + f;
+    return tot > 0 ? { p: p / tot, c: c / tot, f: f / tot } : null;
+  }
+
+  // ============================== weekly report ==============================
+  function lastFullWeekStart(today) { return H.addDays(weekStart(today), -7); }
+  // Explanation of a day from its tags, sleep and the previous day's load.
+  function explainDay(d, kind) {
+    var parts = [], tags = (d.tags || []).filter(function (t) { return t !== 'Sauna' || kind === 'worst'; });
+    var pct = fin(d.hrvPct) ? (d.hrvPct >= 0 ? '+' : '−') + Math.abs(Math.round(d.hrvPct)) + '%' : null;
+    if (kind === 'worst') {
+      if (tags.length) parts.push(tags.map(function (t) { return t.toLowerCase(); }).join(', '));
+      else if (fin(d.sleepH) && fin(d.needH) && d.sleepH < d.needH - 1) parts.push('krótki sen (' + F.fmtDur(d.sleepH) + ')');
+      else if (fin(d.strainY) && d.strainY >= 14) parts.push('duże obciążenie dzień wcześniej');
+      var s = parts.length ? dowName(d.date).replace(/^./, function (c) { return c.toUpperCase(); }) + ': ' + parts.join(', ') + (pct ? ' → HRV ' + pct : '') + '.' : dowName(d.date).replace(/^./, function (c) { return c.toUpperCase(); }) + ': w zapisanych tagach nie ma wyraźnej przyczyny' + (pct ? ' (HRV ' + pct + ')' : '') + '.';
+      return s;
+    }
+    if (fin(d.sleepH) && fin(d.needH) && d.sleepH >= d.needH - 0.25) parts.push('Sen ' + F.fmtDur(d.sleepH));
+    if (fin(d.strainY) && d.strainY < 4) parts.push('brak treningu dzień wcześniej');
+    if (!tags.length) parts.push('bez tagów obciążających');
+    return (parts.join(', ') || 'Dobre wskaźniki') + (pct ? ', HRV ' + pct : '') + '.';
+  }
+  // ctx: { days, sleepDays, workouts, stepsOn(date) }. Returns a report for the week starting at `start` (Monday).
+  function weekReport(ctx, start, goals) {
+    ctx = ctx || {}; goals = goals || defaultGoals();
+    var days = ctx.days || [], sdays = ctx.sleepDays || days, ws = ctx.workouts || [];
+    function build(st) {
+      var rows = [], vf = H.viewForDate(days, H.addDays(st, 6)), view = vf.view;
+      for (var i = 0; i < 7; i++) {
+        var date = H.addDays(st, i), rec = H.findDay(days, date), ds = H.dayStatus(days, date), sl = F.sleepNight(sdays, ws, date), b = rec ? H.baseline(view, date) : null;
+        var steps = typeof ctx.stepsOn === 'function' ? ctx.stepsOn(date) : null;
+        rows.push({
+          date: date, dow: dowIdx(date), rec: !!rec, rmssd: rec && fin(rec.rmssd) ? rec.rmssd : null, hr: rec && fin(rec.hr) ? rec.hr : null, tags: rec ? (rec.tags || []).slice() : [],
+          readiness: ds && ds.scored ? ds.readiness : null, color: ds && ds.scored ? ds.color : null, sleepH: sl ? sl.durH : null, needH: sl ? sl.needH : null, reg: sl ? sl.reg : null,
+          strainY: F.dailyStrain(ws, H.addDays(date, -1), days), strain: F.dailyStrain(ws, date, days), steps: fin(steps) ? steps : null,
+          hrvPct: rec && b && b.n >= 5 && fin(b.meanMs) && b.meanMs > 0 ? (rec.rmssd / b.meanMs - 1) * 100 : null
+        });
+      }
+      var wsn = ws.filter(function (w) { var k = H.dayNum(w.date); return k >= H.dayNum(st) && k <= H.dayNum(st) + 6; });
+      var regs = rows.map(function (r) { return r.reg; }).filter(fin);
+      return {
+        start: st, end: H.addDays(st, 6), rows: rows, nRec: rows.filter(function (r) { return r.rec; }).length,
+        hrv: mean(rows.map(function (r) { return r.rmssd; })), rhr: mean(rows.map(function (r) { return r.hr; })), sleepH: mean(rows.map(function (r) { return r.sleepH; })), needH: mean(rows.map(function (r) { return r.needH; })),
+        reg: regs.length ? regs[regs.length - 1] : null, steps: mean(rows.map(function (r) { return r.steps; })), nSteps: rows.filter(function (r) { return r.steps != null; }).length,
+        gym: wsn.filter(function (w) { return w.type === 'gym'; }).length, sauna: wsn.filter(function (w) { return w.type === 'sauna'; }).length, nWorkouts: wsn.length
+      };
+    }
+    var cur = build(start), prev = build(H.addDays(start, -7));
+    var hasData = cur.nRec > 0 || cur.nWorkouts > 0;
+    function delta(a, b) { return fin(a) && fin(b) ? a - b : null; }
+    function pct(a, b) { return fin(a) && fin(b) && b > 0 ? (a / b - 1) * 100 : null; }
+    var cmp = prev.nRec > 0 || prev.nWorkouts > 0 ? {
+      hrvPct: pct(cur.hrv, prev.hrv), rhr: delta(cur.rhr, prev.rhr), sleepMin: fin(delta(cur.sleepH, prev.sleepH)) ? Math.round(delta(cur.sleepH, prev.sleepH) * 60) : null,
+      regPts: delta(cur.reg, prev.reg), stepsPct: pct(cur.steps, prev.steps), gym: cur.gym - prev.gym, sauna: cur.sauna - prev.sauna
+    } : null;
+    // best / worst day: readiness when >= 3 days are scored, else HRV when >= 3 days have a measurement
+    var scored = cur.rows.filter(function (r) { return r.readiness != null; }), best = null, worst = null, metric = null;
+    var pool = null;
+    if (scored.length >= 3) { pool = scored; metric = 'readiness'; } else if (cur.rows.filter(function (r) { return r.rmssd != null; }).length >= 3) { pool = cur.rows.filter(function (r) { return r.rmssd != null; }); metric = 'rmssd'; }
+    if (pool) {
+      var key = metric === 'readiness' ? 'readiness' : 'rmssd';
+      var hi = pool.reduce(function (a, r) { return r[key] > a[key] ? r : a; }, pool[0]), lo = pool.reduce(function (a, r) { return r[key] < a[key] ? r : a; }, pool[0]);
+      if (hi !== lo) {
+        best = { date: hi.date, value: Math.round(hi[key]), unit: metric === 'readiness' ? '%' : ' ms', text: explainDay(hi, 'best') };
+        worst = { date: lo.date, value: Math.round(lo[key]), unit: metric === 'readiness' ? '%' : ' ms', text: explainDay(lo, 'worst'), tags: lo.tags };
+      }
+    }
+    var out = { start: cur.start, end: cur.end, hasData: hasData, cur: cur, prev: prev, cmp: cmp, best: best, worst: worst, metric: metric, goals: goals, ready: cur.nRec >= 3 };
+    out.reco = weekRecommendation(out, ctx, goals);
+    return out;
+  }
+  // One recommendation for next week. Own rules first (from the week's data); the daily tip engine (TipCore) is the fallback.
+  function weekRecommendation(rep, ctx, goals) {
+    var c = rep.cur;
+    if (!rep.hasData) return null;
+    if (rep.worst && rep.worst.tags && rep.worst.tags.indexOf('Alkohol') >= 0)
+      return { id: 'alkohol', title: 'Zaplanuj dni bez alkoholu przed treningiem', why: dowName(rep.worst.date).replace(/^./, function (x) { return x.toUpperCase(); }) + ' z alkoholem był najsłabszym dniem tygodnia. Wieczór bez alkoholu przed ważnym treningiem to najprostszy sposób na wyższe HRV.' };
+    if (fin(c.sleepH) && fin(c.needH) && c.sleepH < c.needH - 0.5) {
+      var bed = null, wake = ctx && ctx.wake ? ctx.wake : '07:00'; try { bed = F.bedtimeSuggestion(wake, c.needH); } catch (e) { bed = null; }
+      return { id: 'sen', title: bed ? 'Połóż się o ' + bed : 'Śpij dłużej', why: 'Średnio spałeś ' + F.fmtDur(c.sleepH) + ' przy potrzebie ok. ' + F.fmtDur(c.needH) + '. Brakuje ' + F.fmtDur(c.needH - c.sleepH) + ' każdej nocy – to najszybszy sposób na lepszą regenerację.' };
+    }
+    if (c.gym < goals.gym && c.nRec >= 3)
+      return { id: 'silownia', title: 'Zaplanuj ' + goals.gym + ' treningi siłowe', why: 'W tym tygodniu było ' + c.gym + ' z ' + goals.gym + '. Wpisz je w kalendarz na stałe dni, wtedy łatwiej ich dotrzymać.' };
+    if (c.nSteps >= 3 && fin(c.steps) && c.steps < 7000)
+      return { id: 'marsz', title: 'Dodaj codzienny spacer', why: 'Średnio ' + fmtInt(c.steps) + ' kroków dziennie. 20–30 minut marszu po obiedzie podniesie wynik bez planowania treningu.' };
+    var tip = null;
+    try {
+      var last = c.rows.filter(function (r) { return r.rec; }).pop();
+      tip = T.dailyTip({ date: H.addDays(rep.end, 1), alarmLevel: 0, sleepDebtH: 0, bedtime: null, readinessColor: last ? last.color : null, gymThisWeek: 0, daysSinceGym: null, stepsYesterday: null, walkMinYesterday: 0, walkLogged: false, zones13Yesterday: 0, alcoholYesterday: false, saunaYesterday: false, history: [] });
+    } catch (e3) { tip = null; }
+    return tip ? { id: tip.id, title: tip.title, why: tip.why } : { id: 'ok', title: 'Tak trzymaj', why: 'Ten tydzień wygląda dobrze. Utrzymaj stałe pory snu i regularny ruch.' };
+  }
+
+  var api = {
+    GOAL_DEFS: GOAL_DEFS, GOAL_KEYS: GOAL_KEYS, defaultGoals: defaultGoals, cleanGoals: cleanGoals, validateGoal: validateGoal, goalText: goalText,
+    prog: prog, dayProgress: dayProgress, weekProgress: weekProgress, morningStreak: morningStreak, suggestGoals: suggestGoals, walkMinOn: walkMinOn,
+    recordFlags: recordFlags, setsCount: setsCount, BADGES: BADGES, evaluateBadges: evaluateBadges, syncBadges: syncBadges, cleanBadges: cleanBadges, badgeProgressText: badgeProgressText, hrvAboveRuns: hrvAboveRuns,
+    CHALLENGES: CHALLENGES, cleanChallenges: cleanChallenges, challengeStatus: challengeStatus, hrvImpact: hrvImpact,
+    hrrLabel: hrrLabel, computeHrr: computeHrr, cleanHrr: cleanHrr, hrrList: hrrList,
+    BP_DISCLAIMER: BP_DISCLAIMER, GLU_CTX: GLU_CTX, validateBp: validateBp, bpCategory: bpCategory, validateGlucose: validateGlucose, glucoseCategory: glucoseCategory, mgdlToMmol: mgdlToMmol,
+    cleanBp: cleanBp, cleanGlu: cleanGlu, mergeById: mergeById, hcRecords: hcRecords, hhPerms: hhPerms, entryTime: entryTime,
+    cleanMacros: cleanMacros, validateMacros: validateMacros, kcalFromMacros: kcalFromMacros, intakeFromMacros: intakeFromMacros, macroShare: macroShare,
+    lastFullWeekStart: lastFullWeekStart, weekReport: weekReport, weekRecommendation: weekRecommendation, explainDay: explainDay,
+    dowIdx: dowIdx, dowName: dowName, dayShort: dayShort, DOW_CAP: DOW_CAP, fmtInt: fmtInt, pl1: pl1
+  };
+  if (node) module.exports = api;
+  else root.E5Core = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
 <script>(function () {
 'use strict';
 /* ===== Forma 0.2 - base: state, storage, battery, Bluetooth, measurement engine, sessions, demo ===== */
@@ -3437,7 +4009,7 @@ function log(msg) {
   if (UI.onLog) UI.onLog();
 }
 function hex(dv) { var o = []; for (var i = 0; i < dv.byteLength; i++) o.push(('0' + dv.getUint8(i).toString(16)).slice(-2)); return o.join(' '); }
-function setConn(text, cls) { S.connText = text; S.connCls = cls || ''; if (UI.onConn) UI.onConn(); }
+function setConn(text, cls) { S.connText = text; S.connCls = cls || ''; if (cls === 'ok' && typeof e5NoteDevice === 'function') { try { e5NoteDevice(); } catch (e) { /* optional */ } } if (UI.onConn) UI.onConn(); }
 function showError(t) { S.error = t || ''; if (UI.onConn) UI.onConn(); }
 function download(name, text, mime) {
   var blob = new Blob([text], { type: mime });
@@ -3504,6 +4076,7 @@ function persist(which) { // which: 'days' | 'workouts' | 'profile' | 'weights'
 }
 function exportAll() {
   var payload = { app: 'forma', version: 2, exportedAt: new Date().toISOString(), days: S.days, workouts: S.workouts, profile: S.profile, weights: S.weights, tips: S.e4.tips };
+  if (typeof e5Export === 'function') payload.e5 = e5Export();
   download('forma-kopia-' + stamp() + '.json', JSON.stringify(payload, null, 1), 'application/json');
   return payload;
 }
@@ -3525,12 +4098,13 @@ function importAll(j) {
     var mk = FC.mergeById(S.weights, ki, 'date'); S.weights = mk.items.sort(function (a, b) { return a.date < b.date ? -1 : 1; }); res.weights = ki.length; res.replaced += mk.replaced; persist('weights');
   }
   if (j && j.tips && typeof j.tips === 'object' && !Array.isArray(j.tips) && typeof e4MergeTips === 'function') e4MergeTips(j.tips);
+  if (j && j.e5 && typeof e5Import === 'function') e5Import(j.e5);
   if (j && j.profile) { var p = FC.sanitizeProfile(j.profile); if (p) { S.profile = p; res.profile = true; persist('profile'); } }
   if (UI.onData) UI.onData();
   return res;
 }
 function wipeAll() {
-  S.days = []; S.workouts = []; S.profile = null; S.weights = []; if (typeof e4OnWipe === 'function') e4OnWipe(); S.pending = null; S.pendingWorkout = null; S.session = null; S.resume = null; S.editDay = null;
+  S.days = []; S.workouts = []; S.profile = null; S.weights = []; if (typeof e4OnWipe === 'function') e4OnWipe(); if (typeof e5OnWipe === 'function') e5OnWipe(); S.pending = null; S.pendingWorkout = null; S.session = null; S.resume = null; S.editDay = null;
   if (!DEMO) try { localStorage.removeItem(SKEY); localStorage.removeItem(SKEY + '.corrupt'); localStorage.removeItem(PKEY); Object.keys(KEYS).forEach(function (k) { localStorage.removeItem(KEYS[k]); localStorage.removeItem(KEYS[k] + '.corrupt'); }); localStorage.removeItem('forma.v1.nightsDone'); } catch (e) { /* ignore */ }
   if (typeof battOnWipe === 'function') battOnWipe();
   if (typeof whoopOnWipe === 'function') whoopOnWipe();
@@ -3734,6 +4308,7 @@ function finishSession() {
     kcal: kc ? kc.gross : null, kcalNet: kc ? kc.net : null, hrPeak: peak,
     hr5: hasHr && typeof hcSupported === 'function' && hcSupported() ? hr5Series(s.samples) : null // heart rate every 5 s, kept only until it has been written to Health Connect
   });
+  if (w && typeof e5OnSessionEnd === 'function') { try { e5OnSessionEnd(s, w); } catch (e) { /* optional */ } }
   S.pendingWorkout = w; S.session = null; clearSessionStore(); S.rpe = null; savePending();
   log('Koniec treningu ' + s.type + ': ' + (w ? w.durMin + ' min' + (w.trimp != null ? ', TRIMP ' + nf(w.trimp, 1) : '') + (w.kcalNet != null ? ', ok. ' + w.kcalNet + ' kcal ponad spoczynek' : '') + (w.hrPeak ? ', szczyt tętna ' + w.hrPeak : '') : 'za krótki'));
   return w;
@@ -5103,7 +5678,12 @@ function kcalDay(date) {
 function kcalCalibration() {
   var today = todayStr(), st = KC.weightStability(S.weights, today), est = {};
   if (st.ok && S.profile) for (var k = C.dayNum(st.from); k <= C.dayNum(st.to); k++) { var d = C.dateFromNum(k), e = kcalDay(d); if (e.ok && e.total > 0) est[d] = e.total; }
-  return KC.calibration(S.weights, S.profile && S.profile.intakeKcal, today, est);
+  // intake typed in Makro (>= 7 days inside the stable-weight window) replaces the single "typical intake" from Profil
+  var mi = st.ok && typeof E5 !== 'undefined' && S.e5 ? E5.intakeFromMacros(S.e5.macros, st.from, st.to, 7) : { ok: false };
+  var intake = mi.ok ? Math.round(mi.mean) : (S.profile && S.profile.intakeKcal);
+  var cal = KC.calibration(S.weights, intake, today, est);
+  cal.stab = st; if (mi.ok) { cal.intakeSrc = 'makro'; cal.intakeN = mi.n; cal.intake = intake; }
+  return cal;
 }
 function kcalWeek(endDate) {
   var out = []; for (var i = 6; i >= 0; i--) { var d = C.addDays(endDate, -i), e = kcalDay(d); out.push({ date: d, total: e.ok ? e.total : null }); }
@@ -5186,7 +5766,7 @@ function sleepDays() {
 function hcApplyStatus(st) {
   if (!st || typeof st !== 'object') return;
   if (st.status) S.hc.avail = st.status;
-  if (Array.isArray(st.granted)) S.hc.rep = HCC.permissionReport(st.granted);
+  if (Array.isArray(st.granted)) { S.hc.rep = HCC.permissionReport(st.granted); if (typeof e5NoteGranted === 'function') e5NoteGranted(st.granted); }
   else if (st.status && st.status !== 'available') S.hc.rep = null;
   if (S.hc.avail === 'available' && S.hc.err && S.hc.err.soft) S.hc.err = null;
   if (S.hc.autoPending && S.hc.avail && (S.hc.avail !== 'available' || S.hc.rep)) { S.hc.autoPending = false; hcMaybeSync(); }
@@ -5232,7 +5812,7 @@ function hcFillTrimp(list) {
 function hcApplyData(ev) {
   clearTimeout(S.hc.syncTimer); S.hc.syncing = false;
   if (!ev.ok) { if (ev.code === 'unavailable' || ev.code === 'update') { S.hc.avail = ev.code; S.hc.rep = null; } hcSetErr(ev.code === 'permission' ? 'permission' : (HC_ERR[ev.code] ? ev.code : 'sync'), ev.message); return; }
-  if (Array.isArray(ev.granted)) S.hc.rep = HCC.permissionReport(ev.granted);
+  if (Array.isArray(ev.granted)) { S.hc.rep = HCC.permissionReport(ev.granted); if (typeof e5NoteGranted === 'function') e5NoteGranted(ev.granted); }
   var res;
   try { res = HCC.applySync({ workouts: S.workouts, weights: S.weights, profile: S.profile, store: S.hc.store }, ev.data || {}, Date.now()); }
   catch (e) { hcSetErr('sync', 'Błąd przetwarzania: ' + (e && e.message)); return; }
@@ -5258,6 +5838,7 @@ function hcWriteNow() {
   if (S.hc.writing) { S.hc.writeAgain = true; return false; }
   var plan = HCC.planWrites(S.days, S.workouts, S.hc.store.written, { nowMs: Date.now(), today: todayStr(), nights: HCC.nightsOf(S.hc.store) });
   var recs = plan.records.filter(function (r) { return S.hc.rep.has(HC_WRITE_GROUP[r.kind], 'write'); });
+  if (typeof e5HcRecords === 'function') recs = recs.concat(e5HcRecords(S.hc.store.written));
   if (!recs.length) return false;
   S.hc.writing = true; S.hc.inflight = recs;
   log('Health Connect: zapis ' + recs.length + ' rekordów (' + recs.map(function (r) { return r.kind; }).filter(function (k, i, a) { return a.indexOf(k) === i; }).join(', ') + ').');
@@ -5329,6 +5910,236 @@ function hcInit() { hcLoadStore(); }
 function hcStart() { // after nativeInit: ask for the status; the permission list arrives as an event and then triggers the auto sync
   if (!hcSupported()) return;
   S.hc.autoPending = true; hcRefreshStatus();
+}
+
+/* ===== Forma Etap 5 - state and glue: goals, badges, challenges, devices, heart health (BP, glucose, HRR), macros, weekly report ===== */
+var E5 = window.E5Core;
+var E5_KINDS = { whoop: 'WHOOP', loop: 'Polar Loop', h10: 'Polar H10', other: 'Dowolny pas BT' };
+var E5_KIND_ORDER = ['whoop', 'loop', 'h10', 'other'];
+DRAFT_IDS.goalIn = 1; DRAFT_IDS.goalIn2 = 1; DRAFT_IDS.bpSys = 1; DRAFT_IDS.bpDia = 1; DRAFT_IDS.bpPulse = 1; DRAFT_IDS.bpTime = 1;
+DRAFT_IDS.gluVal = 1; DRAFT_IDS.gluTime = 1; DRAFT_IDS.mkKcal = 1; DRAFT_IDS.mkP = 1; DRAFT_IDS.mkC = 1; DRAFT_IDS.mkF = 1;
+KEYS.e5 = 'forma.v1.e5';
+
+function e5Clean(o) {
+  var d = { v: 1, goals: E5.defaultGoals(), goalsPrev: null, badges: {}, challenges: {}, bp: [], glu: [], macros: {}, hrr: {}, dev: { list: [], def: null }, ui: { sumTab: 'przeglad' } };
+  if (!o || typeof o !== 'object') return d;
+  d.goals = E5.cleanGoals(o.goals); d.goalsPrev = o.goalsPrev ? E5.cleanGoals(o.goalsPrev) : null;
+  d.badges = E5.cleanBadges(o.badges); d.challenges = E5.cleanChallenges(o.challenges);
+  d.bp = E5.cleanBp(o.bp); d.glu = E5.cleanGlu(o.glu); d.macros = E5.cleanMacros(o.macros); d.hrr = E5.cleanHrr(o.hrr);
+  if (o.dev && typeof o.dev === 'object') {
+    var seen = {};
+    (Array.isArray(o.dev.list) ? o.dev.list : []).forEach(function (x) {
+      if (!x || typeof x.id !== 'string' || !x.id || seen[x.id] || !E5_KINDS[x.kind]) return; seen[x.id] = 1;
+      d.dev.list.push({ id: x.id.slice(0, 80), kind: x.kind, name: String(x.name || '').slice(0, 60), seen: isFinite(+x.seen) ? +x.seen : 0 });
+    });
+    d.dev.list = d.dev.list.slice(-12);
+    if (E5_KINDS[o.dev.def]) d.dev.def = o.dev.def;
+  }
+  if (o.ui && typeof o.ui === 'object' && /^(przeglad|regeneracja|sen|wysilek)$/.test(o.ui.sumTab)) d.ui.sumTab = o.ui.sumTab;
+  return d;
+}
+S.e5 = e5Clean(null);
+S.sumDate = null; S.raportOff = 0; S.devSel = null; S.goalEdit = null; S.gluCtx = 'fasting'; S.macroDate = null; S.hrrPending = null; S.newBadges = [];
+function e5Save() { if (!S.storageBroken) persist('e5'); }
+function e5Init() { S.e5 = e5Clean(readKey(KEYS.e5)); if (DEMO) e5Demo(); e5Refresh(); }
+function e5OnWipe() { S.e5 = e5Clean(null); S.hrrPending = null; S.newBadges = []; if (DEMO) e5Demo(); }
+function e5SetUi(k, v) { S.e5.ui[k] = v; e5Save(); }
+
+// ---------- backup (JSON export / import) ----------
+function e5Export() { var e = S.e5; return { goals: e.goals, badges: e.badges, challenges: e.challenges, bp: e.bp, glu: e.glu, macros: e.macros, hrr: e.hrr }; }
+function e5Import(j) {
+  if (!j || typeof j !== 'object') return;
+  var c = e5Clean(j), e = S.e5;
+  if (j.goals) e.goals = c.goals;
+  e.badges = Object.assign({}, c.badges, e.badges); e.challenges = Object.assign({}, c.challenges, e.challenges);
+  e.bp = E5.mergeById(e.bp, c.bp); e.glu = E5.mergeById(e.glu, c.glu); e.macros = Object.assign({}, e.macros, c.macros); e.hrr = Object.assign({}, e.hrr, c.hrr);
+  e5Save();
+}
+
+// ---------- shared contexts ----------
+var e5CalMemo = { t: 0, v: null };
+function e5Cal() { var n = Date.now(); if (e5CalMemo.v && n - e5CalMemo.t < 3000) return e5CalMemo.v; e5CalMemo = { t: n, v: kcalCalibration() }; return e5CalMemo.v; }
+function e5KcalActive(date) { // active energy of a day = movement + training (not resting and sleep), with the calibration factor when there is one
+  try { var e = kcalDay(date); if (!e.ok) return null; var cal = e5Cal(), f = cal.ok ? cal.factor : 1; return Math.round((e.move + e.train) * f); } catch (x) { return null; }
+}
+function e5Ctx() { return { days: S.days, sleepDays: sleepDays(), workouts: S.workouts, stepsOn: function (d) { return SC.stepsOn(S.steps, d); }, kcalActiveOn: e5KcalActive, wake: plannedWake() }; }
+function e5Records() { return E5.recordFlags(S.workouts); }
+
+// ---------- badges + challenges: kept in sync with the data ----------
+function e5Badges() { return E5.evaluateBadges({ days: S.days, workouts: S.workouts }, todayStr(), S.e5.badges); }
+function e5Refresh() {
+  var today = todayStr(), changed = false;
+  try {
+    var r = E5.syncBadges(S.e5.badges, e5Badges(), today);
+    if (r.added.length) { S.e5.badges = r.saved; S.newBadges = r.added.slice(); changed = true; log('Nowe odznaki: ' + r.added.join(', ') + '.'); }
+    var ctx = { days: S.days, workouts: S.workouts };
+    Object.keys(S.e5.challenges).forEach(function (id) {
+      var st = S.e5.challenges[id], v = E5.challengeStatus(id, st, ctx, today);
+      if (v.state === 'done' && !st.doneOn) { st.doneOn = today; changed = true; }
+      if (v.state === 'failed' && !st.failedOn) { st.failedOn = v.failedOn; changed = true; }
+    });
+  } catch (e) { log('Odznaki: błąd ' + (e && e.message)); }
+  if (changed) e5Save();
+}
+function chStart(id) {
+  var def = E5.CHALLENGES[id]; if (!def) return;
+  S.e5.challenges[id] = { start: todayStr(), stopped: null, doneOn: null, failedOn: null }; e5Save();
+  markSaved('ch', 'Dołączono do wyzwania: ' + def.title + '. Start dziś.', 6000); log('Wyzwanie ' + id + ' rozpoczęte.'); buzz(30); UI.onData();
+}
+function chStop(id) {
+  var st = S.e5.challenges[id], def = E5.CHALLENGES[id]; if (!st || !def) return;
+  st.stopped = todayStr(); e5Save(); markSaved('ch', 'Zatrzymano wyzwanie: ' + def.title + '. Możesz je wznowić.', 6000); UI.onData();
+}
+function chResume(id) { // Cofnij: undoes the stop
+  var st = S.e5.challenges[id], def = E5.CHALLENGES[id]; if (!st || !def) return;
+  st.stopped = null; e5Save(); markSaved('ch', 'Wznowiono wyzwanie: ' + def.title + '.', 6000); UI.onData();
+}
+function chRemove(id) {
+  var def = E5.CHALLENGES[id]; if (!S.e5.challenges[id] || !def) return;
+  delete S.e5.challenges[id]; e5Save(); markSaved('ch', 'Usunięto wyzwanie: ' + def.title + '.', 6000); UI.onData();
+}
+
+// ---------- goals ----------
+function e5GoalSet(patch, msg) {
+  var g = Object.assign({}, S.e5.goals, patch); S.e5.goals = E5.cleanGoals(g); S.e5.goalsPrev = null; e5Save();
+  S.goalEdit = null; markSaved('goal', msg, 6000); buzz(30); UI.onData();
+}
+function e5GoalsApply(items) {
+  var prev = Object.assign({}, S.e5.goals), patch = {}; items.forEach(function (x) { patch[x.key] = x.suggested; });
+  S.e5.goals = E5.cleanGoals(Object.assign({}, prev, patch)); S.e5.goalsPrev = prev; e5Save();
+  markSaved('goal', 'Zastosowano podpowiedzi (' + items.length + '). Możesz je cofnąć.', 7000); buzz(30); UI.onData();
+}
+function e5GoalsUndo() {
+  if (!S.e5.goalsPrev) return; S.e5.goals = E5.cleanGoals(S.e5.goalsPrev); S.e5.goalsPrev = null; e5Save();
+  markSaved('goal', 'Przywrócono poprzednie cele.', 6000); UI.onData();
+}
+
+// ---------- devices ----------
+function e5KindOf(name) {
+  var n = String(name || '');
+  if (/whoop/i.test(n)) return 'whoop';
+  if (/polar/i.test(n) && /loop/i.test(n)) return 'loop';
+  if (/h10/i.test(n)) return 'h10';
+  return 'other';
+}
+// remembers every device Forma has been connected to (name + id); called when a connection is established
+function e5NoteDevice() {
+  if (!S.connected || DEMO) return;
+  var name = S.name || '', id = (S.band && S.band.id) || (S.device && S.device.id) || ''; if (!name && !id) return;
+  var key = id || ('name:' + name), kind = e5KindOf(name), list = S.e5.dev.list, ex = null;
+  list.forEach(function (x) { if (x.id === key) ex = x; });
+  if (ex) { if (ex.name !== name && name) { ex.name = name.slice(0, 60); ex.kind = kind; e5Save(); } if (Date.now() - ex.seen > 3600000) { ex.seen = Date.now(); e5Save(); } return; }
+  list.push({ id: key.slice(0, 80), kind: kind, name: name.slice(0, 60), seen: Date.now() }); if (list.length > 12) list.shift();
+  e5Save();
+}
+function e5ActiveKind() { return S.connected ? e5KindOf(S.name) : null; }
+// the four slots: a slot is "real" only for a device Forma really knows (remembered, connected, or WHOOP cloud account)
+function e5Devices() {
+  var out = {}, list = S.e5.dev.list.slice();
+  var bandName = (S.band && S.band.name) || (S.lastDeviceName || '');
+  if (S.band && S.band.id && !list.some(function (x) { return x.id === S.band.id; })) list.push({ id: S.band.id, kind: e5KindOf(bandName), name: bandName, seen: 0 });
+  if (S.connected && S.name && !list.some(function (x) { return x.name === S.name; })) list.push({ id: (S.band && S.band.id) || ('name:' + S.name), kind: e5KindOf(S.name), name: S.name, seen: Date.now() });
+  E5_KIND_ORDER.forEach(function (k) {
+    var rec = list.filter(function (x) { return x.kind === k; }).sort(function (a, b) { return b.seen - a.seen; })[0] || null;
+    var cloud = k === 'whoop' && !!(S.wh && S.wh.cfg && S.wh.cfg.connected);
+    var conn = !!(S.connected && e5KindOf(S.name) === k);
+    out[k] = { kind: k, label: E5_KINDS[k], rec: rec, cloud: cloud, real: !!(rec || cloud || conn), connected: conn, name: conn ? S.name : (rec && rec.name) || '', isDefault: S.e5.dev.def === k };
+  });
+  return out;
+}
+function e5DefaultKind() { // explicit choice, else the connected device, else the remembered band
+  var ds = e5Devices(); if (S.e5.dev.def && ds[S.e5.dev.def].real) return S.e5.dev.def;
+  var c = e5ActiveKind(); if (c) return c;
+  if (S.band) { var k = e5KindOf(S.band.name); if (ds[k].real) return k; }
+  for (var i = 0; i < E5_KIND_ORDER.length; i++) if (ds[E5_KIND_ORDER[i]].real) return E5_KIND_ORDER[i];
+  return null;
+}
+function e5SetDefault(kind) {
+  var ds = e5Devices(), d = ds[kind]; if (!d || !d.real) return;
+  S.e5.dev.def = kind; e5Save();
+  if (d.rec && d.rec.id && d.rec.id.indexOf('name:') !== 0) { // the remembered band (auto-connect target) follows the default
+    S.band = BL.sanitizeBand({ id: d.rec.id, name: d.rec.name, at: Date.now() });
+    if (S.band && !DEMO) { if (NATIVE) { if (natHas('setPreferredBand')) nat('setPreferredBand', d.rec.id, d.rec.name || ''); } else { try { localStorage.setItem(BAND_KEY, JSON.stringify(S.band)); } catch (e) { /* optional */ } } }
+  }
+  markSaved('dev', 'Ustawiono jako domyślne: ' + (d.name || d.label) + '.', 6000); buzz(30); UI.onData();
+}
+function e5ForgetDevice(kind) {
+  var ds = e5Devices(), d = ds[kind]; if (!d || !d.real) return;
+  var nm = d.name || d.label, id = d.rec && d.rec.id;
+  if (d.connected) { try { disconnect(); } catch (e) { /* ignore */ } }
+  S.e5.dev.list = S.e5.dev.list.filter(function (x) { return x.kind !== kind; });
+  if (S.e5.dev.def === kind) S.e5.dev.def = null;
+  if (S.band && (S.band.id === id || e5KindOf(S.band.name) === kind)) {
+    S.band = null; S.device = null; S.lastDeviceName = '';
+    if (!DEMO) { if (NATIVE) { if (natHas('forgetBand')) nat('forgetBand'); } else { try { localStorage.removeItem(BAND_KEY); } catch (e) { /* ignore */ } } }
+  }
+  e5Save(); S.devSel = null; log('Zapomniano urządzenie: ' + nm + '.');
+  markSaved('dev', 'Zapomniano urządzenie: ' + nm + '. Możesz je dodać ponownie.', 7000); UI.onData();
+}
+
+// ---------- heart health: HRR capture, blood pressure, glucose ----------
+// At the end of a workout the end HR is noted; a minute later the HR log (which keeps running while the band is connected) gives the HRR1.
+function e5OnSessionEnd(sess, w) {
+  if (!sess || !w || w.type === 'sauna' || !S.connected) return;
+  S.hrrPending = { id: w.id, date: w.date, endT: Date.now(), samples: (sess.samples || []).slice(-30) };
+}
+function e5Tick() {
+  var p = S.hrrPending; if (!p || Date.now() < p.endT + 75000) return;
+  S.hrrPending = null;
+  var r = E5.computeHrr(p.samples, S.hrLog, p.endT);
+  if (r.ok) { S.e5.hrr[p.id] = { date: p.date, end: r.end, at60: r.at60, drop: r.drop }; e5Save(); log('Powrót tętna po wysiłku: −' + r.drop + ' ud/min w 1 min (' + r.end + ' → ' + r.at60 + ').'); if (UI.onData) UI.onData(); }
+  else log('Powrót tętna: pominięty (' + r.reason + ').');
+}
+setInterval(e5Tick, 1000);
+function e5Now() { var d = new Date(); return { date: C.localDateStr(d), time: C.localTimeStr(d), t: d.getTime() }; }
+function bpAdd(raw) {
+  var v = E5.validateBp(raw); if (!v.ok) return v;
+  var n = e5Now(), tm = /^\d{2}:\d{2}$/.test(raw.time || '') ? raw.time : n.time, t = E5.entryTime(n.date, tm);
+  var e = { id: 'b' + t, t: t, date: n.date, time: tm, sys: v.sys, dia: v.dia, pulse: v.pulse };
+  S.e5.bp = E5.mergeById(S.e5.bp, [e]); e5Save(); if (typeof hcAfterSave === 'function') hcAfterSave();
+  return { ok: true, entry: e };
+}
+function gluAdd(raw) {
+  var v = E5.validateGlucose(raw); if (!v.ok) return v;
+  var n = e5Now(), tm = /^\d{2}:\d{2}$/.test(raw.time || '') ? raw.time : n.time, t = E5.entryTime(n.date, tm);
+  var e = { id: 'g' + t, t: t, date: n.date, time: tm, mgdl: v.mgdl, ctx: v.ctx };
+  S.e5.glu = E5.mergeById(S.e5.glu, [e]); e5Save(); if (typeof hcAfterSave === 'function') hcAfterSave();
+  return { ok: true, entry: e };
+}
+function e5HcPerms() { return S.hc && S.hc.hhp ? S.hc.hhp : { bp: false, glucose: false }; }
+function e5HcRecords(ledger) { return E5.hcRecords(S.e5.bp, S.e5.glu, ledger, e5HcPerms(), Date.now()); }
+function e5NoteGranted(granted) { S.hc.hhp = E5.hhPerms(granted); }
+// 'web' | 'off' (no Health Connect permission at all) | 'need' (connected, BP / glucose write permission missing) | 'on'
+function e5HcState() {
+  if (!hcSupported()) return 'web';
+  if (!hcConnected() && !hcCanWrite()) return 'off';
+  var p = e5HcPerms(); return p.bp && p.glucose ? 'on' : 'need';
+}
+
+// ---------- macros ----------
+function macroSet(date, vals) { S.e5.macros[date] = { kcal: vals.kcal, p: vals.p, c: vals.c, f: vals.f, derived: !!vals.derived }; e5CalMemo = { t: 0, v: null }; e5Save(); if (UI.onData) UI.onData(); }
+function macroDel(date) { delete S.e5.macros[date]; e5CalMemo = { t: 0, v: null }; e5Save(); if (UI.onData) UI.onData(); }
+
+// ---------- weekly report ----------
+function e5ReportStart() { return C.addDays(E5.lastFullWeekStart(todayStr()), 7 * (S.raportOff || 0)); } // raportOff: 0 = last full week, 1 = this week so far, -n = earlier
+function e5Report(start) { return E5.weekReport(e5Ctx(), start || e5ReportStart(), S.e5.goals); }
+function e5PrintReport() {
+  if (NATIVE && natHas('printPage')) { var r = nat('printPage'); if (r && r.ok === false) { markSaved('print', 'Nie udało się otworzyć drukowania: ' + (r.error || 'błąd'), 7000); return; } markSaved('print', 'Otwieram okno drukowania. Wybierz „Zapisz jako PDF”.', 7000); return; }
+  markSaved('print', 'Otwieram okno drukowania. Wybierz „Zapisz jako PDF”.', 7000);
+  setTimeout(function () { try { window.print(); } catch (e) { markSaved('print', 'Ta przeglądarka nie pozwala drukować z aplikacji. Użyj menu przeglądarki → Drukuj.', 7000); } }, 120);
+}
+
+// ---------- demo (synthetic, memory only) ----------
+function e5Demo() {
+  var t = todayStr(), ts = function (n, hm) { var d = C.addDays(t, -n); return { date: d, time: hm, t: E5.entryTime(d, hm) }; };
+  S.e5.bp = E5.cleanBp([[9, '08:10', 124, 82, 61], [6, '07:55', 121, 80, 58], [4, '08:20', 118, 78, 60], [2, '08:05', 120, 81, 59], [1, '08:10', 120, 85, 64]].map(function (x) { var q = ts(x[0], x[1]); return { id: 'dbp' + x[0], t: q.t, date: q.date, time: q.time, sys: x[2], dia: x[3], pulse: x[4] }; }));
+  S.e5.glu = E5.cleanGlu([[8, '07:30', 94, 'fasting'], [5, '14:10', 128, 'after'], [3, '07:40', 98, 'fasting'], [1, '07:40', 97, 'fasting']].map(function (x) { var q = ts(x[0], x[1]); return { id: 'dg' + x[0], t: q.t, date: q.date, time: q.time, mgdl: x[2], ctx: x[3] }; }));
+  var mk = {}; [[1, 2250, 140, 230, 70], [2, 2480, 155, 260, 80], [3, 2310, 150, 240, 72], [4, 2400, 160, 250, 76], [5, 2180, 130, 225, 70], [6, 2520, 165, 270, 82], [7, 2350, 148, 242, 74], [8, 2290, 142, 236, 71]].forEach(function (x) { mk[C.addDays(t, -x[0])] = { kcal: x[1], p: x[2], c: x[3], f: x[4] }; });
+  S.e5.macros = E5.cleanMacros(mk);
+  var h = {}; S.workouts.filter(function (w) { return w.type === 'run' || w.type === 'gym'; }).slice(-5).forEach(function (w, i) { var end = w.type === 'run' ? 152 + i : 126 + i, drop = [24, 21, 26, 19, 22][i]; h[w.id] = { date: w.date, end: end, at60: end - drop, drop: drop }; });
+  S.e5.hrr = E5.cleanHrr(h);
+  S.e5.challenges = E5.cleanChallenges({ km300: { start: C.addDays(t, -12), stopped: null } });
+  S.hc.hhp = { bp: false, glucose: false };
 }
 
 /* ===== Forma 0.2 - UI part A: helpers, charts, shell/router, Dziś, Pomiar, Poranek ===== */
@@ -5869,6 +6680,7 @@ function rDzis() {
       '<div class="chips" role="radiogroup" aria-label="Płeć"><button class="chip" data-act="obSex" data-v="m" role="radio" aria-checked="false">Mężczyzna</button><button class="chip" data-act="obSex" data-v="k" role="radio" aria-checked="false">Kobieta</button></div>' +
       '<p class="err" id="obErr" hidden></p><button class="btn pri full" data-act="obSave">Zapisz</button></div>';
   } else h += savedSlot('onboarding', 'note ok');
+  h += e5DzisCardHtml(i++);
   var nightTop = NATIVE && (S.night.crunching || (S.night.st && S.night.st.running) || nightHasResult());
   if (nightTop) h += nightBlock();
   if (!st.hasRecord) {
@@ -6044,7 +6856,7 @@ UI.onMeasureDone = function () { S.form = null; var top = stack[stack.length - 1
 UI.onMeasureCancel = function () { var top = stack[stack.length - 1]; if (top && top.path === 'pomiar') { paint(top.el, 'pomiar'); top.el.classList.add('noanim'); } };
 UI.onMeasureTick = function () { };
 UI.onBattery = function () { renderBattery(); var top = stack[stack.length - 1]; if (top && top.path === 'pomiar' && !S.measure) rerender(); };
-UI.onConn = function () { var top = stack[stack.length - 1]; if (top && /^(dzis|pomiar|profil|diagnostyka|bateria)$/.test(top.path)) rerender(); };
+UI.onConn = function () { var top = stack[stack.length - 1]; if (top && /^(dzis|pomiar|profil|diagnostyka|bateria|urzadzenia)$/.test(top.path)) rerender(); };
 UI.onData = function () { rerender(); };
 UI.onWhoop = function () { var top = stack[stack.length - 1]; if (top && top.path === 'profil') rerender(); };
 
@@ -6432,7 +7244,7 @@ function kcalCalibHtml(day, cal, factor) {
   var raw = day.total, h = '<div class="card fu" data-e4="kcal-calib"><p class="row lbl" style="gap:10px;color:#E9EEF2"><span style="color:#2CE8B5">' + ico('bars', 20) + '</span>Kalibracja</p>' +
     '<div class="g2" style="gap:8px"><div class="stat"><div class="k">wg wzorów</div><div class="v n" data-e4="kcal-raw">' + nfi(raw) + '<span class="xs sub"> kcal</span></div></div>' +
     '<div class="stat"><div class="k">skalibrowane</div><div class="v n" data-e4="kcal-cal">' + (cal.ok ? nfi(raw * factor) + '<span class="xs sub"> kcal</span>' : '<span class="mut" style="font-size:18px">jeszcze nie</span>') + '</div></div></div>';
-  if (cal.ok) h += '<p class="sm sub" style="margin:0">Współczynnik <b style="color:#fff">×' + nf(cal.factor, 2) + '</b>: typowe spożycie ' + nfi(cal.intake) + ' kcal ÷ średni wyliczony wydatek ' + nfi(cal.meanEst) + ' kcal w okresie stabilnej wagi (' + ddmm(cal.stab.from) + '–' + ddmm(cal.stab.to) + ', ' + cal.stab.n + ' ważeń, ' + sgn(cal.stab.slope, 2, 'kg/tydz.') + ').' + (cal.clamped ? ' Wynik ograniczono do zakresu 0,7–1,2.' : '') + '</p>';
+  if (cal.ok) h += '<p class="sm sub" style="margin:0">Współczynnik <b style="color:#fff">×' + nf(cal.factor, 2) + '</b>: ' + (cal.intakeSrc === 'makro' ? 'średnie spożycie z Makro (' + cal.intakeN + ' dni)' : 'typowe spożycie') + ' ' + nfi(cal.intake) + ' kcal ÷ średni wyliczony wydatek ' + nfi(cal.meanEst) + ' kcal w okresie stabilnej wagi (' + ddmm(cal.stab.from) + '–' + ddmm(cal.stab.to) + ', ' + cal.stab.n + ' ważeń, ' + sgn(cal.stab.slope, 2, 'kg/tydz.') + ').' + (cal.clamped ? ' Wynik ograniczono do zakresu 0,7–1,2.' : '') + '</p>';
   else h += '<div class="col" style="gap:6px" data-e4="kcal-why"><p class="sm sub" style="margin:0">Kalibracja jeszcze niedostępna:</p>' + cal.reasons.map(function (r) { return '<p class="sm" style="margin:0;color:#FFE2B8">• ' + esc(r) + '</p>'; }).join('') + '<p class="xs mut" style="margin:0">Gdy waga jest stabilna co najmniej 21 dni (min. 5 ważeń, zmiana do ±0,25 kg/tydz.), porównamy Twoje typowe spożycie z wyliczonym wydatkiem.</p></div>';
   return h + '</div>';
 }
@@ -6661,7 +7473,523 @@ ACT_HC.hcSyncNow = function () { hcSync(true); };
 ACT_HC.hcManage = function () { hcOpenSettings(); };
 ACT_HC.hcHeightYes = function () { hcHeightAnswer(true); };
 ACT_HC.hcHeightNo = function () { hcHeightAnswer(false); };
-UI.onHc = function () { var top = stack[stack.length - 1]; if (top && /^(profil|dzis|kalorie|regeneracja|sen|trendy)$/.test(top.path)) rerender(); };
+UI.onHc = function () { var top = stack[stack.length - 1]; if (top && /^(profil|dzis|kalorie|regeneracja|sen|trendy|serce|urzadzenia)$/.test(top.path)) rerender(); };
+
+/* ===== Forma Etap 5 - UI: #/podsumowanie, #/cele, #/odznaki, #/urzadzenia, #/serce, #/raport, #/makro, Dziś card, Profil links ===== */
+var ACT_E5 = {};
+var WD1S = ['N', 'P', 'W', 'Ś', 'C', 'P', 'S']; // Sunday first (matches E5.dowIdx)
+ICONS.calendar = '<rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/>';
+ICONS.award = '<circle cx="12" cy="9" r="5.5"/><path d="M8.5 13.5L7 21l5-3 5 3-1.5-7.5"/>';
+ICONS.target = '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor"/>';
+ICONS.watch = '<rect x="6.5" y="6.5" width="11" height="11" rx="3.5"/><path d="M9 6.5l.7-3.5h4.6l.7 3.5M9 17.5l.7 3.5h4.6l.7-3.5"/>';
+ICONS.drop = '<path d="M12 3c3.5 4.5 6 7.5 6 11a6 6 0 0 1-12 0c0-3.5 2.5-6.5 6-11z"/>';
+ICONS.report = '<path d="M6 3.5h8l4 4V20.5H6z"/><path d="M14 3.5v4h4M9 12h6M9 15.5h6"/>';
+ICONS.fork = '<path d="M7 3v7a2 2 0 0 0 2 2v9M11 3v7a2 2 0 0 1-2 2M17 3c-2 2-3 5-3 8h3v10"/>';
+ICONS.print = '<path d="M7 9V3.5h10V9M7 17H4.5v-7h15v7H17M7 14h10v6.5H7z"/>';
+ICONS.sleep2 = ICONS.moon;
+function rowIco(name, color, size) { return '<span style="color:' + (color || '#2CE8B5') + ';flex:none;display:inline-flex">' + ico(name, size || 20) + '</span>'; }
+function e5Title(icon, color, text) { return '<p class="row lbl" style="gap:10px;color:#E9EEF2"><span style="color:' + color + '">' + ico(icon, 20) + '</span>' + text + '</p>'; }
+function e5Bar(frac, color, label) { return '<div class="bar" role="img" aria-label="' + esc(label) + '"><i class="gx" style="width:' + Math.round(clamp(frac, 0, 1) * 100) + '%;background:' + color + '"></i></div>'; }
+function e5Tabs(items, active, act, label) {
+  return '<div class="segtabs" role="tablist" aria-label="' + esc(label) + '">' + items.map(function (x) { var on = x[0] === active; return '<button role="tab" data-act="' + act + '" data-v="' + x[0] + '" aria-selected="' + on + '" class="' + (on ? 'on' : '') + '">' + esc(x[1]) + '</button>'; }).join('') + '</div>';
+}
+function e5Empty(title, text, action, kind) { return emptyCard(title, text, action, kind || 'chart'); }
+function e5Note(key) { return savedSlot(key, 'note ok'); }
+function dayWord(date) { var t = todayStr(); return date === t ? 'Dziś' : (date === C.addDays(t, -1) ? 'Wczoraj' : E5.DOW_CAP[E5.dowIdx(date)].slice(0, 3) + '.'); }
+function dayFull(date) { return E5.dayShort(date); }
+function wkRange(start) { var a = start.split('-'), b = C.addDays(start, 6).split('-'); return a[1] === b[1] ? +a[2] + '–' + +b[2] + ' ' + MON[+a[1] - 1].slice(0, 3) : +a[2] + ' ' + MON[+a[1] - 1].slice(0, 3) + ' – ' + +b[2] + ' ' + MON[+b[1] - 1].slice(0, 3); }
+function fmtDay(v, d) { return isFinite(v) ? nf(v, d == null ? 0 : d) : '—'; }
+
+// ---------- own badge icons (simple SVG, no outside branding) ----------
+var TONES = { amber: ['#FFD166', '#F2A93B', '#3B2412'], silver: ['#EEF2F6', '#8E9AA5', '#2A333A'], gold: ['#FFE08A', '#F2B53B', '#3B2412'], copper: ['#FFA877', '#D9663A', '#3A1B10'] };
+var BADGE_SHAPE = { hex: 'M32 3.5L57.5 18v28L32 60.5 6.5 46V18z', shield: 'M32 3.5l24 8.5v20c0 14-10 24-24 28.5C18 56 8 46 8 32V12z', circle: 'M32 5a27 27 0 1 1 0 54 27 27 0 0 1 0-54z' };
+function badgeSvg(b, size, locked) {
+  var tn = TONES[b.tone] || TONES.silver, id = nid('bd'), on = !locked;
+  var defs = '<defs><linearGradient id="' + id + '" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="' + tn[0] + '"/><stop offset="1" stop-color="' + tn[1] + '"/></linearGradient></defs>';
+  var shape = '<path d="' + BADGE_SHAPE[b.shape] + '" ' + (on ? 'fill="url(#' + id + ')" stroke="rgba(255,255,255,.55)" stroke-width="1.5"' : 'fill="rgba(255,255,255,.05)" stroke="#3E4952" stroke-width="2" stroke-dasharray="3 4"') + ' stroke-linejoin="round"/>';
+  var shine = on ? '<path d="' + BADGE_SHAPE[b.shape] + '" fill="none" stroke="rgba(0,0,0,.18)" stroke-width="1" transform="translate(32 32) scale(.84) translate(-32 -32)"/>' : '';
+  var glyph = '<g transform="translate(19.5 19.5) scale(1.0833)" fill="none" stroke="' + (on ? tn[2] : '#566067') + '" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">' + ICONS[b.icon] + '</g>';
+  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 64 64" aria-hidden="true" style="flex:none;' + (on ? 'filter:drop-shadow(0 4px 10px rgba(' + (b.tone === 'copper' ? '217,102,58' : '242,169,59') + ',.28))' : '') + '">' + defs + shape + shine + glyph + '</svg>';
+}
+
+// ====================== DZIŚ w skrócie ======================
+function miniRing(frac, color, valHtml, label, aria) {
+  return '<div class="col" style="align-items:center;gap:4px;min-width:0">' + ringHtml(64, 7, frac, color, '<span class="n" style="font-size:16px;line-height:1">' + valHtml + '</span>') + '<span class="xs mut" style="text-align:center;line-height:1.2" aria-label="' + esc(aria) + '">' + esc(label) + '</span></div>';
+}
+function e5DzisCardHtml(i) {
+  var p = E5.dayProgress(todayStr(), e5Ctx(), S.e5.goals), st = p.steps, kc = p.kcal, sn = p.strain;
+  return '<a href="#/podsumowanie" class="card fu" ' + dl(i) + ' data-e5="dzis-card" aria-label="Dziś w skrócie: kroki ' + (st.has ? nfi(st.v) : 'brak danych') + ', kalorie aktywne ' + (kc.has ? nfi(kc.v) : 'brak danych') + ', wysiłek ' + (sn.has ? nf(sn.v, 1) : 'brak danych') + '">' +
+    '<div class="row sp"><p class="lbl" style="margin:0">Dziś w skrócie</p>' + ico('chev', 18) + '</div>' +
+    '<div class="g3" style="align-items:start">' + miniRing(st.frac, '#2D9CFF', st.has ? nfi(st.v / 1000 >= 10 ? Math.round(st.v / 100) / 10 * 1000 : st.v).replace(/\s/g, '') : '—', 'kroki', 'Kroki') +
+    miniRing(kc.frac, '#F2A93B', kc.has ? nfi(kc.v) : '—', 'kcal aktywne', 'Kalorie aktywne') + miniRing(sn.frac, '#2CE8B5', sn.has ? nf(sn.v, 1) : '—', 'wysiłek', 'Wysiłek') + '</div></a>';
+}
+
+// ====================== PODSUMOWANIE ======================
+function sumDate() { var t = todayStr(), d = S.sumDate; return d && C.dayNum(d) <= C.dayNum(t) && C.dayNum(d) >= C.dayNum(t) - 120 ? d : t; }
+function tripleRings(p, targetBand) {
+  var s = p.steps.frac, k = p.kcal.frac, w = p.strain.frac, c = 150;
+  function lay(sz, html) { var o = (c - sz) / 2; return '<div style="position:absolute;left:' + o + 'px;top:' + o + 'px">' + html + '</div>'; }
+  return '<div style="position:relative;width:' + c + 'px;height:' + c + 'px;flex:none" role="img" aria-label="Pierścienie dnia: kroki ' + Math.round(s * 100) + '%, kalorie aktywne ' + Math.round(k * 100) + '%, wysiłek ' + Math.round(w * 100) + '% celu">' +
+    lay(150, ringHtml(150, 12, s, '#2D9CFF', '')) + lay(110, ringHtml(110, 12, k, '#F2A93B', '')) + lay(70, ringHtml(70, 12, w, '#2CE8B5', '')) + '</div>';
+}
+function sumStat(icon, color, big, unit, goal, has) {
+  return '<div class="row" style="gap:10px;min-width:0"><span style="width:36px;height:36px;border-radius:18px;background:rgba(255,255,255,.06);color:' + color + ';display:flex;align-items:center;justify-content:center;flex:none">' + ico(icon, 18) + '</span>' +
+    '<div style="min-width:0"><div style="white-space:nowrap"><span class="n" style="font-size:' + (has ? 24 : 20) + 'px;line-height:1.1">' + big + '</span> <span class="xs sub">' + unit + '</span></div><div class="xs mut">' + goal + '</div></div></div>';
+}
+function actRow(w, rec) {
+  var nm = WK_NAME[w.type] || 'Trening', r = rec[w.id], saunaW = w.type === 'sauna';
+  var meta = nf(w.durMin, 0) + ' min' + (w.hrAvg ? ' · ' + Math.round(w.hrAvg) + ' ud/min' : '');
+  var right = saunaW ? '' : (w.type === 'gym' ? (E5.setsCount(w) ? '<span class="n" style="font-size:22px;line-height:1">' + E5.setsCount(w) + '</span><span class="xs sub"> serii</span>' : '') : (w.distanceKm ? '<span class="n" style="font-size:22px;line-height:1">' + nf(w.distanceKm, 1) + '</span><span class="xs sub"> km</span>' : ''));
+  return '<a href="#/trening" class="row" style="min-height:64px;gap:12px;padding:10px 12px;border-radius:16px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.06);color:inherit" data-e5="act-row"><span style="color:' + (w.type === 'gym' ? '#2D9CFF' : (w.type === 'sauna' ? '#F2A93B' : '#2EE86B')) + ';flex:none">' + ico(w.type, 24) + '</span>' +
+    '<span class="grow col" style="gap:0;min-width:0"><span class="n" style="font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(nm) + '</span><span class="xs mut">' + esc(meta) + '</span></span>' +
+    '<span class="col" style="align-items:flex-end;gap:3px;flex:none">' + right + (r ? '<span class="rec-badge" data-e5="record" title="' + esc(r.text) + '">Rekord</span>' : '') + '</span></a>';
+}
+function sumOverview(date, p) {
+  var h = '', today = todayStr(), isToday = date === today, none = !p.steps.has && !p.kcal.has && !p.strain.has;
+  h += '<div class="card fu" data-e5="rings"><div class="row" style="gap:14px;flex-wrap:wrap;justify-content:center">' + tripleRings(p) +
+    '<div class="col grow" style="gap:12px;min-width:150px">' +
+    sumStat('steps', '#2D9CFF', p.steps.has ? nfi(p.steps.v) : '—', 'kroków', 'cel ' + nfi(S.e5.goals.steps), p.steps.has) +
+    sumStat('sauna', '#F2A93B', p.kcal.has ? nfi(p.kcal.v) : '—', 'kcal', 'aktywne · cel ' + nfi(S.e5.goals.kcalActive), p.kcal.has) +
+    sumStat('pulse', '#2CE8B5', p.strain.has ? nf(p.strain.v, 1) : '—', 'wysiłek', 'cel ' + nf(S.e5.goals.strain, 0), p.strain.has) + '</div></div>';
+  if (!p.steps.has) h += '<p class="xs mut" style="margin:0" data-e5="steps-note">' + (NATIVE || DEMO ? 'Brak kroków z tego dnia. Włącz zliczanie kroków w Profilu.' : 'Kroki są dostępne w aplikacji na Androida. Pozostałe pierścienie liczą się z treningów i profilu.') + '</p>';
+  if (none) h += '<p class="sm sub" style="margin:0" data-e5="rings-empty">Pierścienie wypełnią się, gdy pojawią się dane: kroki z telefonu, kalorie z profilu (wiek, waga, wzrost) i treningi.</p>';
+  h += '</div>';
+  // weekly report
+  var rs = E5.lastFullWeekStart(todayStr()), rep = E5.weekReport(e5Ctx(), rs, S.e5.goals);
+  h += '<a href="#/raport" class="card fu" data-e5="report-card"><div class="row" style="gap:10px"><span style="color:#E07BF0">' + ico('report', 20) + '</span><p class="lbl" style="margin:0">Raport tygodnia</p></div>' +
+    (rep.ready ? '<p class="sub sm" style="margin:0">Raport za ' + wkRange(rs) + ' jest gotowy: sen, regeneracja, najlepszy i najgorszy dzień oraz jedna rekomendacja.</p><span class="row" style="color:#2CE8B5;font-weight:600;gap:4px;min-height:44px">Otwórz raport ' + ico('chev', 16) + '</span>' :
+      '<p class="mut sm" style="margin:0">Raport za ' + wkRange(rs) + ' pojawi się, gdy będzie w nim co najmniej 3 dni z pomiarem. Teraz: ' + rep.cur.nRec + ' z 7.</p><span class="row" style="color:#2CE8B5;font-weight:600;gap:4px;min-height:44px">Zobacz, co już jest ' + ico('chev', 16) + '</span>') + '</a>';
+  // activities
+  var list = S.workouts.filter(function (w) { return w.date === date; }).sort(function (a, b) { return a.start - b.start; }), rec = e5Records();
+  h += '<div class="card fu" data-e5="activities"><p class="lbl">Aktywności ' + (isToday ? 'dziś' : dayFull(date)) + '</p>' +
+    (list.length ? '<div class="col" style="gap:8px">' + list.map(function (w) { return actRow(w, rec); }).join('') + '</div>' : '<p class="mut sm" style="margin:0">Brak aktywności ' + (isToday ? 'dzisiaj' : 'tego dnia') + '. ' + (isToday ? 'Dodaj trening w zakładce Trening – pojawi się tutaj.' : '') + '</p>' + (isToday ? '<a class="btn sm" href="#/trening" style="align-self:flex-start">Dodaj trening</a>' : '')) + '</div>';
+  return h;
+}
+function sumRegen(date) {
+  var st = C.dayStatus(S.days, date), isToday = date === todayStr();
+  if (!st.hasRecord) return '<div class="card fu" data-e5="tab-empty"><p class="lbl">Regeneracja</p><p class="mut sm" style="margin:0">Brak pomiaru z tego dnia. ' + (isToday ? 'Wykonaj poranny pomiar albo noc z opaską, a pokażemy tu wynik.' : '') + '</p></div>';
+  var col = st.scored ? COL[st.color] : '#9AA6B0', rec = st.rec, h = '<div class="card fu"><p class="lbl">Regeneracja</p><div class="row" style="gap:16px">' + ringHtml(104, 10, st.scored ? st.readiness / 100 : 0, col, '<span class="n" style="font-size:34px">' + (st.scored ? st.readiness + '<span class="sm sub">%</span>' : '—') + '</span>') +
+    '<div class="grow col" style="gap:4px"><span class="n" style="font-size:20px;line-height:1.15">' + esc(dzisStatusLine(st).text) + '</span><span class="xs mut">' + esc(st.scored ? ZONE_TXT[st.color] : (st.label || '')) + '</span></div></div>' +
+    '<div class="g2" style="gap:8px"><div class="stat"><div class="k">HRV</div><div class="v n">' + fmtDay(rec.rmssd, 0) + '<span class="xs sub"> ms</span></div>' + (st.scored ? '<div class="xs mut">zwykle ' + fmtDay(st.usual.rmssd, 0) + ' ms</div>' : '') + '</div>' +
+    '<div class="stat"><div class="k">Tętno spoczynkowe</div><div class="v n">' + fmtDay(rec.hr, 0) + '<span class="xs sub"> ud/min</span></div>' + (st.scored && isFinite(st.usual.hr) ? '<div class="xs mut">zwykle ' + fmtDay(st.usual.hr, 0) + '</div>' : '') + '</div></div>' + (isToday ? '<a class="btn sm" href="#/regeneracja">Szczegóły regeneracji</a>' : '') + '</div>';
+  return h;
+}
+function sumSleep(date) {
+  var sl = FC.sleepNight(sleepDays(), S.workouts, date), isToday = date === todayStr();
+  if (!sl) return '<div class="card fu" data-e5="tab-empty"><p class="lbl">Sen</p><p class="mut sm" style="margin:0">Brak danych o śnie z tej nocy. Wpisz godziny snu w porannym pomiarze albo zbieraj noc z opaską.</p></div>';
+  return '<div class="card fu"><p class="lbl">Sen</p><div class="row" style="gap:16px">' + ringHtml(104, 10, sl.score / 100, '#E07BF0', '<span class="n" style="font-size:32px">' + Math.round(sl.score) + '<span class="sm sub">%</span></span>') +
+    '<div class="grow col" style="gap:2px"><span class="n" style="font-size:26px;white-space:nowrap">' + FC.fmtDur(sl.durH) + '</span><span class="sm sub">z ' + FC.fmtDur(sl.needH) + ' potrzeby</span><span class="xs mut">' + esc(sl.bed) + ' – ' + esc(sl.wake) + '</span></div></div>' +
+    e5Bar(sl.durH / sl.needH, '#E07BF0', 'Sen ' + Math.round(sl.durH / sl.needH * 100) + ' procent potrzeby') + (sl.shortH > 0.05 ? '<p class="sm" style="margin:0">Brakuje <b style="color:#fff">' + FC.fmtDur(sl.shortH) + '</b> do potrzeby.</p>' : '<p class="sm" style="margin:0;color:#2CE8B5">Potrzeba snu pokryta.</p>') + (isToday ? '<a class="btn sm" href="#/sen">Szczegóły snu</a>' : '') + '</div>';
+}
+function sumEffort(date, p) {
+  var ws = S.workouts.filter(function (w) { return w.date === date; }), z = 0; ws.forEach(function (w) { if (w.type !== 'sauna' && w.zonesSec) z += ((w.zonesSec[1] || 0) + (w.zonesSec[2] || 0) + (w.zonesSec[3] || 0)) / 60; });
+  var st = C.dayStatus(S.days, date), tb = FC.targetBand(st.scored ? st.color : null);
+  return '<div class="card fu"><p class="lbl">Wysiłek</p><div class="row" style="gap:16px">' + ringHtml(104, 10, p.strain.frac, '#2D9CFF', '<span class="n" style="font-size:30px">' + (p.strain.has ? nf(p.strain.v, 1) : '—') + '</span>') +
+    '<div class="grow col" style="gap:3px"><span class="sm sub">cel dnia ' + nf(S.e5.goals.strain, 0) + (tb ? ' · wg regeneracji ' + tb.lo + '–' + tb.hi : '') + '</span><span class="n" style="font-size:20px">' + ws.length + ' ' + (ws.length === 1 ? 'aktywność' : 'aktywności') + '</span><span class="xs mut">w strefach 1–3: ' + Math.round(z) + ' min</span></div></div>' +
+    (p.kcal.has ? '<p class="sm sub" style="margin:0">Aktywne kalorie: <b style="color:#fff">' + nfi(p.kcal.v) + ' kcal</b> (szacunek ±20%).</p>' : '<p class="xs mut" style="margin:0">Kalorie aktywne pojawią się po uzupełnieniu profilu (wiek, płeć, waga, wzrost).</p>') + '</div>';
+}
+function rSumm() {
+  var date = sumDate(), today = todayStr(), isToday = date === today, tab = S.e5.ui.sumTab, p = E5.dayProgress(date, e5Ctx(), S.e5.goals);
+  var h = header('Dziś w skrócie', { back: 'dzis' }) + '<div class="body">';
+  h += '<div class="row sp fu" role="group" aria-label="Wybór dnia"><button class="ib" data-act="sumPrev" aria-label="Poprzedni dzień"' + (C.dayNum(date) <= C.dayNum(today) - 120 ? ' disabled' : '') + '>' + ico('back', 22) + '</button>' +
+    '<button class="chip n" data-act="sumToday" style="min-width:150px;font-size:16px" aria-label="Wybrany dzień: ' + esc(dayWord(date) + ' ' + dayFull(date)) + (isToday ? '' : '. Dotknij, by wrócić do dziś') + '">' + esc(dayWord(date)) + ' · ' + esc(dayFull(date)) + '</button>' +
+    '<button class="ib" data-act="sumNext" aria-label="Następny dzień"' + (isToday ? ' disabled' : '') + '>' + ico('chev', 22) + '</button></div>';
+  h += e5Tabs([['przeglad', 'Przegląd'], ['regeneracja', 'Regeneracja'], ['sen', 'Sen'], ['wysilek', 'Wysiłek']], tab, 'sumTab', 'Widok podsumowania');
+  h += tab === 'regeneracja' ? sumRegen(date) : (tab === 'sen' ? sumSleep(date) : (tab === 'wysilek' ? sumEffort(date, p) : sumOverview(date, p)));
+  h += '<div class="g2"><a href="#/odznaki" class="card tile" style="flex-direction:row;align-items:center;gap:10px;min-height:56px"><span style="color:#F7D23E">' + ico('award', 22) + '</span><span class="n" style="font-size:16px">Odznaki</span></a><a href="#/cele" class="card tile" style="flex-direction:row;align-items:center;gap:10px;min-height:56px"><span style="color:#2CE8B5">' + ico('target', 22) + '</span><span class="n" style="font-size:16px">Cele</span></a></div>';
+  return h + '</div>';
+}
+ROUTES.podsumowanie = { tab: 'dzis', depth: 1, parent: 'dzis', render: rSumm, mount: renderBattery };
+ACT_E5.sumTab = function (el) { S.e5.ui.sumTab = el.dataset.v; e5Save(); rerender(); };
+ACT_E5.sumPrev = function () { var d = sumDate(); S.sumDate = C.addDays(d, -1); rerender(); };
+ACT_E5.sumNext = function () { var d = sumDate(); if (d < todayStr()) S.sumDate = C.addDays(d, 1); rerender(); };
+ACT_E5.sumToday = function () { S.sumDate = null; rerender(); };
+
+// ====================== CELE ======================
+function goalRow(key, label, prog, valText, extraEdit) {
+  var editing = S.goalEdit === key, d = E5.GOAL_DEFS[key], g = S.e5.goals;
+  var h = '<div class="col" style="gap:6px" data-e5="goal-row" data-goal="' + key + '"><div class="row sp" style="gap:8px"><span class="sm" style="font-weight:500">' + esc(label) + '</span><span class="xs mut" style="text-align:right">' + valText + '</span>' +
+    '<button class="ib plain" data-act="goalEdit" data-k="' + key + '" aria-label="Zmień cel: ' + esc(label) + '" aria-expanded="' + editing + '">' + ico('edit', 20) + '</button></div>' + e5Bar(prog.frac, prog.color, label + ': ' + (prog.has ? Math.round(prog.frac * 100) + ' procent celu' : 'brak danych')) + '</div>';
+  if (editing) {
+    var two = key === 'saunaMin';
+    h += '<div class="col" style="gap:8px;padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.04);border:1px solid rgba(44,232,181,.3)" data-e5="goal-edit">' +
+      (two ? '<div class="row" style="gap:8px"><label class="grow xs mut">Od<input class="inp num" id="goalIn" type="text" inputmode="numeric" data-keep="1" value="' + esc(g.saunaMin) + '" aria-label="Sauna: co najmniej razy w tygodniu"></label><label class="grow xs mut">Do<input class="inp num" id="goalIn2" type="text" inputmode="numeric" data-keep="1" value="' + esc(g.saunaMax) + '" aria-label="Sauna: co najwyżej razy w tygodniu"></label></div>' :
+        '<label class="xs mut">' + esc(label) + ' (' + esc(d.unit) + ')<input class="inp num" id="goalIn" type="text" inputmode="decimal" data-keep="1" value="' + esc(String(g[key]).replace('.', ',')) + '" aria-label="Nowy cel: ' + esc(label) + '"></label>') +
+      '<p class="err" id="goalErr" hidden></p><div class="row"><button class="btn pri grow" data-act="goalSave" data-k="' + key + '">Zapisz</button><button class="btn grow" data-act="goalCancel">Anuluj</button></div></div>';
+  }
+  return h;
+}
+function rCele() {
+  var today = todayStr(), g = S.e5.goals, ctx = e5Ctx(), p = E5.dayProgress(today, ctx, g), wk = E5.weekProgress(C.dayNum(FC.weekStart(today)) && FC.weekStart(today), ctx, g), sk = E5.morningStreak(S.days, today), sg = E5.suggestGoals(ctx, today, g);
+  var h = header('Cele', { back: 'profil' }) + '<div class="body">';
+  h += e5Note('goal');
+  var P = function (pr, c) { return Object.assign({}, pr, { color: c }); };
+  h += '<div class="card fu" data-e5="goals-daily"><p class="lbl">Cele dzienne</p>' +
+    goalRow('steps', 'Kroki', P(p.steps, '#2D9CFF'), p.steps.has ? nfi(p.steps.v) + ' / ' + nfi(g.steps) : (NATIVE || DEMO ? 'cel ' + nfi(g.steps) + ' · brak danych' : 'cel ' + nfi(g.steps) + ' · tylko w aplikacji na Androida')) +
+    goalRow('walkMin', 'Spacer', P(p.walk, '#2EE86B'), nf(p.walk.v || 0, 0) + ' / ' + g.walkMin + ' min') +
+    goalRow('sleepH', 'Sen', P(p.sleep, '#E07BF0'), p.sleep.has ? FC.fmtDur(p.sleep.v) + ' / ' + FC.fmtDur(g.sleepH) : 'cel ' + FC.fmtDur(g.sleepH) + ' · brak snu z dziś') +
+    '<div class="col" style="gap:6px" data-e5="goal-row" data-goal="morning"><div class="row sp" style="gap:8px"><span class="sm" style="font-weight:500">Pomiar poranny</span><span class="xs mut">' + (g.morning ? (p.morning.done ? 'zrobiony' : 'jeszcze dziś') : 'wyłączony') + '</span>' + tglHtml('goalMorning', g.morning, 'Cel: poranny pomiar') + '</div>' + (g.morning ? e5Bar(p.morning.done ? 1 : 0, '#2CE8B5', p.morning.done ? 'Pomiar zrobiony' : 'Pomiar niezrobiony') : '') + '</div>' +
+    goalRow('kcalActive', 'Kalorie aktywne', P(p.kcal, '#F2A93B'), p.kcal.has ? nfi(p.kcal.v) + ' / ' + nfi(g.kcalActive) + ' kcal' : 'cel ' + nfi(g.kcalActive) + ' kcal') +
+    goalRow('strain', 'Wysiłek dnia', P(p.strain, '#2CE8B5'), (p.strain.has ? nf(p.strain.v, 1) : '0') + ' / ' + g.strain) + '</div>';
+  h += '<div class="card fu" data-e5="goals-weekly"><p class="lbl">Cele tygodniowe</p>' +
+    goalRow('gym', 'Siłownia ' + g.gym + '×/tydz.', P(wk.gym, '#2D9CFF'), wk.gym.v + '/' + g.gym) +
+    goalRow('saunaMin', 'Sauna ' + (g.saunaMin === g.saunaMax ? g.saunaMin : g.saunaMin + '–' + g.saunaMax) + '×', { frac: wk.sauna.frac, has: true, color: '#F2A93B' }, wk.sauna.v + '/' + g.saunaMax + (wk.sauna.state === 'above' ? ' (powyżej celu)' : '')) +
+    goalRow('zonesMin', 'Strefy 1–2: ' + g.zonesMin + ' min', P(wk.zones, '#2CE8B5'), wk.zones.v + ' / ' + g.zonesMin + ' min') + '<p class="xs mut" style="margin:0">Tydzień od poniedziałku. Liczą się treningi zapisane w Formie.</p></div>';
+  h += '<div class="card fu" data-e5="streak"><p class="lbl">Seria</p><span class="n" style="font-size:22px;line-height:1.2" data-e5="streak-text">' + (sk.streak > 0 ? 'Poranny pomiar: ' + sk.streak + ' ' + (sk.streak === 1 ? 'dzień' : 'dni') + ' z rzędu' : 'Poranny pomiar: seria zacznie się po pierwszym pomiarze') + '</span>' +
+    '<div class="row" style="justify-content:space-between" role="img" aria-label="Pomiary z ostatnich 7 dni">' + sk.last7.map(function (x) { return '<span class="col" style="align-items:center;gap:2px"><span style="width:34px;height:34px;border-radius:17px;display:flex;align-items:center;justify-content:center;' + (x.done ? 'background:linear-gradient(160deg,#2CE8B5,#16C7A0);color:#0B0E11' : 'border:1.5px ' + (x.today ? 'dashed' : 'solid') + ' rgba(255,255,255,.35);color:#9AA6B0') + '">' + (x.done ? ico('check', 18) : '') + '</span><span class="xs mut">' + WD1S[x.dow] + '</span></span>'; }).join('') + '</div>' +
+    (sk.streak === 0 ? '<p class="mut sm" style="margin:0">Zrób poranny pomiar (albo noc z opaską), a zaczniemy liczyć serię.</p>' : '') + '</div>';
+  h += '<div class="card fu" data-e5="goals-suggest"><p class="lbl">Podpowiedź z historii</p>';
+  if (!sg.ok) h += '<p class="mut sm" style="margin:0">' + esc(sg.note) + '</p>';
+  else if (!sg.items.length) h += '<p class="sub sm" style="margin:0">' + esc(sg.note) + '</p>';
+  else h += '<div class="col" style="gap:8px">' + sg.items.map(function (x) { return '<div class="col" style="gap:1px"><span class="sm"><b style="color:#fff">' + esc(x.label) + '</b>: ' + esc(E5.goalText(x.key, x.current)) + ' → <b style="color:#2CE8B5">' + esc(E5.goalText(x.key, x.suggested)) + '</b></span><span class="xs mut">' + esc(x.reason) + '</span></div>'; }).join('') + '</div><button class="btn pri full" data-act="goalsSuggest">Zastosuj podpowiedzi</button>';
+  if (S.e5.goalsPrev) h += '<div class="row" style="gap:10px;align-items:center;padding:10px 14px;border-radius:14px;background:rgba(46,232,107,.12);border:1px solid rgba(46,232,107,.4)" data-e5="goals-applied"><span style="color:#2EE86B">' + ico('check', 20) + '</span><span class="grow sm">Zastosowano podpowiedzi.</span><button class="btn sm" data-act="goalsUndo" aria-label="Cofnij podpowiedzi celów">Cofnij</button></div>';
+  h += '</div><p class="xs mut fu" style="margin:0">Cele ustawiasz sam. Podpowiadamy je na podstawie Twojej historii, ale nic nie zmieniamy bez Twojej zgody.</p>';
+  return h + '</div>';
+}
+ROUTES.cele = { tab: null, depth: 1, parent: 'profil', render: rCele, mount: renderBattery, init: function () { S.goalEdit = null; } };
+ACT_E5.goalEdit = function (el) { S.goalEdit = S.goalEdit === el.dataset.k ? null : el.dataset.k; rerender(); setTimeout(function () { var i = $('goalIn'); if (i) try { i.focus(); i.select(); } catch (e) { /* ignore */ } }, 30); };
+ACT_E5.goalCancel = function () { S.goalEdit = null; clearDraft('goalIn'); clearDraft('goalIn2'); rerender(); };
+ACT_E5.goalSave = function (el) {
+  var key = el.dataset.k, i = $('goalIn'), err = $('goalErr'); if (!i) return;
+  var bad = function (t) { if (err) { err.textContent = t; err.hidden = false; } };
+  if (key === 'saunaMin') {
+    var a = E5.validateGoal('saunaMin', i.value), b = E5.validateGoal('saunaMax', $('goalIn2') ? $('goalIn2').value : ''); if (!a.ok) return bad(a.error); if (!b.ok) return bad(b.error);
+    if (b.value < a.value) return bad('„Do” nie może być mniejsze niż „Od”.');
+    clearDraft('goalIn'); clearDraft('goalIn2'); return e5GoalSet({ saunaMin: a.value, saunaMax: b.value }, 'Zapisano cel: sauna ' + (a.value === b.value ? a.value : a.value + '–' + b.value) + '× w tygodniu');
+  }
+  var v = E5.validateGoal(key, i.value); if (!v.ok) return bad(v.error);
+  var patch = {}; patch[key] = v.value; clearDraft('goalIn');
+  e5GoalSet(patch, 'Zapisano cel: ' + E5.GOAL_DEFS[key].label + ' ' + E5.goalText(key, v.value));
+};
+ACT_E5.goalMorning = function () { e5GoalSet({ morning: !S.e5.goals.morning }, !S.e5.goals.morning ? 'Zapisano: poranny pomiar jest celem dziennym' : 'Zapisano: poranny pomiar wyłączony z celów'); };
+ACT_E5.goalsSuggest = function () { var sg = E5.suggestGoals(e5Ctx(), todayStr(), S.e5.goals); if (sg.items.length) e5GoalsApply(sg.items); };
+ACT_E5.goalsUndo = function () { e5GoalsUndo(); };
+$('stack').addEventListener('keydown', function (e) { if (e.key === 'Enter' && e.target && e.target.id === 'goalIn') { var b = document.querySelector('[data-act="goalSave"]'); if (b) b.click(); } });
+
+// ====================== ODZNAKI I WYZWANIA ======================
+function chBtns(id, v) {
+  var b = '';
+  if (v.state === 'idle') b = '<button class="btn pri full" data-act="chStart" data-id="' + id + '">Dołącz do wyzwania</button>';
+  else if (v.state === 'active') b = '<button class="btn full" data-act="chStop" data-id="' + id + '" data-confirm="Zatrzymaj">Zatrzymaj wyzwanie</button>';
+  else if (v.state === 'stopped') b = '<div class="row"><button class="btn pri grow" data-act="chResume" data-id="' + id + '" aria-label="Cofnij: wznów wyzwanie">Cofnij – wznów</button><button class="btn grow" data-act="chStart" data-id="' + id + '" data-confirm="Zacznij od nowa">Od nowa</button></div>';
+  else b = '<button class="btn full" data-act="chStart" data-id="' + id + '">Zacznij od nowa</button>';
+  return b;
+}
+function chCard(id, v) {
+  var def = v.def, fr = v.frac, col = v.state === 'failed' ? '#FF4D5E' : (v.state === 'done' ? '#2EE86B' : '#2CE8B5');
+  var icon = id === 'km300' ? 'walk' : 'pulse', pillK = { idle: '', active: pill('ok', 'w toku'), done: pill('ok', 'zaliczone', 'check'), ended: pill('warn', 'zakończone'), stopped: pill('recon', 'zatrzymane'), failed: pill('alarm', 'przerwane') }[v.state];
+  var h = '<div class="col" style="gap:8px;padding:12px 0;border-top:1px solid rgba(255,255,255,.08)" data-e5="challenge" data-id="' + id + '" data-state="' + v.state + '"><div class="row" style="gap:12px;align-items:flex-start">' +
+    badgeSvg({ shape: id === 'km300' ? 'hex' : 'shield', icon: icon, tone: v.state === 'done' ? 'gold' : 'silver' }, 48, v.state === 'idle') +
+    '<div class="grow col" style="gap:2px;min-width:0"><span class="n" style="font-size:17px;line-height:1.2">' + esc(def.title) + '</span>' + (pillK ? '<span>' + pillK + '</span>' : '') + '</div></div>';
+  if (v.state === 'idle') h += '<p class="xs mut" style="margin:0">' + esc(def.text) + '</p>';
+  else {
+    h += e5Bar(fr, col, def.title + ': ' + Math.round(fr * 100) + ' procent') + '<p class="sm" style="margin:0;color:#E9EEF2" data-e5="ch-text">' + esc(v.text) + '</p>' + (v.detail ? '<p class="xs mut" style="margin:0">' + esc(v.detail) + '</p>' : '');
+    if (id === 'alk14') {
+      if (v.hrv && v.hrv.ok) h += '<p class="sm" style="margin:0" data-e5="ch-hrv">Wpływ na HRV: <b style="color:' + (v.hrv.pct >= 0 ? '#2EE86B' : '#F2A93B') + '">' + (v.hrv.pct >= 0 ? '+' : '−') + Math.abs(Math.round(v.hrv.pct)) + '%</b> (średnio ' + nf(v.hrv.during, 0) + ' ms w trakcie wobec ' + nf(v.hrv.before, 0) + ' ms w 14 dniach przed).</p>';
+      else h += '<p class="xs mut" style="margin:0" data-e5="ch-hrv">Wpływ na HRV pojawi się po co najmniej 3 pomiarach w trakcie wyzwania i 3 przed nim' + (v.hrv ? ' (masz: w trakcie ' + v.hrv.nDuring + ', przed ' + v.hrv.nBefore + ')' : '') + '.</p>';
+    }
+  }
+  return h + chBtns(id, v) + '</div>';
+}
+function rOdznaki() {
+  e5Refresh();
+  var today = todayStr(), list = e5Badges(), earned = list.filter(function (b) { return b.earned; }), prog_ = list.filter(function (b) { return !b.earned; }), ctx = { days: S.days, workouts: S.workouts };
+  var h = header('Odznaki', { back: 'profil' }) + '<div class="body">';
+  var al = list.filter(function (b) { return b.id === 'pomiary14'; })[0];
+  h += '<div class="card fu" data-e5="badges-mine"><p class="lbl">Moje odznaki</p>';
+  if (!earned.length) h += '<div class="empty">' + illus('ruler', 88) + '<p class="mut sm" style="margin:0" data-e5="badges-empty">Jeszcze żadnej odznaki. Pierwsza jest blisko: zbierz ' + (al ? Math.max(0, al.goal - al.v) : 14) + ' dni pomiarów, a odblokujesz Alarm przemęczenia.</p></div>';
+  else h += '<div class="g3" style="row-gap:14px">' + earned.map(function (b) {
+    return '<div class="col" style="align-items:center;gap:6px;text-align:center" data-e5="badge" data-id="' + b.id + '" data-earned="1">' + badgeSvg(b, 64) + '<span class="xs" style="line-height:1.2;color:#E9EEF2">' + esc(b.title) + '</span>' + (S.newBadges.indexOf(b.id) >= 0 ? '<span class="pill chg">nowa</span>' : '<span class="xs mut">' + esc(E5.badgeProgressText(b)) + '</span>') + '</div>';
+  }).join('') + '</div>';
+  h += '<p class="xs mut" style="margin:0" data-e5="alarm-link">' + (al && al.earned ? 'Odznaka „14 dni pomiarów” odblokowała <a href="#/alarm">Alarm przemęczenia</a>.' : 'Odznaka „14 dni pomiarów” odblokowuje <a href="#/alarm">Alarm przemęczenia</a>: ' + (al ? al.v + ' z ' + al.goal + ' dni.' : '')) + '</p></div>';
+  h += '<div class="card fu" data-e5="badges-progress"><p class="lbl">W toku</p>' + (prog_.length ? prog_.map(function (b) {
+    return '<div class="row" style="gap:12px;padding:8px 0" data-e5="badge" data-id="' + b.id + '" data-earned="0">' + badgeSvg(b, 52, true) + '<div class="grow col" style="gap:5px;min-width:0"><span class="n" style="font-size:16px;line-height:1.2">' + esc(b.title) + '</span>' + e5Bar(b.frac, b.id === 'pomiary14' ? '#F2A93B' : '#2CE8B5', b.title + ': ' + Math.round(b.frac * 100) + ' procent') + '<span class="xs mut">' + Math.round(b.frac * 100) + '% · ' + esc(E5.badgeProgressText(b)) + '</span></div></div>';
+  }).join('') : '<p class="sub sm" style="margin:0">Masz wszystkie odznaki. Gratulacje!</p>') + '</div>';
+  h += '<div class="card fu" data-e5="challenges"><p class="lbl">Wyzwania</p>' + e5Note('ch') + ['km300', 'alk14'].map(function (id) { return chCard(id, E5.challengeStatus(id, S.e5.challenges[id], ctx, today)); }).join('') + '</div>';
+  return h + '</div>';
+}
+ROUTES.odznaki = { tab: null, depth: 1, parent: 'profil', render: rOdznaki, mount: function () { renderBattery(); setTimeout(function () { S.newBadges = []; }, 4000); } };
+ACT_E5.chStart = function (el) { chStart(el.dataset.id); };
+ACT_E5.chStop = function (el) { chStop(el.dataset.id); };
+ACT_E5.chResume = function (el) { chResume(el.dataset.id); };
+
+// ====================== URZĄDZENIA ======================
+var DEV_HOWTO = {
+  whoop: 'W aplikacji WHOOP włącz „HR Broadcast” (nadawanie tętna), zamknij aplikację WHOOP na tym telefonie i dotknij „Dodaj urządzenie”.',
+  loop: 'Forma połączy się z Polar Loop tylko wtedy, gdy opaska nadaje tętno przez Bluetooth. Jeśli nie nadaje, dane z Polar Flow możesz odczytać przez Health Connect (Profil).',
+  h10: 'Zwilż elektrody pasa, załóż go i dotknij „Dodaj urządzenie”. Pas H10 daje najdokładniejsze HRV.',
+  other: 'Dowolny pas lub opaska z Bluetooth i usługą tętna (np. Polar Verity Sense, pasy piersiowe). Bez odstępów RR nie policzymy HRV.'
+};
+function devBatteryHtml() {
+  if (!S.connected || S.battery == null) return '<div class="row" style="align-items:baseline;gap:6px"><span class="n" style="font-size:34px;line-height:1;color:#9AA6B0">—</span><span class="xs sub">% bateria</span></div><span class="xs mut" data-e5="batt-note">Poziom baterii zobaczysz po połączeniu.</span>';
+  var ch = chargingState(), l = S.battery, unrel = !ch.on && battUnreliable(), stuck = !ch.on && !unrel && battStuck();
+  return '<div class="row" style="align-items:baseline;gap:6px"><span class="n" style="font-size:' + (unrel ? 44 : 34) + 'px;line-height:1;color:' + (unrel || stuck ? '#F2A93B' : battColor(l)) + '" data-e5="batt-val">' + (unrel ? '?' : l + (stuck ? ' ?' : '')) + '</span><span class="xs sub">% bateria' + (ch.on ? ' · ładowanie' : '') + '</span></div>' +
+    (unrel ? '<span class="xs mut" data-e5="batt-note">odczyt baterii niepewny w tym trybie (ostatnio ' + l + '%)</span>' : (stuck ? '<span class="xs mut" data-e5="batt-note">odczyt niepewny – ten sam poziom od wielu godzin</span>' : ''));
+}
+function hrvSourceText() {
+  var c = { noc: 0, poranek: 0, whoop: 0 }; S.days.slice(-14).forEach(function (d) { var sk = d.source === 'noc' || d.source === 'whoop' ? d.source : 'poranek'; c[sk] = (c[sk] || 0) + 1; });
+  var p = []; if (c.noc) p.push('nocny pomiar'); if (c.poranek) p.push('poranny'); if (c.whoop) p.push('WHOOP (chmura)');
+  return p.length ? p.join(' + ') : 'brak pomiarów';
+}
+function devDetail(d) {
+  var h = '', nm = d.name || d.label;
+  if (!d.real) {
+    return '<div class="card fu" data-e5="dev-add"><p class="lbl">Dodaj: ' + esc(d.label) + '</p><p class="sub sm" style="margin:0;line-height:1.45">' + esc(DEV_HOWTO[d.kind]) + '</p>' +
+      '<div class="js-conn col">' + connHtml() + '</div><button class="btn pri full" data-act="devAdd">Dodaj urządzenie</button></div>';
+  }
+  var link = S.link.state, status = d.connected ? 'Połączono' : (link === 'connecting' ? 'Łączenie…' : (link === 'reconnecting' && e5KindOf(S.band && S.band.name) === d.kind ? 'Łączenie ponownie…' : 'Niepołączono'));
+  var night = nat_night();
+  h += '<div class="card fu" data-e5="dev-card" data-kind="' + d.kind + '"><div class="row sp" style="gap:8px;flex-wrap:wrap"><span>' + (d.connected ? pill('ok', 'aktywne') : pill('recon', 'niepołączone')) + '</span>' + (d.isDefault || e5DefaultKind() === d.kind ? '<span data-e5="default-pill">' + pill('chg', 'domyślne') + '</span>' : '') + '</div>' +
+    '<div class="row" style="gap:12px;align-items:center"><div class="grow col" style="gap:4px;min-width:0"><span class="n" style="font-size:30px;line-height:1.1" data-e5="dev-status">' + status + '</span><span class="sm sub" style="overflow-wrap:anywhere">' + esc(nm) + (d.cloud && !d.connected ? ' · konto WHOOP (chmura)' : '') + '</span>' + devBatteryHtml() + '</div>' +
+    '<span style="color:#2CE8B5;opacity:.9;flex:none">' + ico('watch', 64) + '</span></div>' +
+    '<a href="#/bateria" class="row" style="color:#2CE8B5;font-weight:600;min-height:44px;gap:4px">Test ładowania ' + ico('chev', 16) + '</a>' +
+    '<span class="xs mut" data-e5="dev-sync">' + (d.kind === 'whoop' && d.cloud ? 'Ostatnia synchronizacja WHOOP: ' + esc(whLastSyncText()) : (S.days.length ? 'Ostatni pomiar HRV: ' + ddmm(S.days[S.days.length - 1].date) + ' ' + esc(S.days[S.days.length - 1].time) : 'Brak pomiarów HRV z tego urządzenia')) + '</span></div>';
+  var def = e5DefaultKind() === d.kind, row = function (a, b) { return '<div class="row sp" style="min-height:52px;gap:10px;border-top:1px solid rgba(255,255,255,.08)">' + a + b + '</div>'; };
+  h += '<div class="card fu" data-e5="dev-list" style="gap:0;padding-top:4px;padding-bottom:4px">' +
+    row('<span class="col" style="gap:0"><span class="sm">Źródło HRV</span><span class="xs mut">' + esc(hrvSourceText()) + '</span></span>', '') +
+    row('<span class="sm">Domyślne urządzenie</span>', def ? '<span class="row" style="gap:8px"><span class="xs" style="color:#2CE8B5" data-e5="is-default">' + ico('check', 14) + ' domyślne</span>' + (S.e5.dev.def === d.kind ? '<button class="btn sm" data-act="devUndefault" aria-label="Cofnij: nie ustawiaj jako domyślnego">Cofnij</button>' : '') + '</span>' : '<button class="btn sm" data-act="devDefault" data-k="' + d.kind + '">Ustaw jako domyślne</button>') +
+    row('<span class="col" style="gap:0"><span class="sm">Pomiar nocny</span><span class="xs mut" data-e5="night-state">' + esc(night.text) + '</span></span>', night.canToggle ? tglHtml('devNight', night.on, 'Pomiar nocny') : '<a class="btn sm" href="#/dzis">Otwórz kartę Noc</a>') +
+    row('<span class="sm">Przypomnienia i powiadomienia</span>', '<a class="btn sm" href="#/profil">Ustawienia</a>') +
+    row('<span class="sm">Diagnostyka połączenia</span>', '<a class="btn sm" href="#/diagnostyka">Otwórz</a>') +
+    row('<span class="sm" style="color:#FF8A96">Zapomnij urządzenie</span>', '<button class="btn sm danger" data-act="devForget" data-k="' + d.kind + '" data-confirm="Zapomnij">Zapomnij</button>') + '</div>';
+  return h;
+}
+function nat_night() {
+  if (!NATIVE) return { text: 'Dostępny w aplikacji na Androida. Tu: karta „Noc” na ekranie Dziś.', canToggle: false, on: false };
+  var run = !!(S.night.st && S.night.st.running);
+  return { text: run ? 'trwa · pobudka ' + esc((S.night.st && S.night.st.wake) || nightWake()) : 'wyłączony · pobudka ' + nightWake(), canToggle: true, on: run };
+}
+function rUrz() {
+  var ds = e5Devices(), sel = S.devSel && ds[S.devSel] ? S.devSel : (e5DefaultKind() || 'whoop');
+  var h = header('Urządzenia', { back: 'profil' }) + '<div class="body">';
+  h += '<div class="chips fu" role="tablist" aria-label="Urządzenia" data-e5="dev-tabs">' + E5_KIND_ORDER.map(function (k) {
+    var d = ds[k], on = k === sel, st = d.real ? (d.connected ? 'aktywne' : 'zapamiętane') : 'dodaj';
+    return '<button class="chip' + (on ? ' on' : '') + '" role="tab" aria-selected="' + on + '" data-act="devSel" data-k="' + k + '" data-real="' + (d.real ? 1 : 0) + '" style="white-space:nowrap">' + esc(d.label) + ' · ' + st + '</button>';
+  }).join('') + '</div>';
+  if (!E5_KIND_ORDER.some(function (k) { return ds[k].real; })) h += '<div class="note fu" data-e5="dev-empty">Nie masz jeszcze żadnego urządzenia. Wybierz je powyżej i dodaj, a poznasz wymagania.</div>';
+  h += e5Note('dev');
+  h += devDetail(ds[sel]);
+  h += '<div class="card fu" data-e5="dev-supported"><p class="lbl">Obsługiwane urządzenia</p>' + E5_KIND_ORDER.map(function (k) { return '<div class="row sm" style="gap:10px"><span class="dotp" style="background:' + (ds[k].real ? '#2EE86B' : '#2CE8B5') + ';animation:none"></span>' + esc(k === 'whoop' ? 'WHOOP (nadawanie tętna)' : (k === 'other' ? 'Dowolny pas piersiowy Bluetooth' : E5_KINDS[k])) + '</div>'; }).join('') + '<p class="xs mut" style="margin:0">Polar Verity Sense też działa. Zapamiętujemy jedno urządzenie, z którym łączymy się automatycznie.</p></div>';
+  return h + '</div>';
+}
+ROUTES.urzadzenia = { tab: null, depth: 1, parent: 'profil', render: rUrz, mount: renderBattery };
+ACT_E5.devSel = function (el) { S.devSel = el.dataset.k; rerender(); };
+ACT_E5.devAdd = function () { connect(false); };
+ACT_E5.devDefault = function (el) { e5SetDefault(el.dataset.k); };
+ACT_E5.devUndefault = function () { S.e5.dev.def = null; e5Save(); markSaved('dev', 'Cofnięto: brak jawnie ustawionego domyślnego urządzenia.', 6000); rerender(); };
+ACT_E5.devForget = function (el) { e5ForgetDevice(el.dataset.k); };
+ACT_E5.devNight = function () {
+  if (!NATIVE) return;
+  var run = !!(S.night.st && S.night.st.running);
+  if (run) { nightStop(); markSaved('dev', 'Zapisano: pomiar nocny wyłączony.', 6000); }
+  else if (nightStart(nightWake())) markSaved('dev', 'Zapisano: pomiar nocny włączony, pobudka ' + nightWake() + '.', 6000);
+  else markSaved('dev', S.night.err || 'Nie udało się włączyć pomiaru nocnego.', 7000);
+  setTimeout(function () { rerender(); }, 150);
+};
+
+// ====================== ZDROWIE SERCA ======================
+function heartTile(label, valHtml, unit, statusHtml, sparkHtml) {
+  return '<div class="card tile fu" style="gap:4px;min-width:0"><span class="xs sub" style="line-height:1.2">' + label + '</span><div style="white-space:nowrap"><span class="n" style="font-size:32px;line-height:1.05">' + valHtml + '</span> <span class="xs sub">' + unit + '</span></div>' + statusHtml + (sparkHtml ? '<div style="margin-top:2px">' + sparkHtml + '</div>' : '') + '</div>';
+}
+function dotText(color, text) { return '<span class="xs" style="color:' + color + ';display:flex;align-items:center;gap:6px;font-weight:600"><span style="width:7px;height:7px;border-radius:4px;background:' + color + ';flex:none"></span>' + esc(text) + '</span>'; }
+function bpRowHtml(e) {
+  var cat = E5.bpCategory(e.sys, e.dia), hc = S.hc && S.hc.store && S.hc.store.written && S.hc.store.written['forma-bp-' + e.id];
+  return '<div class="row" style="min-height:48px;gap:8px;border-top:1px solid rgba(255,255,255,.08)" data-e5="bp-row"><span class="grow col" style="gap:0;min-width:0"><span class="n" style="font-size:17px">' + e.sys + '/' + e.dia + ' <span class="xs sub">mmHg' + (e.pulse ? ' · tętno ' + e.pulse : '') + '</span></span><span class="xs mut">' + ddmm(e.date) + ' ' + esc(e.time) + ' · ' + esc(cat.label) + (hc ? ' · w Health Connect' : '') + '</span></span><button class="btn sm" data-act="bpDel" data-id="' + esc(e.id) + '" data-confirm="Usuń" aria-label="Usuń pomiar ' + e.sys + '/' + e.dia + '">Usuń</button></div>';
+}
+function gluRowHtml(e) {
+  var cat = E5.glucoseCategory(e.mgdl, e.ctx), hc = S.hc && S.hc.store && S.hc.store.written && S.hc.store.written['forma-glu-' + e.id];
+  return '<div class="row" style="min-height:48px;gap:8px;border-top:1px solid rgba(255,255,255,.08)" data-e5="glu-row"><span class="grow col" style="gap:0;min-width:0"><span class="n" style="font-size:17px">' + e.mgdl + ' <span class="xs sub">mg/dL (' + pl1m(E5.mgdlToMmol(e.mgdl)) + ' mmol/L) · ' + E5.GLU_CTX[e.ctx] + '</span></span><span class="xs mut">' + ddmm(e.date) + ' ' + esc(e.time) + ' · ' + esc(cat.label) + (hc ? ' · w Health Connect' : '') + '</span></span><button class="btn sm" data-act="gluDel" data-id="' + esc(e.id) + '" data-confirm="Usuń" aria-label="Usuń pomiar ' + e.mgdl + ' mg/dL">Usuń</button></div>';
+}
+function pl1m(v) { return isFinite(v) ? nf(v, 1) : '—'; }
+function hcHeartNote() {
+  var st = e5HcState();
+  if (st === 'web') return '<p class="xs mut" style="margin:0" data-e5="hc-note">Wpisy zostają tylko w tej przeglądarce. Zapis do Health Connect działa w aplikacji na Androida.</p>';
+  if (st === 'off') return '<p class="xs mut" style="margin:0" data-e5="hc-note">Wpisy zostają w Formie. Połącz Health Connect w <a href="#/profil">Profilu</a>, żeby zapisywać je także tam.</p>';
+  if (st === 'need') return '<div class="col" style="gap:6px" data-e5="hc-note"><p class="xs mut" style="margin:0">Żeby zapisywać ciśnienie i cukier w Health Connect, trzeba dodatkowej zgody.</p><button class="btn sm" style="align-self:flex-start" data-act="hhPerm">Przyznaj zgodę</button></div>';
+  return '<p class="xs" style="margin:0;color:#2CE8B5" data-e5="hc-note">' + ico('check', 14) + ' Nowe wpisy zapisujemy też w Health Connect. Usunięcie wpisu w Formie nie usuwa go z Health Connect.</p>';
+}
+function rSerce() {
+  var today = todayStr(), nowT = new Date(), tm = C.localTimeStr(nowT), h = header('Zdrowie serca', { back: 'profil' }) + '<div class="body">', i = 0;
+  var rhrS = AC.trendSeries(S.days, today, 30, 'rhr'), hrvS = AC.trendSeries(S.days, today, 30, 'hrv');
+  var lastRhr = rhrS.pts.filter(function (p) { return p.v != null; }).pop(), lastHrv = hrvS.pts.filter(function (p) { return p.v != null; }).pop();
+  var rhrState = !lastRhr ? null : (rhrS.band ? (lastRhr.v > rhrS.band.hi ? ['podwyższone', '#F2A93B'] : (lastRhr.v < rhrS.band.lo ? ['niższe niż zwykle', '#2CE8B5'] : ['w normie', '#2EE86B'])) : ['za mało pomiarów na normę', '#9AA6B0']);
+  var hrvState = !lastHrv ? null : (hrvS.band ? (lastHrv.v > hrvS.band.hi ? ['powyżej normy', '#2EE86B'] : (lastHrv.v < hrvS.band.lo ? ['poniżej normy', '#F2A93B'] : ['w normie', '#2EE86B'])) : ['za mało pomiarów na normę', '#9AA6B0']);
+  var spk = function (s, c) { var v = s.pts.map(function (p) { return p.v; }).filter(function (x) { return x != null; }).slice(-14); return v.length >= 2 ? spark(v, 120, 34, c) : ''; };
+  var hrNow = hrFresh() ? S.hr : null, hrl = hrrLatest();
+  h += '<div class="g2" data-e5="heart-tiles">' +
+    heartTile('Tętno teraz', hrNow != null ? hrNow : '—', 'ud/min', hrNow != null ? dotText(hrNow < 100 ? '#2EE86B' : '#F2A93B', hrNow < 100 ? 'spokojne' : 'podwyższone (aktywność)') : dotText('#9AA6B0', S.connected ? 'czekam na sygnał' : 'brak opaski'), '') +
+    heartTile('Tętno spoczynkowe', lastRhr ? Math.round(lastRhr.v) : '—', 'ud/min', rhrState ? dotText(rhrState[1], rhrState[0]) : dotText('#9AA6B0', 'brak pomiarów'), spk(rhrS, '#2CE8B5')) +
+    heartTile('HRV', lastHrv ? Math.round(lastHrv.v) : '—', 'ms', hrvState ? dotText(hrvState[1], hrvState[0]) : dotText('#9AA6B0', 'brak pomiarów'), spk(hrvS, '#2EE86B')) +
+    heartTile('Powrót tętna po wysiłku', hrl ? hrl.drop : '—', 'ud/min / 1 min', hrl ? dotText(hrl.lab.color, hrl.lab.label) : dotText('#9AA6B0', 'brak z treningów'), '') + '</div>';
+  // trends
+  var tr = function (s, label, color, unit) {
+    var n = s.n; if (n < 3) return '<div class="card fu"><p class="lbl">' + label + '</p><p class="mut sm" style="margin:0">Za mało pomiarów na wykres (masz ' + n + ', potrzeba 3). Wykres z 30 dni pojawi się po kilku porankach.</p></div>';
+    var vals = s.pts.map(function (p) { return p.v; }).filter(function (x) { return x != null; }), mn = Math.floor(Math.min.apply(null, vals) / 5) * 5 - 5, mx = Math.ceil(Math.max.apply(null, vals) / 5) * 5 + 5;
+    return '<div class="card fu"><p class="lbl">' + label + ' – 30 dni</p>' + chart({ n: 30, ymin: mn, ymax: mx, ticks: [mn, Math.round((mn + mx) / 2), mx], band: s.band && s.band.lo != null ? { lo: s.band.lo, hi: s.band.hi } : null, label: label + ' z 30 dni',
+      lines: [{ pts: s.pts.filter(function (p) { return p.avg7 != null; }).map(function (p) { return { i: p.i, v: p.avg7 }; }), color: color, w: 2.2 }], dots: s.pts.filter(function (p) { return p.v != null; }).map(function (p) { return { i: p.i, v: p.v, color: color, r: 2 }; }), xl: [{ i: 0, t: ddmm(s.pts[0].date), a: 'start' }, { i: 29, t: 'dziś', a: 'end' }] }) +
+      '<span class="xs mut">Punkty: pomiary, linia: średnia 7 dni' + (s.band ? ', zielone tło: Twoja norma' : '') + ' (' + unit + ').</span></div>';
+  };
+  h += tr(rhrS, 'Tętno spoczynkowe', '#2CE8B5', 'ud/min') + tr(hrvS, 'HRV', '#2EE86B', 'ms');
+  // HRR
+  var hl = E5.hrrList(S.e5.hrr, 6);
+  h += '<div class="card fu" data-e5="hrr-card"><p class="lbl">Powrót tętna po wysiłku (HRR)</p>';
+  if (!hl.length) h += '<p class="mut sm" style="margin:0" data-e5="hrr-empty">Powrót tętna policzymy po treningu z opaską: tętno na końcu wysiłku minus tętno minutę później. Zostaw opaskę połączoną przez minutę po zakończeniu treningu. Wynik liczymy, gdy tętno na końcu było co najmniej 100.</p>';
+  else h += '<div class="col" style="gap:0">' + hl.map(function (x, k) { return '<div class="row sp" style="min-height:44px;border-top:' + (k ? '1px solid rgba(255,255,255,.08)' : '0') + '" data-e5="hrr-row"><span class="sm">' + ddmm(x.date) + ' · ' + x.end + ' → ' + x.at60 + ' ud/min</span><span class="row" style="gap:8px"><b class="n" style="font-size:18px">−' + x.drop + '</b>' + dotText(x.lab.color, x.lab.label) + '</span></div>'; }).join('') + '</div><p class="xs mut" style="margin:0">Im większy spadek w pierwszej minucie, tym lepiej. Typowo: ponad 18 to dobry wynik.</p>';
+  h += '</div>';
+  // blood pressure
+  var bps = S.e5.bp.slice(-14), lastBp = S.e5.bp[S.e5.bp.length - 1], cat = lastBp ? E5.bpCategory(lastBp.sys, lastBp.dia) : null;
+  h += '<div class="card fu" data-e5="bp-card"><p class="lbl">Ciśnienie krwi</p>' + e5Note('bp');
+  if (lastBp) h += '<div class="row" style="gap:10px;align-items:baseline;flex-wrap:wrap"><span class="n" style="font-size:36px;line-height:1.05" data-e5="bp-last">' + lastBp.sys + '/' + lastBp.dia + '</span><span class="xs sub">mmHg</span>' + pill(cat.tone, cat.label) + '</div><span class="xs mut">wpis ręczny · ostatni pomiar ' + ddmm(lastBp.date) + ' ' + esc(lastBp.time) + '</span>' + (cat.advice ? '<p class="sm" style="margin:0;color:#FFE2B8">' + esc(cat.advice) + '</p>' : '');
+  else h += '<p class="mut sm" style="margin:0" data-e5="bp-empty">Brak pomiarów. Wpisz wynik z własnego ciśnieniomierza – zobaczysz historię i wykres.</p>';
+  h += '<div class="g3" style="gap:8px"><label class="xs mut">Skurczowe<input class="inp num" id="bpSys" type="text" inputmode="numeric" data-keep="1" placeholder="120" aria-label="Ciśnienie skurczowe, mmHg"></label><label class="xs mut">Rozkurczowe<input class="inp num" id="bpDia" type="text" inputmode="numeric" data-keep="1" placeholder="80" aria-label="Ciśnienie rozkurczowe, mmHg"></label><label class="xs mut">Tętno<input class="inp num" id="bpPulse" type="text" inputmode="numeric" data-keep="1" placeholder="opcj." aria-label="Tętno, uderzeń na minutę, opcjonalnie"></label></div>' +
+    '<label class="xs mut">Godzina pomiaru<input class="inp num" id="bpTime" type="time" lang="pl" data-keep="1" value="' + tm + '" aria-label="Godzina pomiaru"></label><p class="err" id="bpErr" hidden></p><button class="btn pri full" data-act="bpSave">Zapisz pomiar</button>';
+  if (bps.length >= 2) {
+    var lo = Math.floor(Math.min.apply(null, bps.map(function (e) { return e.dia; })) / 10) * 10 - 10, hi = Math.ceil(Math.max.apply(null, bps.map(function (e) { return e.sys; })) / 10) * 10 + 10;
+    h += chart({ n: bps.length, ymin: lo, ymax: hi, ticks: [lo, Math.round((lo + hi) / 20) * 10, hi], label: 'Ciśnienie krwi, ostatnie pomiary', lines: [{ pts: bps.map(function (e, k) { return { i: k, v: e.sys }; }), color: '#FF7A59', w: 2, area: false, last: false }, { pts: bps.map(function (e, k) { return { i: k, v: e.dia }; }), color: '#2D9CFF', w: 2, area: false, last: false }], dots: bps.map(function (e, k) { return { i: k, v: e.sys, color: '#FF7A59' }; }).concat(bps.map(function (e, k) { return { i: k, v: e.dia, color: '#2D9CFF' }; })), xl: [{ i: 0, t: ddmm(bps[0].date), a: 'start' }, { i: bps.length - 1, t: ddmm(bps[bps.length - 1].date), a: 'end' }] }) + '<div class="row xs mut" style="gap:12px"><span style="color:#FF7A59">● skurczowe</span><span style="color:#2D9CFF">● rozkurczowe</span></div>';
+  }
+  if (S.e5.bp.length) h += '<div class="col" style="gap:0" data-e5="bp-history">' + S.e5.bp.slice(-6).reverse().map(bpRowHtml).join('') + '</div>';
+  h += '</div>';
+  // glucose
+  var gl = S.e5.glu.slice(-14), lastG = S.e5.glu[S.e5.glu.length - 1], gcat = lastG ? E5.glucoseCategory(lastG.mgdl, lastG.ctx) : null;
+  h += '<div class="card fu" data-e5="glu-card"><p class="lbl">Cukier (glukoza)</p>' + e5Note('glu');
+  if (lastG) h += '<div class="row" style="gap:10px;align-items:baseline;flex-wrap:wrap"><span class="n" style="font-size:36px;line-height:1.05" data-e5="glu-last">' + lastG.mgdl + '</span><span class="xs sub">mg/dL · ' + pl1m(E5.mgdlToMmol(lastG.mgdl)) + ' mmol/L</span>' + pill(gcat.tone, gcat.label) + '</div><span class="xs mut">wpis ręczny · ' + E5.GLU_CTX[lastG.ctx] + ' · ' + ddmm(lastG.date) + ' ' + esc(lastG.time) + '</span>' + (gcat.advice ? '<p class="sm" style="margin:0;color:#FFE2B8">' + esc(gcat.advice) + '</p>' : '');
+  else h += '<p class="mut sm" style="margin:0" data-e5="glu-empty">Brak pomiarów. Wpisz wynik z glukometru (mg/dL) i wybierz, czy był na czczo, czy po posiłku.</p>';
+  h += '<div class="row" style="gap:8px;align-items:flex-end"><label class="grow xs mut">Wynik (mg/dL)<input class="inp num" id="gluVal" type="text" inputmode="numeric" data-keep="1" placeholder="95" aria-label="Glukoza, mg/dL"></label><label class="grow xs mut">Godzina<input class="inp num" id="gluTime" type="time" lang="pl" data-keep="1" value="' + tm + '" aria-label="Godzina pomiaru glukozy"></label></div>' +
+    '<div class="chips" role="radiogroup" aria-label="Kiedy był pomiar">' + [['fasting', 'Na czczo'], ['after', 'Po posiłku']].map(function (x) { var on = S.gluCtx === x[0]; return '<button class="chip' + (on ? ' on' : '') + '" role="radio" aria-checked="' + on + '" data-act="gluCtx" data-v="' + x[0] + '">' + x[1] + '</button>'; }).join('') + '</div>' +
+    '<p class="err" id="gluErr" hidden></p><button class="btn pri full" data-act="gluSave">Zapisz pomiar</button>';
+  if (gl.length >= 2) {
+    var glo = Math.floor(Math.min.apply(null, gl.map(function (e) { return e.mgdl; })) / 10) * 10 - 10, ghi = Math.ceil(Math.max.apply(null, gl.map(function (e) { return e.mgdl; })) / 10) * 10 + 10;
+    h += chart({ n: gl.length, ymin: glo, ymax: ghi, ticks: [glo, Math.round((glo + ghi) / 20) * 10, ghi], label: 'Glukoza, ostatnie pomiary', lines: [{ pts: gl.map(function (e, k) { return { i: k, v: e.mgdl }; }), color: '#E07BF0', w: 2, area: false }], dots: gl.map(function (e, k) { return { i: k, v: e.mgdl, color: e.ctx === 'after' ? '#F2A93B' : '#E07BF0' }; }), xl: [{ i: 0, t: ddmm(gl[0].date), a: 'start' }, { i: gl.length - 1, t: ddmm(gl[gl.length - 1].date), a: 'end' }] }) + '<div class="row xs mut" style="gap:12px"><span style="color:#E07BF0">● na czczo</span><span style="color:#F2A93B">● po posiłku</span></div>';
+  }
+  if (S.e5.glu.length) h += '<div class="col" style="gap:0" data-e5="glu-history">' + S.e5.glu.slice(-6).reverse().map(gluRowHtml).join('') + '</div>';
+  h += '</div>';
+  h += '<div class="card fu" data-e5="hc-card">' + hcHeartNote() + '</div>';
+  h += '<div class="card fu" data-e5="disclaimer" style="flex-direction:row;gap:12px;align-items:flex-start"><span style="color:#2CE8B5;flex:none;margin-top:2px">' + ico('info', 22) + '</span><p class="sm sub" style="margin:0;line-height:1.45"><b style="color:#fff">To nie jest diagnoza.</b> Forma nie mierzy ciśnienia ani cukru – wpisujesz je ręcznie z własnego ciśnieniomierza lub glukometru. O wynikach rozmawiaj z lekarzem.</p></div>';
+  return h + '</div>';
+}
+function hrrLatest() { var l = E5.hrrList(S.e5.hrr, 1); return l[0] || null; }
+ROUTES.serce = { tab: null, depth: 1, parent: 'profil', render: rSerce, mount: renderBattery };
+function e5ShowErr(id, t) { var e = $(id); if (e) { e.textContent = t; e.hidden = !t; } }
+ACT_E5.bpSave = function () {
+  var r = bpAdd({ sys: $('bpSys').value, dia: $('bpDia').value, pulse: $('bpPulse').value, time: $('bpTime').value });
+  if (!r.ok) return e5ShowErr('bpErr', r.error);
+  ['bpSys', 'bpDia', 'bpPulse', 'bpTime'].forEach(clearDraft);
+  var e = r.entry; markSaved('bp', 'Zapisano pomiar: ' + e.sys + '/' + e.dia + ' mmHg' + (e5HcState() === 'on' ? ' (zapisujemy też w Health Connect)' : ''), 6000); buzz(30); UI.onData();
+};
+ACT_E5.bpDel = function (el) { var id = el.dataset.id; S.e5.bp = S.e5.bp.filter(function (e) { return e.id !== id; }); e5Save(); markSaved('bp', 'Usunięto pomiar.', 5000); UI.onData(); };
+ACT_E5.gluCtx = function (el) { S.gluCtx = el.dataset.v; $$('[data-act="gluCtx"]').forEach(function (b) { var on = b.dataset.v === S.gluCtx; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); }); };
+ACT_E5.gluSave = function () {
+  var r = gluAdd({ mgdl: $('gluVal').value, ctx: S.gluCtx, time: $('gluTime').value });
+  if (!r.ok) return e5ShowErr('gluErr', r.error);
+  ['gluVal', 'gluTime'].forEach(clearDraft);
+  var e = r.entry; markSaved('glu', 'Zapisano pomiar: ' + e.mgdl + ' mg/dL, ' + E5.GLU_CTX[e.ctx] + (e5HcState() === 'on' ? ' (zapisujemy też w Health Connect)' : ''), 6000); buzz(30); UI.onData();
+};
+ACT_E5.gluDel = function (el) { var id = el.dataset.id; S.e5.glu = S.e5.glu.filter(function (e) { return e.id !== id; }); e5Save(); markSaved('glu', 'Usunięto pomiar.', 5000); UI.onData(); };
+ACT_E5.hhPerm = function () { hcConnect(); };
+
+// ====================== RAPORT TYGODNIA ======================
+function repKpi(label, valHtml, deltaHtml) { return '<div class="stat"><div class="k">' + label + '</div><div class="v n" style="font-size:22px;line-height:1.2">' + valHtml + '</div>' + (deltaHtml ? '<div>' + deltaHtml + ' <span class="xs mut">vs poprz.</span></div>' : '') + '</div>'; }
+function dlt(v, d, unit, goodUp) {
+  if (v == null || !isFinite(v) || Math.abs(v) < Math.pow(10, -d) / 2) return '';
+  var good = goodUp == null ? null : (goodUp ? v > 0 : v < 0), col = good == null ? '#9AA6B0' : (good ? '#2EE86B' : '#F2A93B');
+  return '<span class="xs" style="color:' + col + ';font-weight:600;font-family:var(--fb)">' + (v > 0 ? '+' : '−') + nf(Math.abs(v), d) + (unit || '') + '</span>';
+}
+function sleepWeekChart(cur) {
+  var need = cur.needH != null ? cur.needH : S.e5.goals.sleepH, vals = cur.rows.map(function (r) { return r.sleepH; }), mx = Math.max(9, Math.ceil(Math.max.apply(null, vals.filter(function (x) { return x != null; }).concat([need])) + 0.5));
+  return chart({ n: 7, ymin: 0, ymax: mx, ticks: [0, 4, 8].filter(function (t) { return t <= mx; }), label: 'Sen w każdym dniu tygodnia, godziny; linia przerywana to potrzeba snu',
+    bars: cur.rows.map(function (r, i) { return r.sleepH != null ? { i: i, v: r.sleepH, color: '#E07BF0' } : null; }).filter(Boolean),
+    lines: [{ pts: [{ i: 0, v: need }, { i: 6, v: need }], color: '#2CE8B5', dash: true, w: 1.5 }], dots: [],
+    xl: cur.rows.map(function (r, i) { return { i: i, t: WD1S[r.dow], b: false }; }) });
+}
+function rRaport() {
+  var start = e5ReportStart(), rep = e5Report(start), c = rep.cur, cmp = rep.cmp, g = S.e5.goals, off = S.raportOff || 0;
+  var h = header('Raport tygodnia', { back: 'podsumowanie' }) + '<div class="body" data-e5="report">';
+  h += '<div class="row sp no-print" role="group" aria-label="Wybór tygodnia"><button class="ib" data-act="repPrev" aria-label="Poprzedni tydzień"' + (off <= -11 ? ' disabled' : '') + '>' + ico('back', 22) + '</button><span class="n" style="font-size:17px" data-e5="week-range" aria-live="polite">' + esc(wkRange(start)) + (off >= 1 ? ' (w toku)' : '') + '</span><button class="ib" data-act="repNext" aria-label="Następny tydzień"' + (off >= 1 ? ' disabled' : '') + '>' + ico('chev', 22) + '</button></div>';
+  h += '<p class="print-only" style="margin:0">Forma · raport tygodnia ' + esc(wkRange(start)) + '</p>';
+  if (!rep.hasData) return h + e5Empty('Brak danych z tego tygodnia', 'Raport zbudujemy z porannych pomiarów, snu i treningów. Wykonaj kilka pomiarów w ciągu tygodnia, a pokażemy średnie, sen i regenerację dzień po dniu oraz jedną rekomendację.', '<a class="btn sm" href="#/dzis">Do ekranu Dziś</a>', 'chart') + '</div>';
+  var nodata = '<span class="mut">—</span>';
+  h += '<div class="g2" data-e5="report-kpis">' +
+    repKpi('HRV', c.hrv != null ? nf(c.hrv, 0) + ' <span class="xs sub">ms</span>' : nodata, cmp ? dlt(cmp.hrvPct, 0, '%', true) : '') +
+    repKpi('Tętno spocz.', c.rhr != null ? nf(c.rhr, 0) : nodata, cmp ? dlt(cmp.rhr, 0, '', false) : '') +
+    repKpi('Sen śr.', c.sleepH != null ? FC.fmtDur(c.sleepH) : nodata, cmp && cmp.sleepMin != null && Math.abs(cmp.sleepMin) >= 1 ? '<span class="xs" style="color:' + (cmp.sleepMin > 0 ? '#2EE86B' : '#F2A93B') + ';font-weight:600;font-family:var(--fb)">' + (cmp.sleepMin > 0 ? '+' : '−') + Math.abs(cmp.sleepMin) + ' min</span>' : '') +
+    repKpi('Regularność snu', c.reg != null ? Math.round(c.reg) + '<span class="xs sub">%</span>' : nodata, cmp ? dlt(cmp.regPts, 0, ' pkt', true) : '') +
+    repKpi('Siłownia', c.gym + '/' + g.gym, cmp ? dlt(cmp.gym, 0, '', true) : '') +
+    repKpi('Kroki śr.', c.nSteps ? nfi(c.steps) : nodata, cmp ? dlt(cmp.stepsPct, 0, '%', true) : '') + '</div>';
+  h += '<div class="card" style="padding:10px 16px"><div class="row sp"><span class="sm sub">Sauna</span><span class="n" style="font-size:20px">' + c.sauna + '×</span></div></div>';
+  if (!cmp) h += '<p class="xs mut" style="margin:0" data-e5="no-prev">Brak poprzedniego tygodnia do porównania.</p>';
+  h += '<div class="card" data-e5="report-sleep">' + e5Title('moon', '#E07BF0', 'Sen w tygodniu') + (c.rows.some(function (r) { return r.sleepH != null; }) ? sleepWeekChart(c) + '<div class="row xs mut" style="gap:6px"><span style="color:#2CE8B5;font-weight:700;letter-spacing:2px">- - -</span>potrzeba ' + (c.needH != null ? FC.fmtDur(c.needH) : FC.fmtDur(g.sleepH)) + '</div>' : '<p class="mut sm" style="margin:0">Brak godzin snu w tym tygodniu. Wpisuj je w porannym pomiarze albo zbieraj noc z opaską.</p>') + '</div>';
+  h += '<div class="card" data-e5="report-regen">' + e5Title('pulse', '#2EE86B', 'Regeneracja dzień po dniu') + '<div class="row" style="justify-content:space-between;gap:2px">' + c.rows.map(function (r) {
+    var col = r.color ? COL[r.color] : '#566067';
+    return '<div class="col" style="align-items:center;gap:2px;min-width:0">' + ringHtml(40, 5, r.readiness != null ? r.readiness / 100 : 0, r.color ? COL[r.color] : '#9AA6B0', '<span class="n" style="font-size:12px;line-height:1">' + (r.readiness != null ? r.readiness : '–') + '</span>') + '<span class="xs mut">' + WD1S[r.dow] + '</span></div>';
+  }).join('') + '</div>' + (c.rows.some(function (r) { return r.readiness != null; }) ? '' : '<p class="xs mut" style="margin:0">Wynik regeneracji pojawia się po zebraniu normy z 5 poranków.</p>') + '</div>';
+  h += '<div class="g2" data-e5="report-bw">';
+  if (rep.best && rep.worst) {
+    h += '<div class="card" style="gap:4px"><span class="lbl" style="font-size:12px;color:#2CE8B5">Najlepszy dzień</span><span class="n" style="font-size:20px;line-height:1.15">' + esc(E5.DOW_CAP[E5.dowIdx(rep.best.date)]) + ' · ' + rep.best.value + rep.best.unit + '</span><span class="xs sub" style="line-height:1.35">' + esc(rep.best.text) + '</span></div>' +
+      '<div class="card" style="gap:4px"><span class="lbl" style="font-size:12px;color:#F2A93B">Najgorszy dzień</span><span class="n" style="font-size:20px;line-height:1.15">' + esc(E5.DOW_CAP[E5.dowIdx(rep.worst.date)]) + ' · ' + rep.worst.value + rep.worst.unit + '</span><span class="xs sub" style="line-height:1.35">' + esc(rep.worst.text) + '</span></div>';
+  } else h += '<div class="card" style="grid-column:1/-1"><p class="mut sm" style="margin:0" data-e5="bw-empty">Najlepszy i najgorszy dzień wskażemy, gdy w tygodniu będą co najmniej 3 dni z pomiarem.</p></div>';
+  h += '</div>';
+  if (rep.reco) h += '<div class="card" data-e5="report-reco">' + e5Title('spark', '#2CE8B5', 'Rekomendacja na następny tydzień') + '<span class="n" style="font-size:19px;line-height:1.2">' + esc(rep.reco.title) + '</span><p class="sub sm" style="margin:0;line-height:1.45">' + esc(rep.reco.why) + '</p></div>';
+  h += '<div class="no-print col" style="gap:6px">' + e5Note('print') + '<button class="btn pri full" data-act="repPrint">' + ico('print', 20) + ' Eksportuj PDF</button><p class="xs mut" style="margin:0;text-align:center">Otworzy się okno drukowania – wybierz „Zapisz jako PDF”.</p></div>';
+  h += '<p class="print-only" style="margin:0;font-size:11px">To nie jest diagnoza medyczna. Dane z aplikacji Forma.</p>';
+  return h + '</div>';
+}
+ROUTES.raport = { tab: 'dzis', depth: 2, parent: 'podsumowanie', render: rRaport, mount: renderBattery };
+ACT_E5.repPrev = function () { S.raportOff = Math.max(-11, (S.raportOff || 0) - 1); rerender(); };
+ACT_E5.repNext = function () { S.raportOff = Math.min(1, (S.raportOff || 0) + 1); rerender(); };
+ACT_E5.repPrint = function () { e5PrintReport(); };
+
+// ====================== MAKRO ======================
+function mkDate() { var t = todayStr(), d = S.macroDate; return d && C.dayNum(d) <= C.dayNum(t) && C.dayNum(d) >= C.dayNum(t) - 60 ? d : t; }
+function macroRing(label, g, share, color) {
+  return '<div class="col" style="align-items:center;gap:4px;min-width:0">' + ringHtml(86, 9, share || 0, color, '<span class="col" style="align-items:center;gap:0"><span class="n" style="font-size:20px;line-height:1">' + (g != null ? nf(g, 0) : '—') + '</span><span class="xs mut" style="line-height:1">g</span></span>') + '<span class="xs sub">' + label + '</span><span class="xs mut">' + (share != null ? Math.round(share * 100) + '% energii' : '') + '</span></div>';
+}
+function rMakro() {
+  var date = mkDate(), today = todayStr(), isToday = date === today, m = S.e5.macros[date] || null, sh = E5.macroShare(m);
+  var h = header('Makro', { back: 'profil' }) + '<div class="body">';
+  h += '<div class="row sp fu" role="group" aria-label="Wybór dnia"><button class="ib" data-act="mkPrev" aria-label="Poprzedni dzień"' + (C.dayNum(date) <= C.dayNum(today) - 60 ? ' disabled' : '') + '>' + ico('back', 22) + '</button><button class="chip n" data-act="mkToday" style="min-width:150px;font-size:16px" aria-label="Wybrany dzień: ' + esc(dayWord(date) + ' ' + dayFull(date)) + '">' + esc(dayWord(date)) + ' · ' + esc(dayFull(date)) + '</button><button class="ib" data-act="mkNext" aria-label="Następny dzień"' + (isToday ? ' disabled' : '') + '>' + ico('chev', 22) + '</button></div>';
+  var dr = S.drafts.makro || {}, val = function (id, k) { return dr[id] != null ? dr[id] : (m && m[k] != null ? String(m[k]).replace('.', ',') : ''); };
+  h += '<div class="card fu" data-e5="macro-form"><p class="lbl">Wpis ręczny</p>' + e5Note('macro') +
+    [['mkKcal', 'kcal', 'Kalorie (kcal)', 'np. 650'], ['mkP', 'p', 'Białko (g)', 'np. 40'], ['mkC', 'c', 'Węglowodany (g)', 'np. 70'], ['mkF', 'f', 'Tłuszcze (g)', 'np. 20']].map(function (x) {
+      return '<label class="xs mut">' + x[2] + '<input class="inp" id="' + x[0] + '" type="text" inputmode="decimal" data-keep="1" placeholder="' + x[3] + '" value="' + esc(val(x[0], x[1])) + '" aria-label="' + x[2] + '"></label>';
+    }).join('') + '<p class="err" id="mkErr" hidden></p><div class="row"><button class="btn pri grow" data-act="mkSave">Zapisz</button>' + (m ? '<button class="btn grow danger" data-act="mkDel" data-confirm="Usuń wpis">Usuń wpis</button>' : '') + '</div>' +
+    '<p class="xs mut" style="margin:0">Wystarczy jedna wartość. Gdy wpiszesz same makroskładniki bez kalorii, policzymy kalorie sami (4 · białko + 4 · węglowodany + 9 · tłuszcze).</p></div>';
+  h += '<div class="card fu" data-e5="macro-day"><p class="lbl">' + (isToday ? 'Dziś' : esc(dayFull(date))) + '</p>';
+  if (!m) h += '<p class="mut sm" style="margin:0" data-e5="macro-empty">Brak wpisu z tego dnia. Makro jest opcjonalne – nie ma bazy produktów, wpisujesz sumy dnia.</p>';
+  else {
+    h += '<div class="g3" style="gap:6px">' + macroRing('Białko', m.p, sh ? sh.p : null, '#C08BFF') + macroRing('Węglowodany', m.c, sh ? sh.c : null, '#4C9EFF') + macroRing('Tłuszcze', m.f, sh ? sh.f : null, '#FF9A59') + '</div>';
+    var kd = kcalDay(date), cal = e5Cal(), burn = kd.ok ? Math.round(kd.total * (cal.ok ? cal.factor : 1)) : null;
+    h += '<p class="sm sub" style="margin:0;text-align:center" data-e5="macro-sum">Zjedzone <b style="color:#fff">' + (m.kcal != null ? nfi(m.kcal) + ' kcal' + (m.derived ? ' (z makro)' : '') : '—') + '</b>' + (burn != null ? ' · spalone ok. <b style="color:#fff">' + nfi(burn) + ' kcal</b> (szacunek ±20%)' : ' · spalone: uzupełnij profil, żeby policzyć') + '</p>';
+  }
+  h += '</div>';
+  // calibration
+  var cal2 = e5Cal(), st = cal2.stab, mi = st && st.ok ? E5.intakeFromMacros(S.e5.macros, st.from, st.to, 7) : null, all = Object.keys(S.e5.macros).filter(function (d) { return S.e5.macros[d].kcal > 0; }).length;
+  h += '<div class="card fu" data-e5="macro-calib"><p class="lbl">Kalibracja kalorii</p>' +
+    (cal2.ok && cal2.intakeSrc === 'makro' ? '<p class="sm" style="margin:0;color:#2CE8B5">' + ico('check', 14) + ' Szacunek kalorii korzysta z Twoich wpisów (średnio ' + nfi(cal2.intake) + ' kcal z ' + cal2.intakeN + ' dni). Współczynnik ×' + nf(cal2.factor, 2) + '.</p>' :
+      '<p class="sub sm" style="margin:0">Wpisane kalorie z co najmniej 7 dni w okresie stabilnej wagi (min. 21 dni) kalibrują szacunek spalanych kalorii – zamiast „typowego spożycia” z Profilu.</p><p class="xs mut" style="margin:0" data-e5="calib-why">' +
+      (st && st.ok ? 'W okresie stabilnej wagi (' + ddmm(st.from) + '–' + ddmm(st.to) + ') masz ' + (mi ? mi.n : 0) + ' z 7 wymaganych dni z kaloriami.' : 'Masz ' + all + ' dni z kaloriami. ' + (st ? esc(st.reason) : '')) + '</p>') + '<a href="#/kalorie" class="row" style="color:#2CE8B5;font-weight:600;min-height:44px;gap:4px">Zobacz ekran Kalorie ' + ico('chev', 16) + '</a></div>';
+  var hist = Object.keys(S.e5.macros).sort().reverse().slice(0, 7);
+  if (hist.length) h += '<div class="card fu" data-e5="macro-hist"><p class="lbl">Ostatnie wpisy</p>' + hist.map(function (d, k) { var e = S.e5.macros[d]; return '<button class="row sp" data-act="mkPick" data-d="' + d + '" style="min-height:44px;border:0;border-top:' + (k ? '1px solid rgba(255,255,255,.08)' : '0') + ';background:transparent;color:inherit;text-align:left;padding:0;cursor:pointer"><span class="sm">' + ddmm(d) + ' · ' + esc(dayWord(d)) + '</span><span class="xs sub">' + (e.kcal != null ? nfi(e.kcal) + ' kcal' : '') + (e.p != null ? ' · B ' + nf(e.p, 0) : '') + (e.c != null ? ' · W ' + nf(e.c, 0) : '') + (e.f != null ? ' · T ' + nf(e.f, 0) : '') + '</span></button>'; }).join('') + '</div>';
+  h += '<p class="xs mut fu" style="margin:0">Wpis jest opcjonalny. Służy też do kalibracji szacunku kalorii.</p>';
+  return h + '</div>';
+}
+ROUTES.makro = { tab: null, depth: 1, parent: 'profil', render: rMakro, mount: renderBattery, init: function () { S.macroDate = null; } };
+ACT_E5.mkPrev = function () { S.macroDate = C.addDays(mkDate(), -1); S.drafts.makro = {}; rerender(); };
+ACT_E5.mkNext = function () { var d = mkDate(); if (d < todayStr()) S.macroDate = C.addDays(d, 1); S.drafts.makro = {}; rerender(); };
+ACT_E5.mkToday = function () { S.macroDate = null; S.drafts.makro = {}; rerender(); };
+ACT_E5.mkPick = function (el) { S.macroDate = el.dataset.d; S.drafts.makro = {}; rerender(); };
+ACT_E5.mkSave = function () {
+  var r = E5.validateMacros({ kcal: $('mkKcal').value, p: $('mkP').value, c: $('mkC').value, f: $('mkF').value });
+  if (!r.ok) return e5ShowErr('mkErr', r.error);
+  var date = mkDate(); S.drafts.makro = {}; macroSet(date, r.value);
+  markSaved('macro', 'Zapisano wpis z ' + (date === todayStr() ? 'dziś' : dayFull(date)) + ': ' + nfi(r.value.kcal) + ' kcal' + (r.value.derived ? ' (policzone z makro)' : ''), 6000); buzz(30);
+};
+ACT_E5.mkDel = function () { var date = mkDate(); S.drafts.makro = {}; macroDel(date); markSaved('macro', 'Usunięto wpis z ' + (date === todayStr() ? 'dziś' : dayFull(date)) + '.', 6000); };
+
+// ====================== Profil: shortcuts ======================
+function e5ProfilLinksHtml() {
+  var L = [['odznaki', 'award', '#F7D23E', 'Odznaki i wyzwania'], ['cele', 'target', '#2CE8B5', 'Cele'], ['urzadzenia', 'watch', '#2D9CFF', 'Urządzenia'], ['serce', 'heart', '#FF7A59', 'Zdrowie serca'], ['makro', 'fork', '#F2A93B', 'Makro (opcjonalnie)'], ['raport', 'report', '#E07BF0', 'Raport tygodnia']];
+  return '<div class="card" data-e5="profil-links" style="gap:0;padding-top:4px;padding-bottom:4px"><p class="lbl" style="padding:8px 0 2px">Skróty</p>' + L.map(function (x, k) { return '<a href="#/' + x[0] + '" class="row sp" style="min-height:52px;color:inherit;border-top:' + (k ? '1px solid rgba(255,255,255,.08)' : '0') + '" data-e5="plink-' + x[0] + '"><span class="row" style="gap:12px"><span style="color:' + x[2] + '">' + ico(x[1], 22) + '</span><span class="sm" style="font-weight:500">' + x[3] + '</span></span>' + ico('chev', 18) + '</a>'; }).join('') + '</div>';
+}
 
 /* ===== Forma 0.2 - UI part B: Regeneracja, Sen, Trening, sesje, Forma, Trendy, Profil, Diagnostyka, events, init ===== */
 function weekdayShort(date) { return WD1[dowIdx(date)]; }
@@ -7132,6 +8460,7 @@ function rProfil() {
   var h = header('Profil', { back: 'dzis' }) + '<div class="body">';
   if (S.storageBroken) h += '<p class="note">Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie</p>';
   if (DEMO) h += '<p class="note">Tryb demo: dane syntetyczne, tylko w pamięci. Nic nie jest zapisywane w przeglądarce. Aby wyjść, otwórz plik bez „?demo=1”.</p>';
+  h += e5ProfilLinksHtml();
   h += '<div class="card"><p class="lbl">Twoje dane</p>' +
     '<label class="row sp sm sub">Wiek<input class="inp num" style="width:110px" id="pfAge" data-in="pf" type="number" inputmode="numeric" min="10" max="100" data-keep="1" value="' + esc(pv.age) + '"></label>' +
     '<div class="row sp sm sub"><span>Płeć</span><span class="chips" role="radiogroup" aria-label="Płeć"><button class="chip' + (S.pfSex === 'm' ? ' on' : '') + '" data-act="pfSex" data-v="m" role="radio" aria-checked="' + (S.pfSex === 'm') + '">Mężczyzna</button><button class="chip' + (S.pfSex === 'k' ? ' on' : '') + '" data-act="pfSex" data-v="k" role="radio" aria-checked="' + (S.pfSex === 'k') + '">Kobieta</button></span></div>' +
@@ -7365,7 +8694,7 @@ document.addEventListener('click', function (e) {
     delete el.dataset.armed;
   }
   buzz(10);
-  var fn = ACT[el.dataset.act] || ACT_BAT[el.dataset.act] || ACT_E4[el.dataset.act] || ACT_HC[el.dataset.act]; if (fn) fn(el, e);
+  var fn = ACT[el.dataset.act] || ACT_BAT[el.dataset.act] || ACT_E4[el.dataset.act] || ACT_HC[el.dataset.act] || ACT_E5[el.dataset.act]; if (fn) fn(el, e);
 });
 $('stack').addEventListener('input', function (e) {
   var el = e.target, k = el.dataset && el.dataset.in;
@@ -7410,7 +8739,7 @@ setInterval(function () {
   var t = pageTop(); if (t && ROUTES[t.path].tick) ROUTES[t.path].tick(t.el);
 }, 250);
 setInterval(renderBattery, 3000);
-storageProbe(); loadAll(); e4Init(); loadBattery(); whoopInit(); hcInit();
+storageProbe(); loadAll(); e4Init(); loadBattery(); whoopInit(); hcInit(); e5Init();
 log('Gotowe. Forma 0.2.');
 if (DEMO) startDemo();
 else if (window.top !== window.self) { showError(IFRAME_MSG); }
@@ -7425,7 +8754,7 @@ whoopMaybeSync();
 e4Start();
 hcStart();
 
-function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-26 18:41 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
+function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-26 20:01 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
 
 })();</script>
 </body>
