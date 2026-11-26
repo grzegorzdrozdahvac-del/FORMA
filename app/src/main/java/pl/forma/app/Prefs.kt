@@ -101,4 +101,18 @@ object Prefs {
     fun setWorkoutRunning(ctx: Context, running: Boolean) {
         sp(ctx).edit().putBoolean("workout_running", running).putLong("workout_running_at", System.currentTimeMillis()).apply()
     }
+
+    // ---------- pending tip reminder (re-armed after a reboot / app update) ----------
+    fun reminderAt(ctx: Context): Long = sp(ctx).getLong("reminder_at", 0L)
+    fun reminderTitle(ctx: Context): String = sp(ctx).getString("reminder_title", "Forma") ?: "Forma"
+    fun reminderText(ctx: Context): String = sp(ctx).getString("reminder_text", "") ?: ""
+    fun reminderRoute(ctx: Context): String = sp(ctx).getString("reminder_route", "#/dzis") ?: "#/dzis"
+
+    fun setReminder(ctx: Context, at: Long, title: String, text: String, route: String) {
+        sp(ctx).edit().putLong("reminder_at", at).putString("reminder_title", title).putString("reminder_text", text).putString("reminder_route", route).apply()
+    }
+
+    fun clearReminder(ctx: Context) {
+        sp(ctx).edit().remove("reminder_at").apply()
+    }
 }

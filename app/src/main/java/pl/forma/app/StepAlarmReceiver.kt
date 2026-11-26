@@ -10,7 +10,7 @@ import java.util.Calendar
 
 /**
  * Hourly step tick (AlarmManager.setAndAllowWhileIdle, inexact on purpose: no exact-alarm permission) plus the nudge actions.
- * There is no boot receiver: after a reboot the alarm chain restarts when the app is opened (MainActivity.onStart).
+ * After a reboot or an app update BootReceiver calls applySettings; MainActivity.onStart does the same when the app is opened.
  */
 class StepAlarmReceiver : BroadcastReceiver() {
     companion object {

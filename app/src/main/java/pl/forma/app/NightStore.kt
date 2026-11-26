@@ -137,7 +137,7 @@ object NightStore {
     }
 
     /** Closes a night file that was left open (process killed) and posts the morning notification. */
-    fun finalizeOrphan(ctx: Context) {
+    fun finalizeOrphan(ctx: Context, interrupted: Boolean = false) {
         if (!Prefs.nightRunning(ctx)) return
         val id = Prefs.nightId(ctx)
         if (id != null && validId(id)) {
@@ -151,7 +151,11 @@ object NightStore {
         }
         Prefs.clearNight(ctx)
         WakeAlarm.cancel(ctx)
-        Notifications.postResult(ctx)
+        if (interrupted) {
+            Notifications.post(ctx, Notifications.RESULT_ID, "Forma", "Pomiar nocy przerwany przez restart telefonu", "#/dzis")
+        } else {
+            Notifications.postResult(ctx)
+        }
         BleManager.notifyNight("stopped", id)
     }
 }

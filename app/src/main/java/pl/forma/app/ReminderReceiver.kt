@@ -26,8 +26,7 @@ class ReminderReceiver : BroadcastReceiver() {
         fun schedule(ctx: Context, hhmm: String, title: String, text: String, route: String): Boolean {
             val now = System.currentTimeMillis()
             val at = WakeAlarm.nextWakeMillis(hhmm, now)
-            val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi(ctx, title, text, route))
+            scheduleAt(ctx, at, title, text, route)
             val a = java.util.Calendar.getInstance()
             a.timeInMillis = at
             val n = java.util.Calendar.getInstance()
@@ -35,9 +34,32 @@ class ReminderReceiver : BroadcastReceiver() {
             return Nudge.dayKey(a) != Nudge.dayKey(n)
         }
 
+        /** Arms the alarm for an absolute time and remembers it in Prefs, so BootReceiver can re-arm it after a reboot. */
+        fun scheduleAt(ctx: Context, at: Long, title: String, text: String, route: String) {
+            Prefs.setReminder(ctx, at, title, text, route)
+            val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi(ctx, title, text, route))
+        }
+
         fun cancel(ctx: Context) {
+            Prefs.clearReminder(ctx)
             val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
             am.cancel(pi(ctx, "", "", "#/dzis"))
+        }
+
+        /** After a reboot / app update: a reminder that is still in the future is armed again; one that came due while the phone was off is shown now. */
+        fun rearm(ctx: Context) {
+            val at = Prefs.reminderAt(ctx)
+            if (at <= 0L) return
+            val title = Prefs.reminderTitle(ctx)
+            val text = Prefs.reminderText(ctx)
+            val route = Prefs.reminderRoute(ctx)
+            if (at > System.currentTimeMillis()) {
+                scheduleAt(ctx, at, title, text, route)
+            } else {
+                Prefs.clearReminder(ctx)
+                Notifications.post(ctx, Notifications.REMINDER_ID, title, text, route)
+            }
         }
     }
 
@@ -46,6 +68,7 @@ class ReminderReceiver : BroadcastReceiver() {
         val title: String = i.getStringExtra(X_TITLE) ?: "Forma"
         val text: String = i.getStringExtra(X_TEXT) ?: ""
         val route: String = i.getStringExtra(X_ROUTE) ?: "#/dzis"
+        Prefs.clearReminder(context.applicationContext)
         Notifications.post(context.applicationContext, Notifications.REMINDER_ID, title, text, route)
     }
 }

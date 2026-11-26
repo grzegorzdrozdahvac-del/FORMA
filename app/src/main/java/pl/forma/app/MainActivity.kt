@@ -95,7 +95,9 @@ class MainActivity : AppCompatActivity() {
         webView.setBackgroundColor(Color.parseColor("#0B0E11"))
         webView.alpha = 0f // hidden until the page has loaded, then faded in (no white or half-drawn flash)
         webView.overScrollMode = View.OVER_SCROLL_NEVER
-        webView.isVerticalScrollBarEnabled = false
+        webView.isVerticalScrollBarEnabled = true
+        webView.isScrollbarFadingEnabled = false
+        webView.scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
         webView.isHorizontalScrollBarEnabled = false
         webView.isHapticFeedbackEnabled = false
         // no long-press context menu on plain content; text fields keep the default behaviour (select / paste)
