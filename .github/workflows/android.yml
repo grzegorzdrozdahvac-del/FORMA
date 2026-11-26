@@ -21,11 +21,24 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      - name: Stamp build number into the app
+        run: sed -i "s/__APK_BUILD__/${{ github.run_number }}/g" app/src/main/assets/www/index.html
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Name the APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk forma-${{ github.run_number }}.apk
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk forma-${{ github.run_number }}.apk
+          cp app/build/outputs/apk/debug/app-debug.apk forma.apk
+
+      - name: Remove old APKs from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for a in $(gh release view android-latest --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null); do
+            gh release delete-asset android-latest "$a" --repo "$GITHUB_REPOSITORY" -y || true
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -39,4 +52,6 @@ jobs:
           name: Forma (Android) – najnowsza wersja
           prerelease: true
           overwrite_files: true
-          files: forma-${{ github.run_number }}.apk
+          files: |
+            forma.apk
+            forma-${{ github.run_number }}.apk
