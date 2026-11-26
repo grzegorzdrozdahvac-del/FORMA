@@ -29,10 +29,15 @@ button,input,select{font:inherit;color:inherit}
 .screen.tr{background:radial-gradient(420px circle at 50% var(--gy),rgba(var(--glow),.10),transparent 70%),#0B0E11}
 .screen.under{pointer-events:none}
 .hd{position:absolute;top:0;left:0;right:0;z-index:5;display:flex;align-items:center;gap:8px;padding:10px 20px 6px;min-height:60px;background:rgba(11,14,17,.72);-webkit-backdrop-filter:blur(16px) saturate(140%);backdrop-filter:blur(16px) saturate(140%);border-bottom:1px solid rgba(255,255,255,.06)}
-.hd .ttl{flex:0 1 auto;margin:0;font-size:22px;line-height:1.15;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;outline:none}
+.hd .ttl{flex:1 1 auto;margin:0;font-size:22px;line-height:1.15;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;outline:none}
 .hd .grow{flex:1}
-.body{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:68px 20px calc(24px + var(--tb));display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-width:none}
-.body::-webkit-scrollbar{display:none}
+.body{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:68px 20px calc(24px + var(--tb));display:flex;flex-direction:column;gap:10px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:rgba(197,206,214,.55) transparent}
+*{scrollbar-width:thin;scrollbar-color:rgba(197,206,214,.55) transparent}
+::-webkit-scrollbar{width:6px;height:6px;background:transparent}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(197,206,214,.55);border-radius:3px;min-height:36px}
+::-webkit-scrollbar-thumb:hover{background:rgba(197,206,214,.8)}
+.body::-webkit-scrollbar{width:6px}
 .foot{position:relative;z-index:2;padding:10px 20px calc(14px + env(safe-area-inset-bottom));border-top:1px solid rgba(255,255,255,.08);background:rgba(11,14,17,.9);display:flex;flex-direction:column;gap:8px}
 .n{font-family:var(--fn);font-weight:700;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
 .lbl,.hd .ttl,.btn,.stepper,.zr .k{font-family:var(--fn)}
@@ -101,6 +106,9 @@ input[type=time].inp{font-size:15px}
 .bp.low{animation:pb 2s ease-in-out infinite}
 .bp-c{display:inline-flex;align-items:center;gap:3px;color:#2CE8B5;font-size:13px;animation:po 1.8s ease-in-out infinite;background:rgba(44,232,181,.16);border:1px solid rgba(44,232,181,.5);border-radius:999px;padding:0 7px;line-height:1.4}
 .hd:not(.full) .bp-ct{display:none}
+/* header fit: JS (fitHeaders) adds t1 / t2 when the title would be cut next to the battery pill: smaller title, compact pill (icon + %) */
+.hd.t1 .ttl{font-size:20px}.hd.t1 .bp{padding:4px 9px;gap:4px;min-height:32px;font-size:14px}.hd.t1 .bp .bp-p{font-size:14px}.hd.t1 .bp svg{width:24px;height:12px}.hd.t1 .bp-ct{display:none}.hd.t1 .bp-c{padding:0 5px}
+.hd.t2 .ttl{font-size:18px}.hd.t2 .bp{padding:3px 7px;gap:3px;min-height:30px;font-size:13px}.hd.t2 .bp .bp-p{font-size:13px}.hd.t2 .bp svg{width:20px;height:10px}.hd.t2 .bp-c .bp-ct{display:none}.hd.t2{gap:6px;padding-left:14px;padding-right:14px}
 .banner{display:flex;align-items:center;gap:8px;border-radius:14px;padding:2px 4px 2px 12px;font-size:12px;line-height:1.3;font-weight:400;border:1px solid rgba(255,77,94,.55);background:rgba(255,77,94,.14);color:#FFD6DA}
 .banner.unc{border-color:rgba(242,169,59,.55);background:rgba(242,169,59,.12);color:#FFE2B8}
 .banner .bn-link{flex:none;min-height:44px;display:inline-flex;align-items:center;padding:0 6px;color:#F2A93B;font-family:var(--fn);font-weight:600;font-size:14px}
@@ -111,6 +119,11 @@ input[type=time].inp{font-size:15px}
 .banner.chg .bn-ok{color:#7DF3D3}
 .note{border-radius:12px;padding:10px 12px;font-size:13px;border:1px solid rgba(242,169,59,.6);background:rgba(242,169,59,.12);color:#FFE2B8}
 .note.ok{border-color:rgba(44,232,181,.6);background:rgba(44,232,181,.12);color:#CFFFF0}
+.saved{display:inline-block;color:#2CE8B5;font-size:13px;font-weight:600;line-height:1.3;text-transform:none;letter-spacing:0;font-family:var(--fb,inherit)}
+.saved[hidden]{display:none}
+.saved.note{display:block;font-weight:500}
+.btn[data-state=saved]{border-color:rgba(44,232,181,.6);background:rgba(44,232,181,.14);color:#2CE8B5}
+.btn[data-state=saved] svg{vertical-align:-3px}
 .note.err{border-color:rgba(255,77,94,.6);background:rgba(255,77,94,.12);color:#FFD6DA}
 .err{color:#FF8A96;font-size:13px;margin:0}
 /* rings, bars */
@@ -2585,7 +2598,7 @@ canvas{display:block;width:100%;height:200px}
   // Keeps one tip per day: until the day's tip is marked done it follows the latest state; once done it stays. Returns the updated store (copy).
   function settleToday(store, today, tip) {
     var out = Object.assign({}, store || {}), cur = out[today];
-    if (cur && cur.done) return out;
+    if (cur && (cur.done || cur.remind)) return out; // done, or a reminder was set for exactly this tip: the day's tip stays put
     out[today] = { id: tip.id, title: tip.title, why: tip.why, done: false, remind: cur && cur.id === tip.id ? !!cur.remind : false };
     // keep 60 days
     Object.keys(out).sort().slice(0, Math.max(0, Object.keys(out).length - 60)).forEach(function (k) { delete out[k]; });
@@ -3374,7 +3387,7 @@ var BAD = DEMO && /[?&]bad=1\b/.test(location.search);
 var BATT_STATIC = DEMO && /[?&]batt=static\b/.test(location.search);
 var F = FAST ? 12 : 1; // time compression of the 2-min flow and of live sessions (demo only)
 var KEYS = { days: 'forma.v1.days', workouts: 'forma.v1.workouts', profile: 'forma.v1.profile', weights: 'forma.v1.weights', e4: 'forma.v1.e4' };
-var SKEY = 'forma.v1.session';
+var SKEY = 'forma.v1.session', PKEY = 'forma.v1.pendingWorkout';
 var TAGS = ['Alkohol', 'Późny posiłek', 'Kawa po 16:00', 'Ciężki trening wczoraj', 'Stres w pracy', 'Podróż', 'Sauna', 'Choroba'];
 var WB = [['energia', 'Energia'], ['bolesnosc', 'Bolesność mięśni'], ['stres', 'Stres'], ['motywacja', 'Motywacja'], ['sen', 'Jakość snu']];
 var COL = { zielony: '#2EE86B', 'żółty': '#F7D23E', czerwony: '#FF4D5E' };
@@ -3385,6 +3398,19 @@ var nf = FC.pl;
 function todayStr() { return C.localDateStr(new Date()); }
 function mean(a) { return a.length ? a.reduce(function (x, y) { return x + y; }, 0) / a.length : NaN; }
 var UI = {}; // hooks filled by the UI part
+
+// ---------- visible "Zapisano" confirmations (inline slots, state only - never only a vibration) ----------
+// savedSlot(key) is rendered next to a control; markSaved(key, text) fills every slot of that key now and keeps it for a few seconds (also across a re-render).
+var SV = {};
+function savedSlot(key, cls) {
+  var o = SV[key], on = !!(o && o.until > Date.now());
+  return '<span class="saved' + (cls ? ' ' + cls : '') + '" data-saved="' + key + '" role="status" aria-live="polite"' + (on ? '' : ' hidden') + '>' + (on ? '\u2713 ' + esc(o.text) : '') + '</span>';
+}
+function markSaved(key, text, ms) {
+  var until = Date.now() + (ms || 4500); SV[key] = { text: text, until: until };
+  Array.prototype.slice.call(document.querySelectorAll('[data-saved="' + key + '"]')).forEach(function (e) { e.textContent = '\u2713 ' + text; e.hidden = false; });
+  setTimeout(function () { var o = SV[key]; if (o && o.until <= Date.now()) { delete SV[key]; Array.prototype.slice.call(document.querySelectorAll('[data-saved="' + key + '"]')).forEach(function (e) { e.textContent = ''; e.hidden = true; }); } }, (ms || 4500) + 60);
+}
 
 var S = {
   device: null, server: null, mode: null, connected: false, name: '', connText: 'Niepołączono', connCls: '', error: '', info: '',
@@ -3397,6 +3423,11 @@ var S = {
   session: null, pendingWorkout: null, hrLog: [], flash: null,
   picker: null, pendingScan: null, night: { st: null, io: null, warn: '', err: '', result: null, busy: false, seen: {}, refreshedAt: 0, info: '' }
 };
+
+// typed-but-unsaved text survives a re-render of its screen (background updates repaint the screen); dropped when the screen is opened afresh
+S.drafts = {};
+var DRAFT_IDS = { pfKg: 1, obAge: 1, obKg: 1, exName: 1 };
+function clearDraft(id) { Object.keys(S.drafts).forEach(function (k) { if (S.drafts[k]) delete S.drafts[k][id]; }); }
 
 // ---------- log ----------
 var logLines = [];
@@ -3438,6 +3469,7 @@ function loadAll() {
   S.resume = null;
   var sr = readKey(SKEY);
   if (sr) { S.resume = FC.restoreSession(sr, Date.now(), F); if (!S.resume) clearSessionStore(); }
+  loadPending();
 }
 var lastSessSave = 0;
 function clearSessionStore() { if (DEMO) return; try { localStorage.removeItem(SKEY); } catch (e) { /* ignore */ } }
@@ -3446,6 +3478,18 @@ function saveSession() { // called on every change and at least every 10 s while
   lastSessSave = Date.now();
   try { localStorage.setItem(SKEY, JSON.stringify(FC.serializeSession(S.session, Date.now()))); }
   catch (e) { S.storageBroken = true; log('Zapis treningu nieudany: ' + e.message); }
+}
+// a finished workout waits for "Zapisz" (RPE): it is kept in storage until it is saved or discarded, so leaving the summary or closing the app loses nothing
+function savePending() {
+  if (DEMO || S.storageBroken) return;
+  try { if (S.pendingWorkout) localStorage.setItem(PKEY, JSON.stringify({ w: S.pendingWorkout, rpe: S.rpe == null ? null : S.rpe, at: Date.now() })); else localStorage.removeItem(PKEY); }
+  catch (e) { S.storageBroken = true; log('Zapis treningu nieudany: ' + e.message); }
+}
+function loadPending() {
+  var o = readKey(PKEY); if (!o || !o.w) return;
+  var w = FC.sanitizeWorkout(o.w); if (!w || !(Date.now() - (+o.at || 0) < 7 * 86400000)) { try { localStorage.removeItem(PKEY); } catch (e) { /* ignore */ } return; }
+  if (S.workouts.some(function (x) { return x.id === w.id; })) { try { localStorage.removeItem(PKEY); } catch (e) { /* ignore */ } return; }
+  S.pendingWorkout = w; S.rpe = o.rpe >= 1 && o.rpe <= 10 ? Math.round(o.rpe) : null;
 }
 function resumeSession() {
   if (!S.resume || S.session) return false;
@@ -3487,7 +3531,7 @@ function importAll(j) {
 }
 function wipeAll() {
   S.days = []; S.workouts = []; S.profile = null; S.weights = []; if (typeof e4OnWipe === 'function') e4OnWipe(); S.pending = null; S.pendingWorkout = null; S.session = null; S.resume = null; S.editDay = null;
-  if (!DEMO) try { localStorage.removeItem(SKEY); localStorage.removeItem(SKEY + '.corrupt'); Object.keys(KEYS).forEach(function (k) { localStorage.removeItem(KEYS[k]); localStorage.removeItem(KEYS[k] + '.corrupt'); }); localStorage.removeItem('forma.v1.nightsDone'); } catch (e) { /* ignore */ }
+  if (!DEMO) try { localStorage.removeItem(SKEY); localStorage.removeItem(SKEY + '.corrupt'); localStorage.removeItem(PKEY); Object.keys(KEYS).forEach(function (k) { localStorage.removeItem(KEYS[k]); localStorage.removeItem(KEYS[k] + '.corrupt'); }); localStorage.removeItem('forma.v1.nightsDone'); } catch (e) { /* ignore */ }
   if (typeof battOnWipe === 'function') battOnWipe();
   if (typeof whoopOnWipe === 'function') whoopOnWipe();
   if (typeof hcOnWipe === 'function') hcOnWipe();
@@ -3510,7 +3554,7 @@ function chargingState() {
   if (S.chgSignal === false) return { on: false, src: 'status' };
   return { on: battVerdict().state === 'charging', src: 'inferred' };
 }
-function battBlocks() { return S.connected && S.battery != null && S.battery < 10 && !S.battOverride && battVerdict().state !== 'stuck'; }
+function battBlocks() { return S.connected && S.battery != null && S.battery < 10 && !S.battOverride && battVerdict().state !== 'stuck' && !battUnreliable(); }
 // via: 'read' | 'notify' = a real reading from the band (logged); null = only update the displayed value
 function setBattery(level, via, t) {
   if (!isFinite(level)) return;
@@ -3690,7 +3734,7 @@ function finishSession() {
     kcal: kc ? kc.gross : null, kcalNet: kc ? kc.net : null, hrPeak: peak,
     hr5: hasHr && typeof hcSupported === 'function' && hcSupported() ? hr5Series(s.samples) : null // heart rate every 5 s, kept only until it has been written to Health Connect
   });
-  S.pendingWorkout = w; S.session = null; clearSessionStore();
+  S.pendingWorkout = w; S.session = null; clearSessionStore(); S.rpe = null; savePending();
   log('Koniec treningu ' + s.type + ': ' + (w ? w.durMin + ' min' + (w.trimp != null ? ', TRIMP ' + nf(w.trimp, 1) : '') + (w.kcalNet != null ? ', ok. ' + w.kcalNet + ' kcal ponad spoczynek' : '') + (w.hrPeak ? ', szczyt tętna ' + w.hrPeak : '') : 'za krótki'));
   return w;
 }
@@ -3704,7 +3748,7 @@ function commitWorkout(rpe) {
   var w = S.pendingWorkout; if (!w) return false;
   w.rpe = rpe != null ? rpe : w.rpe;
   var m = FC.mergeById(S.workouts, [w], 'id'); S.workouts = FC.sortWorkouts(m.items);
-  var ok = persist('workouts'); var saved = w; S.pendingWorkout = null;
+  var ok = persist('workouts'); var saved = w; S.pendingWorkout = null; S.rpe = null; savePending();
   if (typeof e4AfterWorkout === 'function') e4AfterWorkout(saved);
   if (typeof hcAfterSave === 'function') hcAfterSave(); // write the workout (with its heart rate) to Health Connect
   if (UI.onData) UI.onData();
@@ -4052,7 +4096,8 @@ if (window.FormaNative) window.__formaNativeEvent = function (ev) {
         if (UI.onNight) UI.onNight();
         break;
       case 'warning':
-        if (ev.code === 'lowBattery') { S.night.warn = 'Bateria opaski: ' + ev.level + '%' + (battVerdict().state === 'stuck' ? ' (odczyt niepewny)' : '') + '. Może nie wystarczyć do rana – pomiar działa dalej.'; log(S.night.warn); if (UI.onNight) UI.onNight(); }
+        if (ev.code === 'lowBattery' && battUnreliable()) log('Pominięto ostrzeżenie o niskiej baterii: odczyt tej opaski jest oznaczony jako niewiarygodny.');
+        else if (ev.code === 'lowBattery') { S.night.warn = 'Bateria opaski: ' + ev.level + '%' + (battVerdict().state === 'stuck' ? ' (odczyt niepewny)' : '') + '. Może nie wystarczyć do rana – pomiar działa dalej.'; log(S.night.warn); if (UI.onNight) UI.onNight(); }
         break;
       case 'appResumed': nightRefresh(); nativeSync(); mergeNativeBattery(); checkNights(); if (!S.connected) ensureBand('powrót'); if (typeof e4Resume === 'function') e4Resume(); if (UI.onNight) UI.onNight(); if (typeof whoopMaybeSync === 'function') whoopMaybeSync(); if (typeof hcResume === 'function') hcResume(); break;
       case 'stepsPermission': if (typeof e4StepsPermission === 'function') e4StepsPermission(ev); break;
@@ -4380,6 +4425,7 @@ function bNow() { return BATT_F === 1 ? Date.now() : BT0 + (Date.now() - BT0) * 
 // ---------- persistent log: localStorage 'forma.v1.battery' (+ native file on Android) ----------
 var battDirty = false, battSavedAt = 0;
 function loadBattery() {
+  battDevLoad();
   S.battLog = BC.sanitizeLog(readKey(BKEY));
   var tr = readKey(BTKEY);
   if (tr && isFinite(tr.t0) && isFinite(tr.durMs)) { S.battTest = { t0: +tr.t0, durMs: +tr.durMs, device: String(tr.device || ''), broken: !!tr.broken, done: !!tr.done, ev: tr.ev || null, endedAt: tr.endedAt || null }; }
@@ -4414,8 +4460,8 @@ function logBattery(level, via, t) {
   S.battVerdict = null; battDirty = true; saveBattery(false); battTestCheck();
 }
 function battOnWipe() {
-  S.battLog = []; S.battTest = null; S.battVerdict = null; battDirty = false;
-  if (!DEMO) try { localStorage.removeItem(BKEY); localStorage.removeItem(BKEY + '.corrupt'); localStorage.removeItem(BTKEY); } catch (e) { /* ignore */ }
+  S.battLog = []; S.battTest = null; S.battVerdict = null; battDirty = false; S.battDev = {};
+  if (!DEMO) try { localStorage.removeItem(BUKEY); localStorage.removeItem(BKEY); localStorage.removeItem(BKEY + '.corrupt'); localStorage.removeItem(BTKEY); } catch (e) { /* ignore */ }
   if (NATIVE) nat('clearBatteryLog');
 }
 function battClearLog() { battOnWipe(); log('Wyczyszczono log baterii.'); if (UI.onBattery) UI.onBattery(); if (UI.onBattTest) UI.onBattTest(); }
@@ -4429,9 +4475,35 @@ function battVerdict() {
   var n = Date.now();
   if (S.battVerdict && n - S.battVerdictAt < 1000) return S.battVerdict;
   S.battVerdict = BC.batteryVerdict(S.battLog, bNow(), { chargingFlag: S.chgSignal == null ? undefined : S.chgSignal, hrFlowing: battHrFlowing() });
-  S.battVerdictAt = n; return S.battVerdict;
+  S.battVerdictAt = n; if (S.connected && S.battery != null) battFlagCheck(S.battVerdict); return S.battVerdict;
 }
 function battStuck() { return S.battery != null && battVerdict().state === 'stuck'; }
+
+// ---------- per-device flag batteryUnreliable ----------
+// Once "stuck" is confirmed for a device (a flat charging test, or the same reading for >= 24 h) it is remembered: the pill defaults to "WHOOP ?%" in the uncertain style,
+// measurement is never blocked and no low-battery banners / warnings are shown for that device. A rising charging test (or "Zdejmij oznaczenie") clears it.
+var BUKEY = 'forma.v1.battDevices', UNREL_MS = 24 * 3600000;
+S.battDev = {};
+function battDevKey() { return String((S.band && S.band.id) || S.name || S.lastDeviceName || '').slice(0, 80); }
+function battDevLoad() {
+  S.battDev = {}; var o = readKey(BUKEY);
+  if (o && typeof o === 'object' && !Array.isArray(o)) Object.keys(o).slice(0, 20).forEach(function (k) { var x = o[k]; if (x && x.batteryUnreliable === true) S.battDev[k] = { batteryUnreliable: true, since: +x.since || Date.now(), reason: x.reason === '24h' ? '24h' : 'test', name: String(x.name || '').slice(0, 60), level: isFinite(+x.level) ? +x.level : null }; });
+}
+function battDevSave() { if (DEMO || S.storageBroken) return; try { localStorage.setItem(BUKEY, JSON.stringify(S.battDev)); } catch (e) { /* ignore */ } }
+function battUnreliable() { var k = battDevKey(); return !!(k && S.battDev && S.battDev[k] && S.battDev[k].batteryUnreliable); }
+function battUnreliableInfo() { var k = battDevKey(); return k && S.battDev ? S.battDev[k] || null : null; }
+function battFlagCheck(v) {
+  var k = battDevKey(); if (!k || !v || v.state !== 'stuck' || S.battDev[k]) return;
+  var viaTest = v.testAt != null, long = (v.sinceMs || 0) >= UNREL_MS;
+  if (!viaTest && !long) return;
+  S.battDev[k] = { batteryUnreliable: true, since: Date.now(), reason: viaTest ? 'test' : '24h', name: S.name || S.lastDeviceName || '', level: v.level };
+  battDevSave(); log('Bateria: odczyt tej opaski oznaczony jako niewiarygodny (' + (viaTest ? 'test ładowania bez zmiany' : 'ten sam odczyt od ponad 24 h') + ').');
+}
+function battUnflag(why) {
+  var k = battDevKey(); if (!k || !S.battDev[k]) return;
+  delete S.battDev[k]; battDevSave(); S.battVerdict = null; log('Bateria: zdjęto oznaczenie niewiarygodnego odczytu (' + why + ').');
+  if (UI.onBattery) UI.onBattery();
+}
 
 // ---------- charging test ----------
 function readBatteryNow() {
@@ -4461,6 +4533,7 @@ function battTestFinish(ev) {
   var entry = BC.testEntry(T, ev, bNow());
   if (entry) { S.battLog = BC.addEntry(S.battLog, entry, bNow()); battDirty = true; saveBattery(true); }
   S.battVerdict = null; persistBattTest();
+  if (ev.status === 'rose') battUnflag('test ładowania pokazał wzrost');
   log('Test ładowania – wynik: ' + ev.text + '.');
   buzz(30);
   if (UI.onBattTest) UI.onBattTest();
@@ -4851,7 +4924,7 @@ function whCsvLastText() {
 /* ===== Forma Etap 4 - state and glue: alarm, daily tip, calories, HRmax prompt, steps / nudges (native), sauna tag ===== */
 var REMIND_AT = '17:00';
 function e4Clean(o) {
-  var d = { tips: {}, alarmChecks: {}, alarmNotified: null, hrmaxDismissed: null, nudge: SC.defaultNudge(), busySent: null };
+  var d = { tips: {}, alarmChecks: {}, alarmNotified: null, hrmaxDismissed: null, nudge: SC.defaultNudge(), busySent: null, ui: { trendRange: 30, bcRange: '24h' } };
   if (!o || typeof o !== 'object') return d;
   if (o.tips && typeof o.tips === 'object') Object.keys(o.tips).forEach(function (k) {
     var t = o.tips[k]; if (isNaN(C.dayNum(k)) || !t || typeof t.id !== 'string') return;
@@ -4861,8 +4934,10 @@ function e4Clean(o) {
   if (typeof o.alarmNotified === 'string' && !isNaN(C.dayNum(o.alarmNotified))) d.alarmNotified = o.alarmNotified;
   if (typeof o.hrmaxDismissed === 'number' && isFinite(o.hrmaxDismissed)) d.hrmaxDismissed = o.hrmaxDismissed;
   d.nudge = SC.normalizeNudge(o.nudge);
+  if (o.ui && typeof o.ui === 'object') { if (o.ui.trendRange === 90) d.ui.trendRange = 90; if (o.ui.bcRange === '7d') d.ui.bcRange = '7d'; }
   return d;
 }
+function e4SetUi(k, v) { S.e4.ui[k] = v; e4Save(); }
 function e4Save() { if (!S.storageBroken) persist('e4'); }
 function e4MergeTips(t) { var c = e4Clean({ tips: t }).tips; Object.keys(c).forEach(function (k) { if (!S.e4.tips[k]) S.e4.tips[k] = c[k]; }); e4Save(); }
 function e4OnWipe() { S.e4 = e4Clean(null); S.steps = SC.normalize(null); if (DEMO) e4DemoSteps(); }
@@ -4941,7 +5016,7 @@ function pushNudgeSettings() {
   return r;
 }
 function setNudge(patch) {
-  S.e4.nudge = SC.normalizeNudge(Object.assign({}, S.e4.nudge, patch)); e4Save();
+  S.e4.nudge = SC.normalizeNudge(Object.assign({}, S.e4.nudge, patch)); e4Save(); markSaved('nudge', 'Zapisano ustawienia kroków i przypomnień');
   if (NATIVE && (S.e4.nudge.track || S.e4.nudge.nudge) && S.stepsPerm !== true && typeof window.FormaNative.requestStepsPermission === 'function') nat('requestStepsPermission');
   pushNudgeSettings(); setTimeout(function () { refreshSteps(); if (UI.onData) UI.onData(); }, 200);
   if (UI.onData) UI.onData();
@@ -4960,9 +5035,9 @@ function hrmaxPrompt() { return XC.hrMaxPrompt(S.profile, S.workouts, { dismisse
 function hrmaxAccept() {
   var p = hrmaxPrompt(); if (!p) return;
   var patch = XC.applyHrMax(p.candidate, XC.SRC.workouts, todayStr()); if (!patch) return;
-  applyProfile(patch); log('Tętno maksymalne ustawione z treningów: ' + p.candidate + ' (dotyczy przyszłych treningów).');
+  markSaved('hrmax', 'Ustawiono tętno maksymalne: ' + p.candidate + ' ud/min (od następnych treningów)', 7000); applyProfile(patch); log('Tętno maksymalne ustawione z treningów: ' + p.candidate + ' (dotyczy przyszłych treningów).');
 }
-function hrmaxDecline() { var p = hrmaxPrompt(); if (!p) return; S.e4.hrmaxDismissed = p.candidate; e4Save(); if (UI.onData) UI.onData(); }
+function hrmaxDecline() { var p = hrmaxPrompt(); if (!p) return; S.e4.hrmaxDismissed = p.candidate; e4Save(); markSaved('hrmax', 'Zapisano: nie zmieniamy tętna maksymalnego (zapytam dopiero przy wyższym wyniku)', 7000); if (UI.onData) UI.onData(); }
 
 // ---------- daily tip ----------
 function tipState() {
@@ -4979,14 +5054,16 @@ function tipState() {
 // today's tip; also keeps the per-day store {tip, done} in sync (until it is marked done)
 function tipToday() {
   var today = todayStr(), tip = TC.dailyTip(tipState()), cur = S.e4.tips[today];
-  if (cur && cur.done) return Object.assign({}, tip, { id: cur.id, title: cur.title, why: cur.why, done: true, remind: !!cur.remind });
+  if (cur && (cur.done || cur.remind)) return Object.assign({}, tip, { id: cur.id, title: cur.title, why: cur.why, done: !!cur.done, remind: !!cur.remind });
   if (!cur || cur.id !== tip.id || cur.title !== tip.title || cur.why !== tip.why) { S.e4.tips = TC.settleToday(S.e4.tips, today, tip); e4Save(); }
   var c = S.e4.tips[today]; return Object.assign({}, tip, { done: false, remind: !!(c && c.remind) });
 }
-function tipDone() {
+function tipSet(done) { // explicit states: Zrobione sets, Cofnij clears - a repeated tap never flips it
   var t = tipToday(), today = todayStr(); if (!S.e4.tips[today]) S.e4.tips = TC.settleToday(S.e4.tips, today, t);
-  S.e4.tips[today].done = !S.e4.tips[today].done; e4Save(); buzz(30); if (UI.onData) UI.onData();
+  S.e4.tips[today].done = !!done; e4Save(); buzz(30); if (UI.onData) UI.onData();
 }
+function tipDone() { tipSet(true); }
+function tipUndo() { tipSet(false); }
 function tipRemind() {
   var t = tipToday(), today = todayStr(), msg;
   if (NATIVE && typeof window.FormaNative.scheduleReminder === 'function') {
@@ -4995,6 +5072,12 @@ function tipRemind() {
   } else msg = 'Przypomnienie w aplikacji: pokażę je tu po ' + REMIND_AT + '. Powiadomienia systemowe działają w aplikacji na Androida.';
   if (S.e4.tips[today]) { S.e4.tips[today].remind = true; e4Save(); }
   S.e4.remindMsg = msg; S.e4.remindMsgAt = Date.now(); buzz(30); if (UI.onData) UI.onData();
+}
+function tipRemindOff() {
+  var today = todayStr();
+  if (NATIVE && typeof window.FormaNative.cancelReminder === 'function') nat('cancelReminder');
+  if (S.e4.tips[today]) { S.e4.tips[today].remind = false; e4Save(); }
+  S.e4.remindMsg = 'Przypomnienie anulowane.'; S.e4.remindMsgAt = Date.now(); buzz(30); if (UI.onData) UI.onData();
 }
 function remindDue() { // web in-app reminder: after 17:00, not done, reminder requested
   var t = S.e4.tips[todayStr()]; if (!t || !t.remind || t.done) return false;
@@ -5028,7 +5111,7 @@ function kcalWeek(endDate) {
 }
 
 function e4Init() {
-  S.e4 = e4Clean(readKey(KEYS.e4));
+  S.e4 = e4Clean(readKey(KEYS.e4)); S.trendRange = S.e4.ui.trendRange; S.bcRange = S.e4.ui.bcRange;
   if (DEMO) e4DemoSteps();
 }
 function e4Start() {
@@ -5209,6 +5292,7 @@ function hcHeightSug() {
 }
 function hcHeightAnswer(accept) {
   var g = S.hc.store.heightSug; if (!g) return;
+  markSaved('height', accept ? 'Zaktualizowano wzrost w profilu: ' + g.cm + ' cm' : 'Zapisano: zostaje wzrost z profilu' + (S.profile && S.profile.heightCm ? ' (' + S.profile.heightCm + ' cm)' : ''), 7000);
   if (accept) applyProfile({ heightCm: g.cm });
   S.hc.store.heightOffered = g.cm; S.hc.store.heightSug = null; hcSaveStore();
   log('Health Connect: wzrost ' + g.cm + ' cm ' + (accept ? 'zapisano w profilu' : 'odrzucono') + '.');
@@ -5350,7 +5434,7 @@ function header(title, o) {
   o = o || {};
   var left = o.back ? '<button class="ib plain" data-act="back" data-parent="' + o.back + '" aria-label="Wstecz">' + ico('back', 24) + '</button>' : '';
   if (o.close) left = '<button class="ib plain" data-act="close" data-parent="' + o.close + '" aria-label="Zamknij">' + ico('close', 24) + '</button>';
-  return '<div class="hd' + (o.full ? ' full' : '') + '">' + left + '<h1 class="n ttl" tabindex="-1">' + title + '</h1><span class="grow"></span><span class="cq js-cq"></span><span class="bp js-batt"></span>' +
+  return '<div class="hd' + (o.full ? ' full' : '') + '">' + left + '<h1 class="n ttl" tabindex="-1">' + title + '</h1><span class="cq js-cq"></span><span class="bp js-batt"></span>' +
     (o.gear ? '<a class="ib" href="#/profil" aria-label="Profil i ustawienia">' + ico('gear', 20) + '</a>' : '') + '</div>';
 }
 // generic SVG chart. o: n slots, ymin, ymax, ticks[], bars[{i,v,v0,color,op}], lines[{pts:[{i,v}],color,w,dash}], dots[{i,v,color,hollow}], band{lo,hi}, xl[{i,t}]
@@ -5420,16 +5504,33 @@ function battIcon(l, c) {
   return '<svg width="30" height="15" viewBox="0 0 28 14" aria-hidden="true" style="flex:none"><rect x="1" y="1" width="23" height="12" rx="3" fill="none" stroke="' + c + '" stroke-width="1.5"/><rect x="3.5" y="3.5" width="' + (18 * clamp(l, 0, 100) / 100).toFixed(1) + '" height="7" rx="1.5" fill="' + c + '"/><rect x="25" y="4.5" width="2" height="5" rx="1" fill="' + c + '"/></svg>';
 }
 function devShort() { var n = String(S.name || S.lastDeviceName || ''); return /whoop/i.test(n) ? 'WHOOP' : (/polar/i.test(n) ? 'Polar' : (n.split(/\s+/)[0] || 'Opaska')); }
+// header fit: if the title would be cut next to the connection dot and the battery pill, shrink the title a step and use a compact pill (icon + %)
+function fitHeaders() {
+  $$('.hd').forEach(function (hd) {
+    var t = hd.querySelector('.ttl'); if (!t || !hd.offsetWidth) return;
+    var lvl = 0; hd.classList.remove('t1', 't2');
+    while (lvl < 2 && t.scrollWidth > t.clientWidth + 1) { lvl++; hd.classList.add('t' + lvl); }
+  });
+}
+window.addEventListener('resize', fitHeaders);
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { fitHeaders(); });
 function renderBattery() {
   renderLink();
   if (S.battery == null || S.battery >= 20) S.bannerOff = null;
   var has = S.battery != null && (S.connected || DEMO), l = S.battery, chg = has ? chargingState() : { on: false, src: '' };
-  var stuck = has && !chg.on && battVerdict().state === 'stuck', v = has ? battVerdict() : null;
+  var unrel = has && !chg.on && battUnreliable(), stuck = has && !chg.on && !unrel && battVerdict().state === 'stuck', v = has ? battVerdict() : null;
   var why = chg.src === 'status' ? 'zgłoszone przez opaskę' : 'wykryte po wzroście poziomu';
   $$('.js-batt').forEach(function (el) {
     el.setAttribute('role', 'link'); el.setAttribute('tabindex', '0'); el.dataset.act = 'battGo';
     if (!has) { el.className = 'bp js-batt none'; el.style.cssText = ''; el.innerHTML = battIcon(0, '#9AA6B0') + '<span>Bateria: —</span>'; el.setAttribute('title', 'Bateria opaski – szczegóły'); el.setAttribute('aria-label', 'Bateria: brak danych. Otwórz ekran baterii opaski'); return; }
     var c = battColor(l), lab = el.closest('.hd.full') && !chg.on ? devShort() + ' ' : '';
+    if (unrel) { // remembered per device: the level is not trusted, so the pill says "WHOOP ?%"
+      el.className = 'bp js-batt stuck unrel'; el.style.cssText = '';
+      el.innerHTML = battIcon(l, '#9AA6B0') + '<span class="bp-p">' + devShort() + ' ?%</span>';
+      el.title = 'Odczyt baterii tej opaski jest niewiarygodny (ostatnio ' + l + '%). Dotknij, by sprawdzić ponownie.';
+      el.setAttribute('aria-label', 'Bateria opaski: odczyt niewiarygodny, ostatnio ' + l + ' procent. Otwórz ekran baterii, by sprawdzić ponownie');
+      return;
+    }
     if (stuck) {
       el.className = 'bp js-batt stuck'; el.style.cssText = '';
       el.innerHTML = battIcon(l, '#9AA6B0') + '<span class="bp-p">' + lab + l + '% ?</span>';
@@ -5445,7 +5546,7 @@ function renderBattery() {
   });
   $$('.js-banner').forEach(function (b) {
     var key = chg.on ? 'chg' : (stuck ? 'unc' : 'low');
-    if (has && l < 20 && S.bannerOff !== key) {
+    if (has && !unrel && l < 20 && S.bannerOff !== key) {
       b.hidden = false; b.className = 'banner js-banner' + (chg.on ? ' chg' : (stuck ? ' unc' : ''));
       var bc = chg.on ? '#2CE8B5' : (stuck ? '#F2A93B' : '#FF4D5E');
       var txt = chg.on ? 'Opaska się ładuje (' + l + '%).' : (stuck ? 'Opaska pokazuje ' + l + '%, ale odczyt jest niepewny – nie zmienia się od ' + BC.fmtDur(Math.max(v.connectedMs, v.sinceMs || 0)) + '.' : 'Niski poziom baterii opaski: ' + l + '%. Naładuj ją przed nocą – pomiar może się urwać.');
@@ -5453,6 +5554,7 @@ function renderBattery() {
       b.style.color = chg.on ? '#CFFFF0' : (stuck ? '#FFE2B8' : '#FFD6DA');
     } else b.hidden = true;
   });
+  fitHeaders();
 }
 
 // ---------- connection block ----------
@@ -5541,9 +5643,9 @@ function nightCardHtml() {
   } else {
     var canStart = S.connected || (st && st.deviceName) || S.lastDeviceName;
     h += '<p class="sm sub" style="margin:0">Przed snem załóż WHOOP z włączonym „HR Broadcast” (aplikacja WHOOP, ustawienia urządzenia). Telefon zostaw w pobliżu łóżka.</p>' +
-      '<label class="xs sub">Pobudka (kończy pomiar)<input class="inp num" type="time" id="nightWake" data-in="nightWake" data-keep="1" value="' + esc(nightWake()) + '" aria-label="Godzina pobudki"></label>';
+      '<label class="xs sub">Pobudka (kończy pomiar)<input class="inp num" type="time" lang="pl" id="nightWake" data-in="nightWake" data-keep="1" value="' + esc(nightWake()) + '" aria-label="Godzina pobudki"></label>' + savedSlot('nightWake');
     if (N.io === false) h += '<div class="note">Aby pomiar nie został przerwany w nocy, pozwól Formie działać w tle (wyłącz oszczędzanie baterii dla tej aplikacji).</div><button class="btn full" data-act="nightIo">Pozwól działać w tle</button>';
-    if (S.connected && S.battery != null && S.battery < 30) h += battStuck() ? '<a class="note" href="#/bateria" style="display:block">Opaska podaje ' + S.battery + '%, ale odczyt jest niepewny (nie zmienia się od wielu godzin). Sprawdź baterię →</a>' : '<div class="note err">Bateria opaski: ' + S.battery + '%. Naładuj ją przed snem – może nie wystarczyć do rana.</div>';
+    if (S.connected && S.battery != null && S.battery < 30 && battUnreliable()) h += '<a class="note" href="#/bateria" style="display:block" data-bat="noc-unrel">Odczyt baterii tej opaski jest niewiarygodny, więc nie ostrzegamy o niskim poziomie. Sprawdź ponownie →</a>'; else if (S.connected && S.battery != null && S.battery < 30) h += battStuck() ? '<a class="note" href="#/bateria" style="display:block">Opaska podaje ' + S.battery + '%, ale odczyt jest niepewny (nie zmienia się od wielu godzin). Sprawdź baterię →</a>' : '<div class="note err">Bateria opaski: ' + S.battery + '%. Naładuj ją przed snem – może nie wystarczyć do rana.</div>';
     if (!canStart) h += '<p class="xs mut" style="margin:0">Najpierw połącz opaskę (przycisk „Połącz z opaską”).</p>';
     if (N.err) h += '<p class="err">' + esc(N.err) + '</p>';
     h += '<button class="btn pri full" data-act="nightStart"' + (canStart ? '' : ' disabled') + '>Start nocy</button>';
@@ -5614,11 +5716,13 @@ function decorate(root) {
 function paint(el, path) {
   var def = ROUTES[path];
   el.innerHTML = def.render(); setGlow(path); decorate(el);
+  fitHeaders();
+  var dr = S.drafts[path]; if (dr) Object.keys(dr).forEach(function (id) { var i = el.querySelector('#' + id); if (i && 'value' in i) i.value = dr[id]; });
   if (def.mount) def.mount(el);
 }
 function makeScreen(path) {
   var el = document.createElement('section'); el.className = 'screen'; el.dataset.path = path;
-  $('stack').appendChild(el); paint(el, path); return el;
+  $('stack').appendChild(el); S.drafts[path] = {}; if (ROUTES[path].init) ROUTES[path].init(); paint(el, path); return el;
 }
 function anim(el, kf, ms) {
   if (REDUCED || !el.animate) return { finished: Promise.resolve(), cancel: function () { } };
@@ -5694,6 +5798,12 @@ function resumeBanner() {
   return '<div class="card tint-g js-resume" role="status"><span class="n" style="font-size:17px">Masz niezakończony trening (' + nm + ', start ' + C.localTimeStr(new Date(r.t0)) + ')</span>' +
     '<div class="row"><button class="btn pri grow" data-act="resumeSess">Wznów</button><button class="btn grow" data-act="dropResume">Odrzuć</button></div></div>';
 }
+function pendingBanner() {
+  var w = S.pendingWorkout; if (!w || S.session || S.resume) return '';
+  var nm = { gym: 'Siłownia', run: 'Bieg', walk: 'Spacer', sauna: 'Sauna', other: 'Trening' }[w.type] || 'Trening';
+  return '<div class="card tint-a js-pending" role="status" data-e4="pending-workout"><span class="n" style="font-size:17px">Niezapisany trening (' + nm + ', ' + ddmm(w.date) + ' ' + esc(w.time || '') + ')</span><span class="xs sub">Skończyłeś trening, ale nie zapisałeś go. Nic nie zginęło: dokończ zapis albo odrzuć.</span>' +
+    '<div class="row"><button class="btn pri grow" data-act="openPending">Zapisz trening</button><button class="btn grow" data-act="dropPending" data-confirm="Odrzuć">Odrzuć</button></div></div>';
+}
 // ====================== DZIŚ ======================
 function dzisStatusLine(st) {
   if (!st.hasRecord) return { dot: '#9AA6B0', text: 'Brak dzisiejszego pomiaru' };
@@ -5749,7 +5859,7 @@ function rDzis() {
   h += '<div class="row sp xs mut fu" style="margin-top:-6px" ' + dl(i++) + '><span>' + DOW[now.getDay()].replace(/^./, function (c) { return c.toUpperCase(); }) + ', ' + now.getDate() + ' ' + MON[now.getMonth()] + '</span><span>' + esc(S.connected ? (DEMO ? 'Demo – symulowany WHOOP' : 'Połączono: ' + S.name) : S.connText) + '</span></div>';
   if (S.storageBroken) h += '<div class="note" ' + dl(i) + '>Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie</div>';
   if (S.flash && S.flash.to === 'dzis') h += '<div class="note ok fu" role="status" ' + dl(i++) + '>' + esc(S.flash.text) + '</div>';
-  h += resumeBanner();
+  h += resumeBanner() + pendingBanner();
   h += '<div class="banner js-banner fu" role="status" hidden></div>';
   h += '<div class="card js-conn fu" ' + dl(i++) + (S.connected && !S.error && !S.info ? ' hidden' : '') + '><p class="lbl">Opaska</p>' + connHtml() + '</div>';
   if (!pc.complete) {
@@ -5758,7 +5868,7 @@ function rDzis() {
       '<label class="grow"><span class="xs mut">Waga (kg)</span><input class="inp num" id="obKg" type="text" inputmode="decimal" data-keep="1" placeholder="np. 82,4"></label></div>' +
       '<div class="chips" role="radiogroup" aria-label="Płeć"><button class="chip" data-act="obSex" data-v="m" role="radio" aria-checked="false">Mężczyzna</button><button class="chip" data-act="obSex" data-v="k" role="radio" aria-checked="false">Kobieta</button></div>' +
       '<p class="err" id="obErr" hidden></p><button class="btn pri full" data-act="obSave">Zapisz</button></div>';
-  }
+  } else h += savedSlot('onboarding', 'note ok');
   var nightTop = NATIVE && (S.night.crunching || (S.night.st && S.night.st.running) || nightHasResult());
   if (nightTop) h += nightBlock();
   if (!st.hasRecord) {
@@ -5804,7 +5914,7 @@ function rDzis() {
   h += '<div class="g2 fu" ' + dl(i++) + '>';
   h += '<a href="#/sen" class="card tile"><p class="row sp lbl">Sen' + ico('chev', 14) + '</p>' + (sl ? '<span class="n big" style="font-size:28px;white-space:nowrap">' + FC.fmtDur(sl.durH) + '</span><span class="sm sub">z ' + FC.fmtDur(sl.needH) + ' potrzeby' + (sl.shortH > 0.05 ? ',<br><b style="color:#fff">brakuje ' + FC.fmtDur(sl.shortH) + '</b>' : '') + '</span><div class="bar"><i class="gx" style="width:' + clamp(sl.durH / sl.needH * 100, 0, 100) + '%;background:#E07BF0"></i></div>' : '<span class="mut sm">Brak danych o śnie. Wpisz godziny snu w porannym pomiarze.</span>') + '</a>';
   h += '<div class="card tile"><p class="row lbl" style="gap:6px">' + ico('moon', 16) + 'Dziś wieczorem</p><span class="xs sub">Do łóżka do</span><span class="n big">' + esc(tp.bed || '—') + '</span><span class="xs mut">potrzeba ok. ' + FC.fmtDur(tp.needH) + ' snu</span>' +
-    '<label class="xs sub">Pobudka<input class="inp num" type="time" data-in="wake" data-keep="1" value="' + esc(plannedWake()) + '" aria-label="Planowana pobudka"></label></div></div>';
+    '<label class="xs sub">Pobudka<input class="inp num" type="time" lang="pl" data-in="wake" data-keep="1" value="' + esc(plannedWake()) + '" aria-label="Planowana pobudka"></label>' + savedSlot('wake') + '</div></div>';
   if (NATIVE && !nightTop) h += nightBlock();
   var tb = FC.targetBand(st.scored ? st.color : null);
   h += '<div class="g2 fu" ' + dl(i++) + '><a href="#/trening" class="card tile span2"><p class="row sp lbl">Obciążenie' + ico('chev', 14) + '</p><span class="n big" style="font-size:44px">' + nf(strain, 1) + '</span><span class="xs mut">dotąd dziś</span>' + gaugeHtml(strain, tb) + (tb ? '' : '<span class="xs mut">Cel pojawi się po porannym pomiarze.</span>') + '</a>';
@@ -5905,7 +6015,7 @@ function rPoranek() {
     (!ok ? '<p class="sm" style="margin:0;color:#FFD6DA">Za mało poprawnych uderzeń (' + p.nBeats + '). Powtórz w bezruchu.</p>' : (low ? '<p class="sm" style="margin:0;color:#FFD6DA">Pomiar niepewny (' + nf(p.artifactPct, 1) + '% zakłóceń). Powtórz w bezruchu.</p>' : '')) +
     (dayRec(p.date) ? (dayRec(p.date).source === 'whoop' ? '<p class="xs mut" style="margin:0">Masz dziś dane z WHOOP – ten pomiar stanie się głównym wynikiem HRV, dane WHOOP zostaną obok do porównania.</p>' : dayRec(p.date).source === 'noc' ? '<p class="xs mut" style="margin:0">Masz dziś wynik nocy – on zostaje głównym wynikiem HRV, ten pomiar zapisze się jako dodatkowy.</p>' : '<p class="xs mut" style="margin:0">Masz już dziś zapisany pomiar – zapis go zastąpi.</p>') : '') + '</div>';
   if (ok) {
-    h += '<div class="card"><p class="lbl">Sen tej nocy</p><div class="row"><label class="grow xs mut">Zasnąłem o<input class="inp num" type="time" id="inBed" data-in="bed" data-keep="1" value="' + esc(f.bed) + '"></label><label class="grow xs mut">Obudziłem się o<input class="inp num" type="time" id="inWake" data-in="wakeT" data-keep="1" value="' + esc(f.wake) + '"></label></div><p class="xs mut" style="margin:0">Podpowiedź z wczoraj albo 23:00 / 07:00. Z tego liczymy czas i wynik snu.</p></div>';
+    h += '<div class="card"><p class="lbl">Sen tej nocy</p><div class="row"><label class="grow xs mut">Zasnąłem o<input class="inp num" type="time" lang="pl" id="inBed" data-in="bed" data-keep="1" value="' + esc(f.bed) + '"></label><label class="grow xs mut">Obudziłem się o<input class="inp num" type="time" lang="pl" id="inWake" data-in="wakeT" data-keep="1" value="' + esc(f.wake) + '"></label></div><p class="xs mut" style="margin:0">Podpowiedź z wczoraj albo 23:00 / 07:00. Z tego liczymy czas i wynik snu.</p></div>';
     h += '<div class="card"><p class="lbl">Jak się czujesz?</p>' + WB.map(function (w) {
       return '<div class="wb"><span class="nm">' + w[1] + '</span><span class="scale" role="radiogroup" aria-label="' + w[1] + '">' + [1, 2, 3, 4, 5].map(function (v) { return '<button class="sc' + (f.wb[w[0]] === v ? ' on' : '') + '" data-act="wb" data-k="' + w[0] + '" data-v="' + v + '" role="radio" aria-checked="' + (f.wb[w[0]] === v) + '" aria-label="' + w[1] + ' ' + v + ' z 5">' + v + '</button>'; }).join('') + '</span></div>';
     }).join('') + '<div class="row sp xs mut"><span>1 – najgorzej</span><span>5 – najlepiej</span></div></div>';
@@ -6024,6 +6134,8 @@ function batVerdictHtml() {
   h += '<div class="row" style="gap:14px;align-items:center">' + bigBatt(l, m.col, v.state === 'stuck') + '<div class="col" style="gap:6px;align-items:flex-start"><span class="n" style="font-size:40px;line-height:1" data-bat="level">' + (l != null ? l + '%' + (v.state === 'stuck' ? '<span class="u" style="margin-left:4px"> ?</span>' : '') : '—') + '</span><span class="pill ' + ({ charging: 'chg', draining: 'recon', stuck: 'unsure', low_real: 'alarm', unknown: 'recon' }[v.state] || 'recon') + '" data-bat="tag"><i></i>' + m.tag + '</span></div></div>';
   h += '<div class="n" style="font-size:22px;line-height:1.2;color:#fff" data-bat="title">' + esc(v.title) + '</div>';
   h += '<p class="sm sub" style="margin:0;line-height:1.5" data-bat="explanation">' + esc(v.explanation) + '</p>';
+  var uf = battUnreliableInfo();
+  if (uf) h += '<div class="note" data-bat="unreliable" role="status" style="margin:0"><b>Ta opaska ma oznaczony niewiarygodny odczyt baterii</b> (' + (uf.reason === 'test' ? 'test ładowania nie pokazał zmiany' : 'ten sam odczyt od ponad 24 godzin') + ', ' + esc(BC.fmtWhen(uf.since, bNow())) + '). Pigułka pokazuje „' + esc(devShort()) + ' ?%”, nie blokujemy pomiaru i nie wyświetlamy ostrzeżeń o niskiej baterii. Przetestuj ją ponownie testem ładowania poniżej albo <button class="btn sm" data-act="battUnflag" style="margin-top:6px">Zdejmij oznaczenie</button></div>';
   var meta = [];
   if (l != null) meta.push('<div class="sm sub" data-bat="since-line">' + batSinceHtml(v) + '</div>');
   if (v.ratePerHour != null) meta.push('<div class="sm sub" data-bat="rate">Tempo spadku: <b>' + esc(String(Math.round(v.ratePerHour * 10) / 10).replace('.', ',')) + ' pkt/h</b>' + (v.etaToEmptyH != null ? ' · do 0% zostało ok. <b>' + esc(BC.fmtDur(v.etaToEmptyH * 3600000)) + '</b>' : '') + '</div>');
@@ -6121,7 +6233,8 @@ UI.onBattTest = function () { var top = stack[stack.length - 1]; if (top && top.
 
 // ---------- actions ----------
 ACT_BAT.battGo = function () { var t = stack[stack.length - 1]; if (t && t.path === 'bateria') return; go('bateria'); };
-ACT_BAT.bcRange = function (el) { S.bcRange = el.dataset.v === '7d' ? '7d' : '24h'; var t = stack[stack.length - 1]; if (t && t.path === 'bateria') { batTickAt = 0; var w = t.el.querySelector('[data-bat="chart-wrap"]'); if (w) { w.__h = null; } batFill(t.el); } };
+ACT_BAT.battUnflag = function () { battUnflag('ręcznie'); };
+ACT_BAT.bcRange = function (el) { S.bcRange = el.dataset.v === '7d' ? '7d' : '24h'; e4SetUi('bcRange', S.bcRange); var t = stack[stack.length - 1]; if (t && t.path === 'bateria') { batTickAt = 0; var w = t.el.querySelector('[data-bat="chart-wrap"]'); if (w) { w.__h = null; } batFill(t.el); } };
 ACT_BAT.battTestStart = function () { battTestStart(); };
 ACT_BAT.battTestCancel = function () { battTestCancel(); };
 ACT_BAT.battClear = function () { battClearLog(); };
@@ -6187,11 +6300,12 @@ function rAlarm() {
       (st.trend3 && st.trend3.rhr.dir && st.trend3.hrv.dir ? '<p class="xs mut" style="margin:0" data-alarm="trend3">Trend 3 dni: tętno ' + ({ up: 'rośnie', down: 'maleje', flat: 'bez zmian' })[st.trend3.rhr.dir] + ', HRV ' + ({ up: 'rośnie', down: 'maleje', flat: 'bez zmian' })[st.trend3.hrv.dir] + '.</p>' : '') + '</div>';
     if (st.checklist.length) {
       var checks = S.e4.alarmChecks[st.date] || [];
-      h += '<div class="card fu" ' + dl(i++) + '><p class="row lbl" style="gap:10px;color:#E9EEF2"><span style="color:#2CE8B5">' + ico('list', 20) + '</span>Co zrobić dziś</p><div class="col" style="gap:0" role="group" aria-label="Lista na dziś">' +
+      h += '<div class="card fu" ' + dl(i++) + ' data-e4="alarm-checklist"><p class="row lbl" style="gap:10px;color:#E9EEF2"><span style="color:#2CE8B5">' + ico('list', 20) + '</span>Co zrobić dziś</p><div class="col" style="gap:0" role="group" aria-label="Lista na dziś">' +
         st.checklist.map(function (x, k) {
           var on = !!checks[k];
-          return '<button class="row" data-act="alarmCheck" data-k="' + k + '" data-d="' + st.date + '" role="checkbox" aria-checked="' + on + '" style="min-height:48px;gap:12px;background:transparent;border:0;text-align:left;font-size:15px;color:#F2F4F7;cursor:pointer;padding:0"><span style="width:24px;height:24px;border-radius:12px;border:1.5px solid ' + (on ? '#2EE86B' : 'rgba(44,232,181,.7)') + ';background:' + (on ? '#2EE86B' : 'transparent') + ';color:#0B0E11;flex:none;display:flex;align-items:center;justify-content:center">' + (on ? ico('check', 14) : '') + '</span><span class="grow">' + esc(x) + '</span></button>';
-        }).join('') + '</div></div>';
+          return '<div class="row" style="min-height:48px;gap:12px" data-e4="check-row" data-state="' + (on ? 'done' : 'todo') + '"><button class="row grow" data-act="alarmCheck" data-k="' + k + '" data-d="' + st.date + '" role="checkbox" aria-checked="' + on + '" style="min-height:48px;gap:12px;background:transparent;border:0;text-align:left;font-size:15px;color:' + (on ? '#9AA6B0' : '#F2F4F7') + ';cursor:pointer;padding:0"><span style="width:24px;height:24px;border-radius:12px;border:1.5px solid ' + (on ? '#2EE86B' : 'rgba(44,232,181,.7)') + ';background:' + (on ? '#2EE86B' : 'transparent') + ';color:#0B0E11;flex:none;display:flex;align-items:center;justify-content:center">' + (on ? ico('check', 14) : '') + '</span><span class="grow">' + esc(x) + '</span></button>' +
+            (on ? '<span class="xs" style="color:#2EE86B">Zrobione</span><button class="btn sm" data-act="alarmUncheck" data-k="' + k + '" data-d="' + st.date + '" aria-label="Cofnij: ' + esc(x) + '">Cofnij</button>' : '') + '</div>';
+        }).join('') + '</div>' + savedSlot('alarm') + '</div>';
     }
     if (st.thirdDay) h += '<div class="card tint-a fu" ' + dl(i++) + ' style="gap:4px" data-alarm="third"><span class="n" style="font-size:17px;line-height:1.25;color:#FFE2B8">Trzeci dzień z rzędu? → rozważ dzień wolny / lekarz przy objawach</span><span class="xs" style="color:#E9D3A8">' + esc(st.disclaimer) + '</span></div>';
     else h += '<p class="xs mut fu" ' + dl(i++) + ' style="margin:0" data-alarm="disclaimer">' + esc(st.disclaimer) + '</p>';
@@ -6203,11 +6317,14 @@ function rAlarm() {
   return h + '</div>';
 }
 ROUTES.alarm = { tab: 'dzis', depth: 1, parent: 'dzis', render: rAlarm, mount: renderBattery };
-ACT_E4.alarmCheck = function (el) {
+function alarmSet(el, val) { // explicit states: a row is set by tapping it and cleared only by its own Cofnij button
   var d = el.dataset.d, k = +el.dataset.k, a = (S.e4.alarmChecks[d] || []).slice(); while (a.length <= k) a.push(false);
-  a[k] = !a[k]; S.e4.alarmChecks[d] = a; e4Save();
-  el.setAttribute('aria-checked', a[k]); var box = el.firstChild; box.style.background = a[k] ? '#2EE86B' : 'transparent'; box.style.borderColor = a[k] ? '#2EE86B' : 'rgba(44,232,181,.7)'; box.innerHTML = a[k] ? ico('check', 14) : '';
-};
+  if (!!a[k] === val) return;
+  a[k] = val; S.e4.alarmChecks[d] = a; e4Save(); markSaved('alarm', val ? 'Zapisano: zrobione' : 'Zapisano: cofnięto');
+  rerender();
+}
+ACT_E4.alarmCheck = function (el) { alarmSet(el, true); };
+ACT_E4.alarmUncheck = function (el) { alarmSet(el, false); };
 
 // chip on Dziś (level Uwaga or higher, today's record)
 function alarmChipHtml(i) {
@@ -6230,8 +6347,10 @@ function rWskazowka() {
   h += '<div class="card fu" ' + dl(i++) + ' data-e4="tip-card" style="gap:12px"><div class="row" style="gap:16px;align-items:flex-start"><span style="width:64px;height:64px;border-radius:32px;background:rgba(46,232,107,.14);border:1px solid rgba(46,232,107,.5);color:#2EE86B;display:flex;align-items:center;justify-content:center;flex:none">' + ico(ic, 30) + '</span>' +
     '<div class="grow col" style="gap:2px"><span class="lbl" style="font-size:12px;color:#2EE86B">Dziś</span><span class="n" style="font-size:28px;line-height:1.1" data-e4="tip-title">' + esc(t.title) + '</span></div></div>' +
     '<p class="sub" style="margin:0;font-size:15px;line-height:1.45" data-e4="tip-why">' + bold(t.why.replace(/(\d[\d ]*\d|\d)( kroków| min)/g, '**$1**$2')) + '</p>' +
-    (t.done ? '<div class="row" style="gap:10px;align-items:center;padding:12px 14px;border-radius:14px;background:rgba(46,232,107,.14);border:1px solid rgba(46,232,107,.45)" data-tip-done><span style="color:#2EE86B">' + ico('check', 22) + '</span><div class="grow"><b style="color:#2EE86B">Zrobione – zapisane na dziś</b><div class="xs mut">Wskazówka zaliczona. Jutro dostaniesz nową.</div></div><button class="btn sm" data-act="tipDone" aria-pressed="true" aria-label="Cofnij oznaczenie jako zrobione">Cofnij</button></div>' : '<div class="row" style="gap:10px"><button class="btn pri grow" data-act="tipDone" aria-pressed="false">Zrobione</button><button class="btn grow" data-act="tipRemind">Przypomnij o ' + REMIND_AT + '</button></div>') +
-    (msgOn ? '<p class="note ok" role="status" style="margin:0" data-e4="remind-msg">' + esc(S.e4.remindMsg) + '</p>' : (t.remind && !t.done ? '<p class="xs mut" style="margin:0">Przypomnienie ustawione na ' + REMIND_AT + '.</p>' : '')) + '</div>';
+    (t.done ? '<div class="row" style="gap:10px;align-items:center;padding:12px 14px;border-radius:14px;background:rgba(46,232,107,.14);border:1px solid rgba(46,232,107,.45)" data-tip-done><span style="color:#2EE86B">' + ico('check', 22) + '</span><div class="grow"><b style="color:#2EE86B">Zrobione – zapisane na dziś</b><div class="xs mut">Wskazówka zaliczona. Jutro dostaniesz nową.</div></div><button class="btn sm" data-act="tipUndo" aria-label="Cofnij oznaczenie jako zrobione">Cofnij</button></div>' :
+      '<div class="row" style="gap:10px"><button class="btn pri grow" data-act="tipDone">Zrobione</button>' + (t.remind ? '' : '<button class="btn grow" data-act="tipRemind">Przypomnij o ' + REMIND_AT + '</button>') + '</div>' +
+      (t.remind ? '<div class="row" style="gap:10px;align-items:center;padding:10px 14px;border-radius:14px;background:rgba(44,232,181,.10);border:1px solid rgba(44,232,181,.4)" data-e4="remind-state"><span style="color:#2CE8B5">' + ico('clock', 20) + '</span><div class="grow"><b style="color:#2CE8B5">Przypomnienie ustawione na ' + REMIND_AT + '</b><div class="xs mut">Ta wskazówka zostaje dziś bez zmian.</div></div><button class="btn sm" data-act="tipRemindOff" aria-label="Anuluj przypomnienie">Anuluj</button></div>' : '')) +
+    (msgOn ? '<p class="note ok" role="status" style="margin:0" data-e4="remind-msg">' + esc(S.e4.remindMsg) + '</p>' : '') + '</div>';
   h += '<div class="card fu" ' + dl(i++) + ' data-e4="tip-history"><p class="row lbl" style="gap:10px;color:#E9EEF2"><span style="color:#2CE8B5">' + ico('clock', 20) + '</span>Ostatnie wskazówki</p>';
   if (!hist.length) h += '<p class="mut sm" style="margin:0">Historia pojawi się od jutra: zapisujemy po jednej wskazówce na dzień.</p>';
   else h += '<div class="col" style="gap:0">' + hist.map(function (x, k) {
@@ -6247,11 +6366,13 @@ function rWskazowka() {
 }
 ROUTES.wskazowka = { tab: 'dzis', depth: 1, parent: 'dzis', render: rWskazowka, mount: renderBattery };
 ACT_E4.tipDone = function () { tipDone(); };
+ACT_E4.tipUndo = function () { tipUndo(); };
+ACT_E4.tipRemindOff = function () { tipRemindOff(); };
 ACT_E4.tipRemind = function () { tipRemind(); };
 
 // ====================== HRmax prompt ======================
 function hrmaxPromptHtml(i) {
-  var p = hrmaxPrompt(); if (!p) return '';
+  var p = hrmaxPrompt(); if (!p) return savedSlot('hrmax', 'note ok');
   return '<div class="card tint-g fu" ' + dl(i || 0) + ' role="group" aria-label="Propozycja tętna maksymalnego" data-e4="hrmax-prompt"><span class="n" style="font-size:18px;line-height:1.25">' + esc(p.text) + '</span>' +
     '<span class="xs sub">Dotyczy tylko przyszłych treningów. Dotychczasowe zostają policzone ze starym tętnem maksymalnym (' + p.current + ').</span>' +
     '<div class="row"><button class="btn pri grow" data-act="hrmaxYes">Tak</button><button class="btn grow" data-act="hrmaxNo">Nie</button></div></div>';
@@ -6282,10 +6403,18 @@ function kcalHourChart(day, isToday) {
   var bw = pw / 24, kid = nid('kh'), s = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" role="img" aria-label="Kalorie na godzinę, doba 0 do 24" style="display:block"><defs>' + Object.keys(KC_COL).map(function (k) { return '<linearGradient id="' + kid + k + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + KC_COL[k] + '"/><stop offset="1" stop-color="' + KC_COL[k] + '" stop-opacity=".55"/></linearGradient>'; }).join('') + '</defs>';
   day.sleepSpans.forEach(function (sp) { s += '<rect x="' + (pl + sp[0] / 1440 * pw).toFixed(1) + '" y="' + pt + '" width="' + ((sp[1] - sp[0]) / 1440 * pw).toFixed(1) + '" height="' + ph + '" fill="rgba(224,123,240,.16)"/>'; });
   if (day.sleepSpans.length) s += '<text x="' + (pl + 4 + day.sleepSpans[0][0] / 1440 * pw).toFixed(1) + '" y="' + (pt + 12) + '" font-size="11" font-weight="700" fill="#E07BF0">sen</text>';
-  for (h = 0; h < 24; h++) {
-    var p = day.perHour[h], x = pl + h * bw + 1, y = pt + ph, parts = [['rest', p.rest + p.sleep, p.sleep > p.rest ? 'sleep' : 'rest'], ['move', p.move, 'move'], ['train', p.train, 'train']];
-    parts.forEach(function (q) { if (q[1] <= 0) return; var hh = q[1] / mx * ph; y -= hh; s += '<rect class="gy" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + (bw - 2).toFixed(1) + '" height="' + Math.max(0.5, hh).toFixed(1) + '" rx="1.5" fill="url(#' + kid + q[2] + ')"/>'; });
-  }
+  // area line: base = rest + sleep + move per hour (smooth curve through the hour centres); training = orange spike on top of the base
+  var bx = function (k) { return pl + (k + 0.5) * bw; }, by = function (v) { return pt + ph - v / mx * ph; }, base = [], tot = [];
+  for (h = 0; h < 24; h++) { var q = day.perHour[h]; base.push(q.rest + q.sleep + q.move); tot.push(q.rest + q.sleep + q.move + q.train); }
+  function curve(vals) { var pts = vals.map(function (v, k) { return [bx(k), by(v)]; }), d = 'M' + pts[0][0].toFixed(1) + ' ' + pts[0][1].toFixed(1), k;
+    for (k = 1; k < pts.length; k++) { var cx = (pts[k - 1][0] + pts[k][0]) / 2; d += ' C' + cx.toFixed(1) + ' ' + pts[k - 1][1].toFixed(1) + ' ' + cx.toFixed(1) + ' ' + pts[k][1].toFixed(1) + ' ' + pts[k][0].toFixed(1) + ' ' + pts[k][1].toFixed(1); }
+    return d; }
+  var yb = pt + ph, cb = curve(base);
+  s += '<defs><linearGradient id="' + kid + 'ar" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2D9CFF" stop-opacity=".55"/><stop offset="1" stop-color="#2D9CFF" stop-opacity=".04"/></linearGradient><linearGradient id="' + kid + 'sp" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#F2A93B" stop-opacity=".95"/><stop offset="1" stop-color="#F2A93B" stop-opacity=".35"/></linearGradient></defs>';
+  s += '<path data-kcal="area" d="' + cb + ' L' + bx(23).toFixed(1) + ' ' + yb + ' L' + bx(0).toFixed(1) + ' ' + yb + ' Z" fill="url(#' + kid + 'ar)"/><path data-kcal="line" d="' + cb + '" fill="none" stroke="#2D9CFF" stroke-width="2" stroke-linejoin="round"/>';
+  var sp = '', any = false;
+  for (h = 0; h < 24; h++) if (day.perHour[h].train > 0) { any = true; var x0 = bx(h) - bw * 0.9, x1 = bx(h) + bw * 0.9, xm = bx(h); sp += '<path data-kcal="spike" d="M' + x0.toFixed(1) + ' ' + by(base[h]).toFixed(1) + ' L' + xm.toFixed(1) + ' ' + by(tot[h]).toFixed(1) + ' L' + x1.toFixed(1) + ' ' + by(base[h]).toFixed(1) + ' Z" fill="url(#' + kid + 'sp)" stroke="#F2A93B" stroke-width="1.5" stroke-linejoin="round"/>'; }
+  if (any) s += sp;
   var tn = day.perHour.reduce(function (a, p, k) { return p.train > a.v ? { v: p.train, h: k } : a; }, { v: 0, h: -1 });
   if (tn.h >= 0 && tn.v > 8) s += '<text x="' + Math.min(W - 70, pl + tn.h * bw).toFixed(1) + '" y="' + (pt + 2) + '" font-size="11" font-weight="700" fill="#F2A93B">trening ' + nfi(day.train) + '</text>';
   if (isToday) { var d = new Date(), m = d.getHours() * 60 + d.getMinutes(), nx = pl + m / 1440 * pw; s += '<line x1="' + nx.toFixed(1) + '" x2="' + nx.toFixed(1) + '" y1="' + (pt - 8) + '" y2="' + (pt + ph) + '" stroke="#E9EEF2" stroke-opacity=".6" stroke-dasharray="3 3"/><text x="' + Math.min(W - 44, nx + 4).toFixed(1) + '" y="' + (pt - 3) + '" font-size="10" fill="#C5CED6">teraz ' + C.localTimeStr(d) + '</text>'; }
@@ -6397,7 +6526,7 @@ function trendCardsHtml(i) {
     trendChartHtml('rhr', n) + trendChartHtml('hrv', n) +
     '<div class="row xs mut" style="flex-wrap:wrap;gap:4px 12px"><span>● dzienna wartość</span><span style="color:#2CE8B5">— średnia 7 dni</span><span style="color:#2EE86B">▮ Twoja norma (60 dni)</span></div></div>';
 }
-ACT_E4.trendRange = function (el) { S.trendRange = el.dataset.v === '90' ? 90 : 30; rerender(); };
+ACT_E4.trendRange = function (el) { S.trendRange = el.dataset.v === '90' ? 90 : 30; e4SetUi('trendRange', S.trendRange); rerender(); };
 
 // ====================== PROFIL: HRmax, steps and nudges ======================
 function tglHtml(act, on, label) {
@@ -6405,7 +6534,7 @@ function tglHtml(act, on, label) {
 }
 function stepsSettingsHtml() {
   var n = S.e4.nudge, nat_ = NATIVE;
-  var h = '<div class="card" data-e4="steps-settings"><p class="lbl">Kroki i ruch</p>';
+  var h = '<div class="card" data-e4="steps-settings"><p class="row sp lbl"><span>Kroki i ruch</span>' + savedSlot('nudge') + '</p>';
   if (!nat_) h += '<p class="note" style="margin:0" data-e4="steps-web-note">' + (DEMO ? 'Tryb demo: kroki są syntetyczne. ' : '') + 'Kroki dostępne w aplikacji na Androida (licznik kroków telefonu i przypomnienia o ruchu).</p>';
   h += '<div class="row sp"><span class="sm sub">Zliczaj kroki (licznik telefonu)</span>' + (nat_ ? tglHtml('stTrack', n.track, 'Zliczaj kroki') : '<span class="tgl" aria-hidden="true"><i></i></span>') + '</div>' +
     '<div class="row sp"><span class="sm sub">Przypomnienia o ruchu</span>' + (nat_ ? tglHtml('stNudge', n.nudge, 'Przypomnienia o ruchu') : '<span class="tgl" aria-hidden="true"><i></i></span>') + '</div>';
@@ -6453,7 +6582,7 @@ function hcCountsHtml() {
   return h;
 }
 function hcHeightHtml() {
-  var g = hcHeightSug(); if (!g) return '';
+  var g = hcHeightSug(); if (!g) return savedSlot('height', 'note ok');
   var cur = S.profile && S.profile.heightCm;
   return '<div class="note ok" data-hc="height" role="status">Health Connect podaje Twój wzrost: <b>' + g.cm + ' cm</b> (' + esc(HCC.originLabel(g.origin)) + ')' + (cur ? ', w profilu masz ' + cur + ' cm' : ', w profilu go nie ma') + '. Zaktualizować profil?' +
     '<div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="btn sm pri grow" data-act="hcHeightYes">Zaktualizuj profil</button><button class="btn sm grow" data-act="hcHeightNo">Nie, dziękuję</button></div></div>';
@@ -6678,10 +6807,11 @@ function zonesHtml(z) {
 function workoutRow(w, open) {
   var sl = FC.sessionLoad(w), strain = FC.strainFromLoad(sl.load), vol = FC.workoutVolumeKg(w);
   var meta = wkWhen(w.date) + ', ' + w.time + ' · ' + nf(w.durMin, 0) + ' min' + (w.hrAvg ? ' · śr. ' + Math.round(w.hrAvg) + ' ud/min' : '') + (w.source === 'whoop' ? ' · WHOOP' : '') + (w.source === 'hc' ? ' · ' + esc(HCC.originLabel(w.pkg)) + ' (Health Connect)' : '');
-  var sum = (w.source === 'whoop' || w.source === 'hc') ? [sportPretty(w.sport) || WK_NAME[w.type], w.distanceKm ? nf(w.distanceKm, 1) + ' km' : ''].filter(Boolean).join(' · ') : (w.type === 'gym' ? w.exercises.length + ' ćw. · ' + nfi(vol) + ' kg' : (w.distanceKm ? nf(w.distanceKm, 1) + ' km' : 'dystans nie podany'));
+  var sp_ = sportPretty(w.sport), sp1 = sp_ && sp_.toLowerCase() !== String(WK_NAME[w.type]).toLowerCase() ? sp_ : '';
+  var sum = (w.source === 'whoop' || w.source === 'hc') ? [sp1, w.distanceKm ? nf(w.distanceKm, 1) + ' km' : ''].filter(Boolean).join(' · ') : (w.type === 'gym' ? w.exercises.length + ' ćw. · ' + nfi(vol) + ' kg' : (w.distanceKm ? nf(w.distanceKm, 1) + ' km' : 'dystans nie podany'));
   var saunaW = w.type === 'sauna', kc = w.kcalNet != null ? w.kcalNet : (w.kcal != null ? w.kcal : null);
   if (saunaW) sum = nf(w.durMin, 0) + ' min';
-  return '<details class="card wk fu"' + (open ? ' open' : '') + '><summary><span style="color:#2D9CFF">' + ico(w.type, 26) + '</span><span class="grow"><span class="n" style="font-size:17px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + WK_NAME[w.type] + ' · ' + sum + '</span><span class="xs mut">' + meta + '</span></span><span class="n" style="font-size:' + (saunaW ? 14 : 24) + 'px;color:' + (saunaW ? '#9AA6B0' : '#2D9CFF') + '">' + (saunaW ? 'poza<br>obciążeniem' : nf(strain, 1)) + '</span></summary>' +
+  return '<details class="card wk fu"' + (open ? ' open' : '') + '><summary><span style="color:#2D9CFF">' + ico(w.type, 26) + '</span><span class="grow"><span class="n" style="font-size:17px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + WK_NAME[w.type] + (sum ? ' · ' + sum : '') + '</span><span class="xs mut">' + meta + '</span></span><span class="n" style="font-size:' + (saunaW ? 14 : 24) + 'px;color:' + (saunaW ? '#9AA6B0' : '#2D9CFF') + '">' + (saunaW ? 'poza<br>obciążeniem' : nf(strain, 1)) + '</span></summary>' +
     '<div class="col" style="margin-top:8px">' + (kc != null ? '<p class="sm" style="margin:0" data-e4="wk-kcal"><b class="n" style="font-size:18px">' + nfi(kc) + ' kcal</b> <span class="xs mut">ponad spoczynek, szacunek ±20%</span></p>' : '') + (saunaW ? '<p class="xs mut" style="margin:0">Sauna nie wlicza się do obciążenia, regeneracji ani wykrywania tętna maksymalnego. Dodamy tag Sauna do następnego pomiaru.</p>' : '') + (saunaW ? '' : w.zonesSec ? '<p class="lbl" style="font-size:12px">Czas w strefach tętna</p>' + zonesHtml(w.zonesSec) : '<p class="xs mut" style="margin:0">' + (w.hasHr ? 'Strefy tętna wymagają profilu i tętna spoczynkowego.' : 'Bez tętna z opaski – obciążenie z oceny wysiłku.') + '</p>') +
     (saunaW ? '' : w.source === 'hc' ? '<p class="xs mut" style="margin:0" data-hc="wk-note">Trening zaimportowany z Health Connect (aplikacja: ' + esc(HCC.originLabel(w.pkg)) + ', pakiet ' + esc(w.pkg || '?') + ').' + (w.trimp != null ? ' Obciążenie ' + nf(strain, 1) + ' policzone ze średniego tętna ' + Math.round(w.hrAvg) + '.' : ' Bez tętna z opaski i bez oceny wysiłku nie wlicza się do obciążenia.') + '</p>' : w.source === 'whoop' ? '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ' = strain z WHOOP' + (w.hrMax ? ' · maks. tętno ' + Math.round(w.hrMax) : '') + '. Trening zaimportowany z WHOOP.</p>' : '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ': z tętna ' + (sl.fromHr ? nf(FC.strainFromLoad(sl.fromHr), 1) : 'brak') + ' · z oceny wysiłku ' + (sl.fromRpe ? nf(FC.strainFromLoad(sl.fromRpe), 1) + ' (RPE ' + w.rpe + ')' : 'brak') + '</p>') +
     (w.exercises.length ? '<p class="xs sub" style="margin:0">' + w.exercises.map(function (e) { return esc(e.name) + ' ' + e.sets.map(function (s) { return nf(s.kg, 1).replace(',0', '') + '×' + s.reps; }).join(', '); }).join('<br>') + '</p>' : '') +
@@ -6698,7 +6828,7 @@ function rTrening() {
   var today = todayStr(), st = todayStatus(), strain = FC.dailyStrain(S.workouts, today, S.days), tb = FC.targetBand(st.scored ? st.color : null);
   var h = header('Obciążenie dnia') + '<div class="body">';
   if (S.flash && S.flash.to === 'trening') h += '<div class="note ok" role="status">' + esc(S.flash.text) + '</div>';
-  h += resumeBanner();
+  h += resumeBanner() + pendingBanner();
   h += hrmaxPromptHtml(0);
   if (S.session) h += '<a href="#/' + sessionPath(S.session.type) + '" class="card tint-g"><span class="lbl">Trwa trening</span><span class="n" style="font-size:18px">' + WK_NAME[S.session.type] + ' – wróć do treningu</span></a>';
   else {
@@ -6726,9 +6856,10 @@ function exListHtml() {
     var last = e.last ? 'Ostatnio: ' + nf(e.last.kg, 1).replace(',0', '') + ' kg × ' + e.last.reps : 'Brak historii tego ćwiczenia';
     return '<div class="card"><div class="row sp"><span class="n" style="font-size:18px">' + esc(e.name) + '</span><button class="ib plain" data-act="rmEx" data-e="' + i + '" aria-label="Usuń ćwiczenie ' + esc(e.name) + '">' + ico('trash', 20) + '</button></div><span class="xs mut" style="margin-top:-6px">' + last + '</span>' +
       e.sets.map(function (st, j) {
-        return '<div class="row" style="gap:5px"><span class="xs mut" style="width:12px">' + (j + 1) + '</span><input class="inp num" style="width:64px" type="text" inputmode="decimal" data-in="setkg" data-e="' + i + '" data-s="' + j + '" data-keep="1" value="' + esc(st.kg) + '" aria-label="Seria ' + (j + 1) + ' kg"><span class="xs mut">kg</span><span class="mut" style="margin:0 2px">×</span>' +
-          '<input class="inp num" style="width:58px" type="text" inputmode="numeric" data-in="setreps" data-e="' + i + '" data-s="' + j + '" data-keep="1" value="' + esc(st.reps) + '" aria-label="Seria ' + (j + 1) + ' powtórzenia"><span class="xs mut grow">powt.</span>' +
-          '<button class="ib" style="' + (st.done ? 'background:#2EE86B;color:#0B0E11;border-color:#2EE86B' : 'background:transparent') + '" data-act="setDone" data-e="' + i + '" data-s="' + j + '" aria-pressed="' + !!st.done + '" aria-label="Seria ' + (j + 1) + ' wykonana">' + (st.done ? ico('check', 22) : '') + '</button></div>';
+        var dn = !!st.done;
+        return '<div class="row" style="gap:5px" data-state="' + (dn ? 'done' : 'todo') + '">' + (dn ? '<span style="width:20px;height:20px;border-radius:10px;background:#2EE86B;color:#0B0E11;display:inline-flex;align-items:center;justify-content:center;flex:none" role="img" aria-label="Seria ' + (j + 1) + ' wykonana">' + ico('check', 13) + '</span>' : '<span class="xs mut" style="width:12px">' + (j + 1) + '</span>') + '<input class="inp num" style="width:64px' + (dn ? ';border-color:#2EE86B' : '') + '" type="text" inputmode="decimal" data-in="setkg" data-e="' + i + '" data-s="' + j + '" data-keep="1" value="' + esc(st.kg) + '" aria-label="Seria ' + (j + 1) + ' kg"><span class="xs mut">kg</span><span class="mut" style="margin:0 2px">×</span>' +
+          '<input class="inp num" style="width:58px' + (dn ? ';border-color:#2EE86B' : '') + '" type="text" inputmode="numeric" data-in="setreps" data-e="' + i + '" data-s="' + j + '" data-keep="1" value="' + esc(st.reps) + '" aria-label="Seria ' + (j + 1) + ' powtórzenia"><span class="xs mut grow">' + (dn ? '' : 'powt.') + '</span>' +
+          (dn ? '<button class="btn sm" data-act="setUndo" data-e="' + i + '" data-s="' + j + '" aria-label="Cofnij: seria ' + (j + 1) + ' wykonana">Cofnij</button>' : '<button class="ib" style="background:transparent" data-act="setDone" data-e="' + i + '" data-s="' + j + '" aria-label="Seria ' + (j + 1) + ' wykonana"></button>') + '</div>';
       }).join('') + '<button class="btn sm full" style="border-style:dashed;background:transparent" data-act="addSet" data-e="' + i + '">+ Dodaj serię</button></div>';
   }).join('');
 }
@@ -6857,13 +6988,13 @@ function pomiarRow(d, today) {
   return '<div class="card" style="gap:6px"><div class="row sp"><b>' + ddmm(d.date) + '.' + d.date.slice(0, 4) + (d.date === today ? ' <span class="xs" style="color:#2CE8B5">dziś</span>' : '') + ' <span class="xs mut">' + d.time + '</span>' + (d.source === 'noc' ? ' <span class="xs" style="color:#2D9CFF">noc (WHOOP)</span>' : (d.source === 'whoop' ? ' <span class="xs" style="color:#2D9CFF">WHOOP (API)</span>' : '')) + '</b>' +
     (d.source === 'whoop' ? '<span class="xs mut">' + (d.quality === 'niska' ? 'kalibracja WHOOP' : 'dane z chmury WHOOP') + '</span>' : '<span class="xs" style="color:' + QCOL[d.quality] + ';font-weight:700">jakość ' + d.quality + '</span>') + '</div>' +
     '<div class="row" style="gap:18px;flex-wrap:wrap"><span><b class="n" style="font-size:22px">' + nf(d.rmssd, 0) + '</b> <span class="xs mut">ms RMSSD</span></span><span><b class="n" style="font-size:22px">' + (d.hr != null ? nf(d.hr, 0) : '—') + '</b> <span class="xs mut">ud/min</span></span>' + sl + '</div>' +
-    '<div class="xs mut">' + (d.tags.length ? esc(d.tags.join(' · ')) : 'Bez tagów') + (wbv ? ' · samopoczucie: ' + wbv + '/5 ocen' : '') + (d.whoop && d.source !== 'whoop' && d.whoop.hrv != null ? ' · WHOOP: HRV ' + nf(d.whoop.hrv, 0) + ' ms' : '') + '</div>' +
+    '<div class="xs mut">' + (d.tags.length ? esc(d.tags.join(' · ')) : 'Bez tagów') + (wbv ? ' · samopoczucie: ' + wbv + '/5 ocen' : '') + (d.whoop && d.source !== 'whoop' && d.whoop.hrv != null ? ' · WHOOP: HRV ' + nf(d.whoop.hrv, 0) + ' ms' : '') + (d.whoopHrv != null ? ' · HRV z WHOOP (wpisane): ' + nf(d.whoopHrv, 1).replace(/,0$/, '') + ' ms' : '') + '</div>' +
     '<div class="row" style="flex-wrap:wrap">' + (d.date === today ? '<button class="btn sm grow" data-act="editDay">Edytuj samopoczucie i sen</button>' : '') +
     '<button class="btn sm' + (d.date === today ? '' : ' grow') + '" data-act="delDay" data-d="' + d.date + '" data-confirm="Usuń">Usuń</button></div></div>';
 }
 function FC_wbCount(d) { return C.WB_KEYS.filter(function (k) { return d.wellbeing && d.wellbeing[k] != null; }).length; }
 function rPomiary() {
-  var h = header('Pomiary', { back: 'dzis' }) + '<div class="body">', today = todayStr();
+  var h = header('Pomiary', { back: 'dzis' }) + '<div class="body">' + savedSlot('pomiary', 'note ok'), today = todayStr();
   var list = S.days.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; });
   if (!list.length) return h + emptyCard('Brak pomiarów', 'Pomiary poranne zapisują się po 2-minutowym pomiarze HRV.', '<a href="#/dzis" class="btn pri full">Wróć na Dziś</a>', 'ruler') + '</div>';
   h += '<p class="xs mut" style="margin:0">' + list.length + ' zapisanych dni. Usunięcie zmienia normę HRV i regenerację.</p>';
@@ -6960,32 +7091,61 @@ function whoopOptHtml() {
 }
 function profilBattHtml(ch) {
   if (!(S.connected && S.battery != null)) return '';
-  var l = S.battery, stuck = !ch.on && battStuck(), col = stuck ? '#9AA6B0' : battColor(l);
-  return '<a href="#/bateria" class="row" data-bat="profil-batt" style="margin-top:6px;min-height:44px;color:inherit"><div class="bar grow"><i style="width:' + l + '%;background:' + col + (stuck ? ';opacity:.55' : '') + '"></i></div><b style="color:' + col + ';font-size:18px">' + l + '%' + (stuck ? ' ?' : '') + '</b>' +
-    (stuck ? '<span class="xs mut">odczyt niepewny</span>' : '') + (ch.on ? '<span class="xs" style="color:#2CE8B5">⚡ Ładowanie</span>' : '') + '</a>' +
+  var l = S.battery, unrel = !ch.on && battUnreliable(), stuck = unrel || (!ch.on && battStuck()), col = stuck ? '#9AA6B0' : battColor(l);
+  return '<a href="#/bateria" class="row" data-bat="profil-batt" style="margin-top:6px;min-height:44px;color:inherit"><div class="bar grow"><i style="width:' + l + '%;background:' + col + (stuck ? ';opacity:.55' : '') + '"></i></div><b style="color:' + col + ';font-size:18px">' + (unrel ? '?%' : l + '%' + (stuck ? ' ?' : '')) + '</b>' +
+    (unrel ? '<span class="xs mut" data-bat="profil-unrel">odczyt niewiarygodny · sprawdź ponownie →</span>' : (stuck ? '<span class="xs mut">odczyt niepewny</span>' : '')) + (ch.on ? '<span class="xs" style="color:#2CE8B5">⚡ Ładowanie</span>' : '') + '</a>' +
     (ch.on ? '<div class="xs" style="color:#2CE8B5">' + (ch.src === 'status' ? 'ładowanie zgłoszone przez opaskę' : 'wykryte po wzroście poziomu') + '</div>' : '');
 }
+function pfInit() { S.pfSex = undefined; S.pfDraft = null; S.pfHmTouched = false; }
+function pfValues() { // what the form fields hold right now (the draft while typing, else the saved profile)
+  var p = S.profile || {}, dr = S.pfDraft, hm = FC.hrMaxOf(p);
+  return { age: dr ? dr.age : (p.age || ''), hm: dr ? dr.hm : (hm || ''), hg: dr ? dr.hg : (p.heightCm || ''), ik: dr ? dr.ik : (p.intakeKcal || '') };
+}
+function pfIsSaved() { // button state: form identical to the saved profile and the profile complete
+  var p = S.profile; if (!p || !p.age || !p.sex || S.pfDraft) return false;
+  return !S.pfDraft && (S.pfSex === undefined || S.pfSex === p.sex);
+}
+function pfSaveBtnHtml() {
+  var sv = pfIsSaved();
+  return '<button class="btn pri grow" data-act="pfSave" data-state="' + (sv ? 'saved' : 'dirty') + '"' + (sv ? ' aria-label="Dane zapisane"' : '') + '>' + (sv ? ico('check', 18) + ' Zapisano' : 'Zapisz dane') + '</button>';
+}
+function pfRefreshBtn() {
+  var b = document.querySelector('[data-act="pfSave"]'); if (!b) return;
+  var p = S.profile || {}, g = function (id) { var e = $(id); return e ? e.value.trim() : ''; };
+  var same = p.age && p.sex && S.pfSex === p.sex && g('pfAge') === String(p.age) && g('pfHrMax') === String(FC.hrMaxOf(p) || '') && g('pfHeight') === String(p.heightCm || '') && g('pfIntake') === String(p.intakeKcal || '');
+  if (!same) S.pfDraft = { age: g('pfAge'), hm: g('pfHrMax'), hg: g('pfHeight'), ik: g('pfIntake') }; else S.pfDraft = null;
+  var sv = !!same; b.dataset.state = sv ? 'saved' : 'dirty'; b.innerHTML = sv ? ico('check', 18) + ' Zapisano' : 'Zapisz dane';
+  var e = document.querySelector('[data-saved="profile"]'); if (e && !sv) { e.hidden = true; e.textContent = ''; delete SV.profile; }
+}
+function pfInput(el) {
+  if (el.id === 'pfHrMax') S.pfHmTouched = true;
+  if (el.id === 'pfAge' && !S.pfHmTouched && !(S.profile && S.profile.hrMax)) { // the computed HRmax follows the typed age until the user types an own value
+    var a = parseInt(el.value, 10), hmEl = $('pfHrMax'), ok = a >= 10 && a <= 100;
+    if (hmEl) { hmEl.disabled = !ok; hmEl.value = ok ? Math.round(FC.hrMaxTanaka(a)) : ''; }
+  }
+  pfRefreshBtn();
+}
 function rProfil() {
-  var p = S.profile || {}, pc = profileCtx(), w = S.weights, hm = FC.hrMaxOf(p), last = S.days[S.days.length - 1];
+  var p = S.profile || {}, pc = profileCtx(), w = S.weights, last = S.days[S.days.length - 1], pv = pfValues();
   if (S.pfSex === undefined) S.pfSex = p.sex || null;
   var ch = S.connected ? chargingState() : { on: false };
   var h = header('Profil', { back: 'dzis' }) + '<div class="body">';
   if (S.storageBroken) h += '<p class="note">Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie</p>';
   if (DEMO) h += '<p class="note">Tryb demo: dane syntetyczne, tylko w pamięci. Nic nie jest zapisywane w przeglądarce. Aby wyjść, otwórz plik bez „?demo=1”.</p>';
   h += '<div class="card"><p class="lbl">Twoje dane</p>' +
-    '<label class="row sp sm sub">Wiek<input class="inp num" style="width:110px" id="pfAge" type="number" inputmode="numeric" min="10" max="100" data-keep="1" value="' + (p.age || '') + '"></label>' +
+    '<label class="row sp sm sub">Wiek<input class="inp num" style="width:110px" id="pfAge" data-in="pf" type="number" inputmode="numeric" min="10" max="100" data-keep="1" value="' + esc(pv.age) + '"></label>' +
     '<div class="row sp sm sub"><span>Płeć</span><span class="chips" role="radiogroup" aria-label="Płeć"><button class="chip' + (S.pfSex === 'm' ? ' on' : '') + '" data-act="pfSex" data-v="m" role="radio" aria-checked="' + (S.pfSex === 'm') + '">Mężczyzna</button><button class="chip' + (S.pfSex === 'k' ? ' on' : '') + '" data-act="pfSex" data-v="k" role="radio" aria-checked="' + (S.pfSex === 'k') + '">Kobieta</button></span></div>' +
-    '<label class="row sp sm sub">Tętno maks.<span class="row" style="gap:6px"><input class="inp num" style="width:80px" id="pfHrMax" type="number" inputmode="numeric" data-keep="1" value="' + (hm || '') + '" ' + (p.age ? '' : 'disabled') + '><span class="xs" style="color:#2CE8B5">' + (p.hrMax ? 'ustawione ręcznie' : (p.age ? 'wyliczone: 208 − 0,7 × wiek' : '')) + '</span></span></label>' +
+    '<label class="row sp sm sub">Tętno maks.<span class="row" style="gap:6px"><input class="inp num" style="width:80px" id="pfHrMax" data-in="pf" type="number" inputmode="numeric" data-keep="1" value="' + esc(pv.hm) + '" ' + (pv.age ? '' : 'disabled') + '><span class="xs" style="color:#2CE8B5">' + (p.hrMax ? 'ustawione ręcznie' : (p.age ? 'wyliczone: 208 − 0,7 × wiek' : '')) + '</span></span></label>' +
     hrmaxLine() +
-    '<label class="row sp sm sub">Wzrost (cm)<input class="inp num" style="width:110px" id="pfHeight" type="number" inputmode="numeric" min="100" max="230" data-keep="1" placeholder="np. 175" value="' + (p.heightCm || '') + '"></label>' +
-    '<label class="row sp sm sub">Typowe spożycie (kcal/dzień)<input class="inp num" style="width:110px" id="pfIntake" type="number" inputmode="numeric" min="800" max="6000" data-keep="1" placeholder="opcjonalnie" value="' + (p.intakeKcal || '') + '"></label>' +
+    '<label class="row sp sm sub">Wzrost (cm)<input class="inp num" style="width:110px" id="pfHeight" data-in="pf" type="number" inputmode="numeric" min="100" max="230" data-keep="1" placeholder="np. 175" value="' + esc(pv.hg) + '"></label>' +
+    '<label class="row sp sm sub">Typowe spożycie (kcal/dzień)<input class="inp num" style="width:110px" id="pfIntake" data-in="pf" type="number" inputmode="numeric" min="800" max="6000" data-keep="1" placeholder="opcjonalnie" value="' + esc(pv.ik) + '"></label>' +
     '<p class="xs mut" style="margin:0">Wzrost i waga służą do liczenia kalorii. Typowe spożycie pozwala skalibrować wynik, gdy Twoja waga jest stabilna co najmniej 3 tygodnie.</p>' +
     '<div class="row sp sm sub"><span>Tętno spoczynkowe</span><span><b style="color:#fff">' + (pc.hrRest != null ? Math.round(pc.hrRest) : '—') + '</b> <span class="xs">' + (pc.hrRest != null ? 'norma z 60 dni' : 'brak pomiarów') + '</span></span></div>' +
-    '<p class="err" id="pfErr" hidden></p><div class="row"><button class="btn pri grow" data-act="pfSave">Zapisz dane</button>' + (p.hrMax ? '<button class="btn grow" data-act="pfResetHr">Przywróć wyliczone tętno maks.</button>' : '') + '</div></div>';
-  h += '<div class="card"><p class="lbl">Waga</p><div class="row"><input class="inp num grow" id="pfKg" type="text" inputmode="decimal" data-keep="1" placeholder="np. 82,4" aria-label="Waga w kg"><button class="btn sm" data-act="kgAdd">Dodaj ważenie</button></div><p class="err" id="kgErr" hidden></p>' +
+    '<p class="err" id="pfErr" hidden></p>' + savedSlot('profile') + '<div class="row">' + pfSaveBtnHtml() + (p.hrMax ? '<button class="btn grow" data-act="pfResetHr">Przywróć wyliczone tętno maks.</button>' : '') + '</div></div>';
+  h += '<div class="card"><p class="lbl">Waga</p><div class="row"><input class="inp num grow" id="pfKg" type="text" inputmode="decimal" data-keep="1" placeholder="np. 82,4" aria-label="Waga w kg"><button class="btn sm" data-act="kgAdd">Dodaj ważenie</button></div><p class="err" id="kgErr" hidden></p>' + savedSlot('weight') +
     (w.length ? '<div class="col" style="gap:0">' + w.slice(-6).reverse().map(function (x) { return '<div class="row sp sm" style="min-height:44px;border-top:1px solid rgba(255,255,255,.08)"><span class="sub">' + ddmm(x.date) + '.' + x.date.slice(0, 4) + (x.source === 'hc' ? ' <span class="xs" style="color:#2CE8B5" data-hc="wsrc">Health Connect</span>' : '') + '</span><span><b>' + nf(x.kg, 1) + ' kg</b></span><button class="btn sm" data-act="kgDel" data-d="' + x.date + '" data-confirm="Usuń">Usuń</button></div>'; }).join('') + '</div>' : '<p class="xs mut" style="margin:0">Brak ważeń. Historia wagi zapisuje się przy każdym dodaniu (jedno ważenie na dzień).</p>') + '</div>';
   h += '<div class="card"><p class="lbl">Źródła danych</p><div class="row" style="align-items:flex-start"><span class="dotp" style="background:' + (S.connected ? '#2EE86B' : '#8A96A0') + ';margin-top:7px"></span><div class="grow"><b>' + esc(S.connected ? S.name : (S.device ? S.device.name : 'Opaska')) + '</b><div class="xs mut">' + (S.connected ? 'połączony' : 'niepołączony') + (last ? ' · ostatni pomiar HRV: jakość ' + last.quality + ' (' + last.date + ')' : ' · brak pomiarów HRV') + '</div>' +
-    profilBattHtml(ch) + '</div></div>' +
+    profilBattHtml(ch) + (S.band && S.band.name ? '<div class="xs mut" data-ble="band-saved">Zapamiętana opaska: <b style="color:#C5CED6">' + esc(S.band.name) + '</b> (łączymy się z nią automatycznie)</div>' : '') + '</div></div>' +
     '<div class="js-conn">' + connHtml() + '</div>' + (S.connected && !DEMO ? '<div class="row" style="flex-wrap:wrap"><button class="btn grow" data-act="disconnect">Rozłącz</button><button class="btn grow" data-act="changeBand">Zmień opaskę</button></div>' : '') +
     '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:' + (S.wh.cfg.connected ? '#2EE86B' : '#6E7A84') + ';margin-top:7px;animation:none"></span><div class="grow"><b>WHOOP (chmura)</b><div class="xs mut">' + (S.wh.cfg.connected ? 'połączono · ostatnia synchronizacja ' + esc(whLastSyncText()) : 'konto WHOOP poniżej') + '</div></div></div>' +
     hcSourceRowHtml() +
@@ -7002,7 +7162,7 @@ function rProfil() {
   h += '<p class="xs mut" style="text-align:center;margin:0" data-ver>' + formaVersion() + ' · Narzędzie testowe. Nie jest wyrobem medycznym. Dane zapisują się tylko w tej przeglądarce.</p></div>';
   return h;
 }
-ROUTES.profil = { tab: null, depth: 1, parent: 'dzis', render: rProfil, mount: function () { S.pfSex = undefined; renderBattery(); } };
+ROUTES.profil = { tab: null, depth: 1, parent: 'dzis', init: pfInit, render: rProfil, mount: function () { renderBattery(); } };
 
 // ====================== DIAGNOSTYKA ======================
 function rDiag() {
@@ -7103,6 +7263,7 @@ var ACT = {
     var bad = !(age >= 10 && age <= 100) ? 'Podaj wiek (10–100).' : (!S.obSex ? 'Wybierz płeć.' : (kg && !FC.sanitizeWeight({ date: todayStr(), kg: kg }) ? 'Podaj wagę w kg (20–400) albo zostaw puste.' : ''));
     if (bad) { err.textContent = bad; err.hidden = false; return; }
     if (kg) addWeight(kg);
+    clearDraft('obAge'); clearDraft('obKg'); markSaved('onboarding', 'Zapisano profil' + (kg ? ' i wagę' : ''), 6000);
     applyProfile({ age: age, sex: S.obSex }); buzz(30);
   },
   addMenu: function (el) { var m = $('addMenu'); m.hidden = !m.hidden; el.setAttribute('aria-expanded', String(!m.hidden)); },
@@ -7111,15 +7272,19 @@ var ACT = {
     var inp = $('exName'), name = inp.value.trim(); if (!name || !S.session) return;
     var last = FC.lastExercisePerformance(S.workouts, name);
     S.session.exercises.push({ name: name, last: last, sets: [{ kg: last ? String(last.kg).replace('.', ',') : '', reps: last ? String(last.reps) : '', done: false }] });
-    inp.value = ''; $('exList').innerHTML = exListHtml(); saveSession();
+    inp.value = ''; clearDraft('exName'); $('exList').innerHTML = exListHtml(); saveSession();
   },
   rmEx: function (el) { S.session.exercises.splice(+el.dataset.e, 1); $('exList').innerHTML = exListHtml(); saveSession(); },
   addSet: function (el) {
     var e = S.session.exercises[+el.dataset.e], p = e.sets[e.sets.length - 1] || { kg: '', reps: '' };
     e.sets.push({ kg: p.kg, reps: p.reps, done: false }); $('exList').innerHTML = exListHtml(); saveSession();
   },
-  setDone: function (el) {
-    var st = S.session.exercises[+el.dataset.e].sets[+el.dataset.s]; st.done = !st.done;
+  setDone: function (el) { // explicit: marks the set done; only its own Cofnij button clears it
+    var st = S.session.exercises[+el.dataset.e].sets[+el.dataset.s]; st.done = true;
+    $('exList').innerHTML = exListHtml(); tickSession(); saveSession();
+  },
+  setUndo: function (el) {
+    var st = S.session.exercises[+el.dataset.e].sets[+el.dataset.s]; st.done = false;
     $('exList').innerHTML = exListHtml(); tickSession(); saveSession();
   },
   discardSess: function () { S.session = null; clearSessionStore(); log('Trening odrzucony.'); goBackTo('trening'); },
@@ -7128,18 +7293,20 @@ var ACT = {
     if (!w) { S.flash = null; goBackTo('trening'); return; }
     go('trening/podsumowanie', { replace: true });
   },
-  rpe: function (el) { S.rpe = +el.dataset.v; var t = pageTop(); paint(t.el, t.path); t.el.classList.add('noanim'); },
+  rpe: function (el) { S.rpe = +el.dataset.v; savePending(); var t = pageTop(); paint(t.el, t.path); t.el.classList.add('noanim'); },
   saveWorkout: function () {
     var w = S.pendingWorkout; if (!w) return;
     var ok = commitWorkout(S.rpe), sl = FC.sessionLoad(w); buzz(30);
     S.flash = { to: 'trening', text: 'Zapisano trening: ' + WK_NAME[w.type] + (w.type === 'sauna' ? ', poza obciążeniem' : ', obciążenie ' + nf(FC.strainFromLoad(sl.load), 1)) + (ok ? '' : '. Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie') + (DEMO ? ' (demo – tylko w pamięci)' : '') + '.' };
     goBackTo('trening');
   },
-  discardWorkout: function () { S.pendingWorkout = null; goBackTo('trening'); },
+  discardWorkout: function () { S.pendingWorkout = null; S.rpe = null; savePending(); goBackTo('trening'); },
+  openPending: function () { if (S.pendingWorkout) go('trening/podsumowanie'); },
+  dropPending: function () { S.pendingWorkout = null; S.rpe = null; savePending(); rerender(); },
   resumeSess: function () { if (resumeSession()) go(sessionPath(S.session.type)); },
   dropResume: function () { discardResume(); rerender(); },
   moreDays: function () { S.moreDays = true; rerender(); },
-  delDay: function (el) { S.days = C.removeDay(S.days, el.dataset.d); persist('days'); log('Usunięto pomiar ' + el.dataset.d + '.'); UI.onData(); },
+  delDay: function (el) { S.days = C.removeDay(S.days, el.dataset.d); persist('days'); log('Usunięto pomiar ' + el.dataset.d + '.'); markSaved('pomiary', 'Usunięto pomiar z ' + ddmm(el.dataset.d) + '.' + el.dataset.d.slice(0, 4), 6000); UI.onData(); },
   editDay: function () {
     var rec = dayRec(todayStr()); if (!rec) return;
     if (S.measure) return;
@@ -7151,7 +7318,7 @@ var ACT = {
   },
   delWorkout: function (el) { deleteWorkout(el.dataset.id); },
   moreWk: function () { S.moreWk = true; rerender(); },
-  pfSex: function (el) { S.pfSex = el.dataset.v; $$('[data-act="pfSex"]').forEach(function (b) { var on = b.dataset.v === S.pfSex; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); }); },
+  pfSex: function (el) { S.pfSex = el.dataset.v; $$('[data-act="pfSex"]').forEach(function (b) { var on = b.dataset.v === S.pfSex; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); }); pfRefreshBtn(); },
   pfSave: function () {
     if (!S.pfSex && S.profile && S.profile.sex) S.pfSex = S.profile.sex;
     var age = parseInt($('pfAge').value, 10), hm = $('pfHrMax').value.trim(), err = $('pfErr');
@@ -7160,15 +7327,19 @@ var ACT = {
     var hgRaw = $('pfHeight').value.trim(), inRaw = $('pfIntake').value.trim(), hg = hgRaw ? parseInt(hgRaw, 10) : null, ik = inRaw ? parseInt(inRaw, 10) : null;
     if (hg != null && !(hg >= 100 && hg <= 230)) { err.textContent = 'Wzrost: 100–230 cm.'; err.hidden = false; return; }
     if (ik != null && !(ik >= 800 && ik <= 6000)) { err.textContent = 'Typowe spożycie: 800–6000 kcal.'; err.hidden = false; return; }
-    var calc = Math.round(FC.hrMaxTanaka(age)), hmv = hm ? parseInt(hm, 10) : null, prev = S.profile || {}, nh = hmv != null && hmv !== calc ? hmv : null;
+    var calc = Math.round(FC.hrMaxTanaka(age)), hmv = hm ? parseInt(hm, 10) : null, prev = S.profile || {};
+    // an untouched HRmax field only mirrors the saved / computed value: it must never freeze the old computed value as a "manual" one when the age changes
+    var nh = !S.pfHmTouched ? (prev.hrMax != null ? prev.hrMax : null) : (hmv != null && hmv !== calc ? hmv : null);
     var patch = { age: age, sex: S.pfSex, hrMax: nh, heightCm: hg, intakeKcal: ik };
     if (nh == null) { patch.hrMaxSource = null; patch.hrMaxDate = null; }
     else if (nh !== prev.hrMax) { patch.hrMaxSource = XC.SRC.measured; patch.hrMaxDate = todayStr(); }
+    S.pfDraft = null; S.pfHmTouched = false; S.pfSex = undefined;
+    markSaved('profile', 'Zapisano dane profilu');
     applyProfile(patch); buzz(30);
   },
-  pfResetHr: function () { applyProfile({ hrMax: null, hrMaxSource: null, hrMaxDate: null }); },
-  kgAdd: function () { var v = $('pfKg').value.trim(); if (!addWeight(v)) { var e = $('kgErr'); e.textContent = 'Podaj wagę w kg (20–400).'; e.hidden = false; return; } UI.onData(); },
-  kgDel: function (el) { S.weights = S.weights.filter(function (x) { return x.date !== el.dataset.d; }); persist('weights'); UI.onData(); },
+  pfResetHr: function () { S.pfDraft = null; S.pfHmTouched = false; markSaved('profile', 'Zapisano: tętno maks. wyliczone z wieku'); applyProfile({ hrMax: null, hrMaxSource: null, hrMaxDate: null }); },
+  kgAdd: function () { var v = $('pfKg').value.trim(); if (!addWeight(v)) { var e = $('kgErr'); e.textContent = 'Podaj wagę w kg (20–400).'; e.hidden = false; return; } clearDraft('pfKg'); markSaved('weight', 'Zapisano ważenie: ' + nf(FC.sanitizeWeight({ date: todayStr(), kg: v }).kg, 1) + ' kg'); UI.onData(); },
+  kgDel: function (el) { S.weights = S.weights.filter(function (x) { return x.date !== el.dataset.d; }); persist('weights'); markSaved('weight', 'Usunięto ważenie z ' + ddmm(el.dataset.d) + '.' + el.dataset.d.slice(0, 4)); UI.onData(); },
   expAll: function () { exportAll(); showMsg('bkMsg', 'Wyeksportowano: ' + S.days.length + ' dni, ' + S.workouts.length + ' treningów, ' + S.weights.length + ' ważeń.', 'ok'); },
   impAll: function () { $('fileImport').click(); },
   whConnect: function () {
@@ -7197,8 +7368,11 @@ document.addEventListener('click', function (e) {
   var fn = ACT[el.dataset.act] || ACT_BAT[el.dataset.act] || ACT_E4[el.dataset.act] || ACT_HC[el.dataset.act]; if (fn) fn(el, e);
 });
 $('stack').addEventListener('input', function (e) {
-  var el = e.target, k = el.dataset && el.dataset.in; if (!k) return;
-  if (k === 'bed' || k === 'wakeT' || k === 'whoop') { var f = curForm(); if (f) { if (k === 'bed') f.bed = el.value; else if (k === 'wakeT') f.wake = el.value; else f.whoop = el.value; } }
+  var el = e.target, k = el.dataset && el.dataset.in;
+  if (el.id && DRAFT_IDS[el.id]) { var tp = pageTop(); if (tp) (S.drafts[tp.path] = S.drafts[tp.path] || {})[el.id] = el.value; }
+  if (!k) return;
+  if (k === 'pf') pfInput(el);
+  else if (k === 'bed' || k === 'wakeT' || k === 'whoop') { var f = curForm(); if (f) { if (k === 'bed') f.bed = el.value; else if (k === 'wakeT') f.wake = el.value; else f.whoop = el.value; } }
   else if (k === 'setkg' || k === 'setreps') { var st = S.session && S.session.exercises[+el.dataset.e].sets[+el.dataset.s]; if (st) { st[k === 'setkg' ? 'kg' : 'reps'] = el.value; tickSession(); saveSession(); } }
   else if (k === 'km' && S.session) { S.session.distance = el.value; saveSession(); }
   else if (k === 'whId') S.wh.form.id = el.value;
@@ -7207,8 +7381,8 @@ $('stack').addEventListener('input', function (e) {
 });
 $('stack').addEventListener('change', function (e) {
   var el = e.target;
-  if (el.dataset && el.dataset.in === 'wake' && !isNaN(FC.parseHM(el.value))) { el.blur(); applyProfile({ plannedWake: el.value }); }
-  if (el.dataset && el.dataset.in === 'nightWake' && /^\d{2}:\d{2}$/.test(el.value)) setNightWake(el.value);
+  if (el.dataset && el.dataset.in === 'wake' && !isNaN(FC.parseHM(el.value))) { markSaved('wake', 'Zapisano: pobudka ' + el.value); el.blur(); applyProfile({ plannedWake: el.value }); }
+  if (el.dataset && el.dataset.in === 'nightWake' && /^\d{2}:\d{2}$/.test(el.value)) { setNightWake(el.value); markSaved('nightWake', 'Zapisano: pobudka ' + el.value); }
   if (el.id === 'whFile' && el.files && el.files.length) {
     var picked = Array.prototype.slice.call(el.files); el.value = '';
     whoopImportFiles(picked);
@@ -7251,7 +7425,7 @@ whoopMaybeSync();
 e4Start();
 hcStart();
 
-function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-26 15:33 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
+function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-26 18:41 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
 
 })();</script>
 </body>
