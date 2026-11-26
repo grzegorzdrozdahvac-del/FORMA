@@ -421,7 +421,13 @@ canvas{display:block;width:100%;height:200px}
   };
   function calibrationLabel(n) { return 'Kalibracja: ' + n + ' z ' + CAL_FULL + ' dni – wynik wstępny'; }
 
+  // Etap 6 (tryb dnia): an optional predicate date -> boolean. Days it flags (Chory / Podróż) are left out of every norm,
+  // exactly like the Choroba / Alkohol tags. Installed by the app (E6Core.isExcluded over the saved day modes); null = off.
+  var NORM_EXCL = null;
+  function setNormExcluder(fn) { NORM_EXCL = typeof fn === 'function' ? fn : null; }
+  function isModeExcluded(date) { return !!(NORM_EXCL && date && NORM_EXCL(date)); }
   function excludedFromNorm(day) {
+    if (isModeExcluded(day.date)) return true;
     var t = day.tags || [];
     for (var i = 0; i < EXCLUDE_TAGS.length; i++) if (t.indexOf(EXCLUDE_TAGS[i]) >= 0) return true;
     return false;
@@ -906,7 +912,7 @@ canvas{display:block;width:100%;height:200px}
     rmssd: rmssd, sdnn: sdnn, mean: mean, median: median,
     windowStats: windowStats, pmdErrorText: pmdErrorText,
     dayNum: dayNum, dateFromNum: dateFromNum, addDays: addDays, localDateStr: localDateStr, localTimeStr: localTimeStr,
-    clamp: clamp, colorFor: colorFor, baseline: baseline, rolling7: rolling7, dayStatus: dayStatus, calibrationLabel: calibrationLabel,
+    clamp: clamp, colorFor: colorFor, setNormExcluder: setNormExcluder, isModeExcluded: isModeExcluded, baseline: baseline, rolling7: rolling7, dayStatus: dayStatus, calibrationLabel: calibrationLabel,
     quadrantFor: quadrantFor, sanitizeDay: sanitizeDay, mergeDays: mergeDays, upsertDay: upsertDay, removeDay: removeDay,
     findDay: findDay, daysToCsv: daysToCsv, syntheticDays: syntheticDays, sortDays: sortDays,
     processNight: processNight, nightSeriesOf: nightSeriesOf, cleanNightSeries: cleanNightSeries, nightRecord: nightRecord, mergeNightRecord: mergeNightRecord, mergeMorningRecord: mergeMorningRecord, sanitizeSecondary: sanitizeSecondary,
@@ -1209,6 +1215,10 @@ canvas{display:block;width:100%;height:200px}
   function sleepNeedHours(strainYesterday, debt3) {
     return BASE_NEED_H + 0.05 * Math.max(0, (strainYesterday || 0) - 10) + 0.5 * (debt3 || 0);
   }
+  // Etap 6: the app can replace the need formula (base need from Profil + debt + strain bonus, see e6-core.js).
+  // fn(prevNightsH[], yesterdayStrain) -> { needH, ... }; null = the original formula above.
+  var NEED_FN = null;
+  function setSleepNeedFn(fn) { NEED_FN = typeof fn === 'function' ? fn : null; }
   function sleepPerformance(durH, needH) { return clamp(durH / needH * 100, 0, 100); }
   // nights: [{bed:'HH:MM', wake:'HH:MM'}] (up to 7). Needs >=3 nights. -10 pts per 30 min of mean SD.
   function sleepRegularity(nights) {
@@ -1396,13 +1406,14 @@ canvas{display:block;width:100%;height:200px}
       if (r && r.sleep) { var m = recSleepMin(r); if (m > 0) prevDur.push(m / 60); }
     }
     var debt = sleepDebt3(prevDur), strainY = dailyStrain(workouts, H.dateFromNum(t - 1), days);
-    var need = sleepNeedHours(strainY, debt), durH = durMin / 60;
+    var nd = NEED_FN ? NEED_FN(prevDur, strainY) : null;
+    var need = nd ? nd.needH : sleepNeedHours(strainY, debt), durH = durMin / 60;
     var nights = [];
     for (var j = 6; j >= 0; j--) { var q = H.findDay(days, H.dateFromNum(t - j)); if (q && q.sleep) nights.push(q.sleep); }
     var reg = sleepRegularity(nights), perf = sleepPerformance(durH, need);
     var wsW = rec.whoop && rec.whoop.sleep, wsH = rec.hc && rec.hc.sleep, ws = wsW || wsH, eff = ws && ws.efficiency != null ? clamp(ws.efficiency, 0, 100) : 100;
     return {
-      date: date, bed: rec.sleep.bed, wake: rec.sleep.wake, durH: durH, needH: need, debt3: debt, strainY: strainY,
+      date: date, bed: rec.sleep.bed, wake: rec.sleep.wake, durH: durH, needH: need, needInfo: nd, debt3: debt, strainY: strainY,
       perf: perf, reg: reg.score, regInfo: reg, eff: eff, effReal: !!(ws && ws.efficiency != null), score: sleepScore(perf, reg.score, eff), shortH: Math.max(0, need - durH),
       whoop: ws || null, stagesSrc: wsW ? 'whoop' : (wsH ? 'hc' : null), inBedH: ws && ws.inBedMin ? ws.inBedMin / 60 : null
     };
@@ -1639,7 +1650,7 @@ canvas{display:block;width:100%;height:200px}
     normRhr: normRhr, workoutVolumeKg: workoutVolumeKg, lastExercisePerformance: lastExercisePerformance, restingHr: restingHr,
     loadSeries: loadSeries, tsbPercent: tsbPercent, formZone: formZone, loadDataDays: loadDataDays, acwr: acwr, weekStart: weekStart, weeklyVolume: weeklyVolume,
     dailyNote: dailyNote, sanitizeProfile: sanitizeProfile, profileComplete: profileComplete, hrMaxOf: hrMaxOf, sanitizeWeight: sanitizeWeight, sanitizeWorkout: sanitizeWorkout, serializeSession: serializeSession, restoreSession: restoreSession, SESSION_MAX_AGE_MS: SESSION_MAX_AGE_MS,
-    recSleepMin: recSleepMin, trainingOnly: trainingOnly, workoutOverlap: workoutOverlap, mergeWhoopWorkouts: mergeWhoopWorkouts, mergeById: mergeById, sortWorkouts: sortWorkouts, demoData: demoData
+    recSleepMin: recSleepMin, setSleepNeedFn: setSleepNeedFn, trainingOnly: trainingOnly, workoutOverlap: workoutOverlap, mergeWhoopWorkouts: mergeWhoopWorkouts, mergeById: mergeById, sortWorkouts: sortWorkouts, demoData: demoData
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.FormaCore = api;
@@ -2597,9 +2608,11 @@ canvas{display:block;width:100%;height:200px}
   // Level of one day before and after tags: base (signals + 2-day rule), adjusted (explain -1 / illness +1).
   function dayLevel(ctx, date) {
     if (ctx.memo[date]) return ctx.memo[date];
+    // Etap 6: days in tryb Chory / Podróż never raise an alarm (and do not feed the 2-day / streak rules of the days around them)
+    if (H.isModeExcluded && H.isModeExcluded(date)) { var q = { info: null, base: 0, adj: 0, explained: null, raised: null, mode: true }; ctx.memo[date] = q; return q; }
     var inf = dayInfo(ctx.view, date), out = { info: inf, base: 0, adj: 0, explained: null, raised: null };
     if (inf && inf.ready) {
-      var prev = dayInfo(ctx.view, prevDate(date, 1)), prevSig = !!(prev && prev.ready && prev.sig);
+      var prev = dayInfo(ctx.view, prevDate(date, 1)), prevSig = !!(prev && prev.ready && prev.sig && !(H.isModeExcluded && H.isModeExcluded(prevDate(date, 1))));
       if (inf.strong) out.base = 3;
       else if (inf.both) out.base = 2;
       else if (inf.sig && prevSig) out.base = 2;
@@ -2649,7 +2662,8 @@ canvas{display:block;width:100%;height:200px}
     opts = opts || {};
     var vf = H.viewForDate(days, date), view = vf.view, dayR = H.findDay(days, date);
     var lo = H.dayNum(date) - (WINDOW - 1), hi = H.dayNum(date);
-    var n = view.filter(function (d) { var k = H.dayNum(d.date); return k >= lo && k <= hi && fin(d.lnRmssd); }).length;
+    // days in tryb Chory / Podróż are not part of the baseline, so they do not count towards the 14-day activation either
+    var n = view.filter(function (d) { var k = H.dayNum(d.date); return k >= lo && k <= hi && fin(d.lnRmssd) && !(H.isModeExcluded && H.isModeExcluded(d.date)); }).length;
     var res = {
       date: date, hasRecord: !!H.findDay(view, date), n: n, need: NEED_DAYS, calibrating: false, level: 0, key: 'ok', label: LEVELS[0].label, tone: LEVELS[0].tone,
       color: LEVELS[0].color, message: '', disclaimer: DISCLAIMER, group: vf.group, normLabel: vf.label,
@@ -2657,6 +2671,8 @@ canvas{display:block;width:100%;height:200px}
       checklist: [], drivers: null, trend3: null, today: null
     };
     res.calLabel = 'Alarm aktywny po ' + NEED_DAYS + ' dniach pomiarów: ' + Math.min(n, NEED_DAYS) + '/' + NEED_DAYS;
+    // Etap 6: tryb Chory / Podróż - the alarm is muted (a quiet note instead); level stays 0 so no notification, no alarm tip
+    if (H.isModeExcluded && H.isModeExcluded(date)) { res.muted = true; res.message = 'Alarm wyciszony: w trybie dnia Chory lub Podróż nie oceniamy odchyleń.'; return res; }
     if (!res.hasRecord) { res.message = 'Brak pomiaru z tego dnia – alarm liczy się z porannego lub nocnego pomiaru.'; return res; }
     var ctx = { view: view, days: days, memo: {} };
     var inf0 = dayInfo(view, date);
@@ -2809,7 +2825,12 @@ canvas{display:block;width:100%;height:200px}
   //          walkMinYesterday, walkLogged, zones13Yesterday, alcoholYesterday, saunaYesterday, history:[{date,id}] }
   // Returns { id, kind, rule, title, why }. First matching rule wins.
   function dailyTip(st) {
-    var tip;
+    var tip, mode = st.mode || 'aktywny';
+    // 0. Etap 6, tryb dnia: Chory / Podróż -> rest and recovery (the alarm is muted in these modes, so rule 1 never fires)
+    if (mode === 'chory') return { id: 'tryb-chory', kind: 'recovery', rule: 0, title: 'Dziś odpoczynek: sen, woda, bez treningu',
+      why: 'Tryb Chory: te dni nie wchodzą do Twojej normy i nie wysyłam alarmów. Najważniejsze są sen i woda. Przy objawach choroby skonsultuj się z lekarzem.' };
+    if (mode === 'podroz') return { id: 'tryb-podroz', kind: 'recovery', rule: 0, title: 'Dziś lżej: woda, sen i krótki spacer',
+      why: 'Tryb Podróż: zmiana rytmu i strefy czasowej zaburza HRV, więc te dni nie wchodzą do Twojej normy. Pij dużo wody i połóż się o stałej porze.' };
     // 1. Alarm (level >= 2) -> recovery
     if (st.alarmLevel >= 2) {
       var strong = st.alarmLevel >= 3;
@@ -2824,13 +2845,14 @@ canvas{display:block;width:100%;height:200px}
     }
     // 3. Green recovery, < 3 gym sessions this ISO week, no gym for 2+ days
     var sinceGym = st.daysSinceGym == null ? Infinity : st.daysSinceGym;
-    if (st.readinessColor === 'zielony' && (st.gymThisWeek || 0) < 3 && sinceGym >= 2) {
+    // Urlop (Etap 6): goals are relaxed, so no push towards the gym (rule 3) or a step goal (rule 4)
+    if (mode !== 'urlop' && st.readinessColor === 'zielony' && (st.gymThisWeek || 0) < 3 && sinceGym >= 2) {
       return { id: 'silownia', kind: 'gym', rule: 3, title: 'Dobry dzień na siłownię',
         why: 'Regeneracja jest zielona, w tym tygodniu masz ' + (st.gymThisWeek || 0) + ' z 3 treningów siłowych' + (st.daysSinceGym == null ? '.' : ', a ostatni był ' + (st.daysSinceGym === 1 ? 'wczoraj' : st.daysSinceGym + ' dni temu') + '.') };
     }
     // 4. Little movement yesterday: < 5000 steps. Without steps data (web, no counter) movement is unknown, so the rule is skipped
     // (an unlogged walk is not proof of inactivity).
-    var stepsKnown = fin(st.stepsYesterday), little = stepsKnown && st.stepsYesterday < 5000;
+    var stepsKnown = fin(st.stepsYesterday), little = mode !== 'urlop' && stepsKnown && st.stepsYesterday < 5000;
     if (little) {
       var z = st.zones13Yesterday || 0;
       return { id: 'marsz', kind: 'move', rule: 4, title: 'Dziś cel: 45 min szybkiego marszu',
@@ -4195,6 +4217,288 @@ canvas{display:block;width:100%;height:200px}
   else root.E5Core = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
+<script>/* Forma Etap 6 (part 1) - day modes, personal typical range, deviation from the norm, HRV status, sleep need + bedtime, recovery time.
+   Pure logic, no DOM. Browser: window.E6Core (needs window.HrvCore, window.FormaCore). Node: require('./e6-core.js'). */
+(function (root) {
+  'use strict';
+  var H = (typeof module !== 'undefined' && module.exports) ? require('./hrv-core.js') : root.HrvCore;
+  var F = (typeof module !== 'undefined' && module.exports) ? require('./forma-core.js') : root.FormaCore;
+  function fin(v) { return typeof v === 'number' && isFinite(v); }
+  function clamp(x, a, b) { return Math.min(b, Math.max(a, x)); }
+  function mean(a) { if (!a.length) return NaN; var s = 0; a.forEach(function (v) { s += v; }); return s / a.length; }
+  function isDate(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && isFinite(H.dayNum(s)); }
+  var NEED_DAYS = 14;           // valid days needed for a band / norm-based status (same as the alarm activation)
+  var MIN_SD_LN = 0.02, MIN_SD_HR = 1; // same floors as hrv-core / alarm-core
+
+  // =====================================================================================================
+  // 1. TRYB DNIA (Aktywny / Chory / Podróż / Urlop)
+  //   Chory, Podróż : days are EXCLUDED from the 60-day HRV / RHR norm and from the alarm baseline (hrv-core hook setNormExcluder),
+  //                   alarms are muted, the daily tip is rest / recovery, the strain goal is relaxed, no step nudges.
+  //   Urlop         : days STILL COUNT to the norm; only goals and nudges are relaxed (no step nudges, no gym / step-goal tips).
+  //   A mode is stored as a date range { mode, from, to } (to = null: "do odwołania"). "Aktywny" is simply the absence of a range.
+  // =====================================================================================================
+  var MODES = {
+    aktywny: { id: 'aktywny', label: 'Aktywny', excludes: false, mutes: false, relaxes: false, color: '#2EE86B', bg: 'rgba(46,232,107,.16)',
+      desc: 'Zwykły tryb: wszystkie dni liczą się do Twojej normy, alarm działa.' },
+    chory: { id: 'chory', label: 'Chory', excludes: true, mutes: true, relaxes: true, color: '#FF4D5E', bg: 'rgba(255,77,94,.20)',
+      desc: 'Dni nie liczą się do normy HRV i tętna, alarm jest wyciszony, wskazówka dnia to odpoczynek, cel obciążenia jest niższy.' },
+    podroz: { id: 'podroz', label: 'Podróż', excludes: true, mutes: true, relaxes: true, color: '#2D9CFF', bg: 'rgba(45,156,255,.20)',
+      desc: 'Dni nie liczą się do normy HRV i tętna (zmiana rytmu zaburza pomiar), alarm jest wyciszony, cel obciążenia jest niższy.' },
+    urlop: { id: 'urlop', label: 'Urlop', excludes: false, mutes: false, relaxes: true, color: '#E07BF0', bg: 'rgba(224,123,240,.20)',
+      desc: 'Dni nadal liczą się do normy. Luźniejsze cele i brak przypomnień o krokach.' }
+  };
+  var MODE_ORDER = ['aktywny', 'chory', 'podroz', 'urlop'];
+  var MAX_RANGES = 200, MAX_SPAN_DAYS = 800;
+
+  function sortRanges(a) { return a.slice().sort(function (x, y) { return x.from < y.from ? -1 : (x.from > y.from ? 1 : 0); }); }
+  // merges neighbours of the same mode that touch or overlap
+  function mergeRanges(a) {
+    var out = [];
+    sortRanges(a).forEach(function (r) {
+      var last = out[out.length - 1];
+      if (last && last.mode === r.mode && (last.to === null || H.dayNum(r.from) <= H.dayNum(last.to) + 1)) {
+        if (last.to !== null && (r.to === null || r.to > last.to)) last.to = r.to;
+      } else out.push({ mode: r.mode, from: r.from, to: r.to });
+    });
+    return out;
+  }
+  // Puts `mode` on [from .. to] (to = null: open end). Whatever was there before is cut around it; 'aktywny' only cuts (it ends modes).
+  function setMode(modes, mode, from, to) {
+    if (!MODES[mode] || !isDate(from)) return (modes || []).slice();
+    var nt = to == null ? null : to;
+    if (nt !== null && (!isDate(nt) || nt < from)) return (modes || []).slice();
+    var out = [];
+    (modes || []).forEach(function (r) {
+      var overlap = (nt === null || r.from <= nt) && (r.to === null || r.to >= from);
+      if (!overlap) { out.push({ mode: r.mode, from: r.from, to: r.to }); return; }
+      if (r.from < from) out.push({ mode: r.mode, from: r.from, to: H.addDays(from, -1) });
+      if (nt !== null && (r.to === null || r.to > nt)) out.push({ mode: r.mode, from: H.addDays(nt, 1), to: r.to });
+    });
+    if (mode !== 'aktywny') out.push({ mode: mode, from: from, to: nt });
+    return mergeRanges(out);
+  }
+  // Sanitises stored ranges (later entries win over earlier ones where they overlap)
+  function cleanModes(arr) {
+    var out = [];
+    (Array.isArray(arr) ? arr : []).slice(0, MAX_RANGES).forEach(function (r) {
+      if (!r || typeof r !== 'object' || !MODES[r.mode] || r.mode === 'aktywny' || !isDate(r.from)) return;
+      var to = r.to == null ? null : (isDate(r.to) && r.to >= r.from ? r.to : undefined);
+      if (to === undefined) return;
+      if (to !== null && H.dayNum(to) - H.dayNum(r.from) > MAX_SPAN_DAYS) return;
+      out = setMode(out, r.mode, r.from, to);
+    });
+    return out;
+  }
+  // A mode may start up to 14 days in the past ("Chory od poniedziałku"); norms and the alarm baseline then follow retroactively,
+  // because exclusion is looked up per date (hrv-core hook) and nothing is cached.
+  var MAX_BACK_DAYS = 14;
+  function startOk(from, today, minFrom) {
+    if (!isDate(from) || from > today) return false;
+    var lo = H.addDays(today, -MAX_BACK_DAYS); if (minFrom && minFrom < lo) lo = minFrom;
+    return from >= lo;
+  }
+  // Removes the range that starts on `from` with `mode` (history list: delete / edit)
+  function removeRange(modes, mode, from) {
+    return (modes || []).filter(function (r) { return !(r.mode === mode && r.from === from); }).map(function (r) { return { mode: r.mode, from: r.from, to: r.to }; });
+  }
+  function rangeOn(modes, date) {
+    var best = null;
+    (modes || []).forEach(function (r) { if (r.from <= date && (r.to === null || date <= r.to) && (!best || r.from >= best.from)) best = r; });
+    return best;
+  }
+  function modeOn(modes, date) { var r = rangeOn(modes, date); return r ? r.mode : 'aktywny'; }
+  function isExcluded(modes, date) { return MODES[modeOn(modes, date)].excludes; }
+  function isMuted(modes, date) { return MODES[modeOn(modes, date)].mutes; }
+  // "do odwołania" / "do 02.12"
+  function spanText(r) {
+    if (!r) return '';
+    if (r.to === null) return 'do odwołania';
+    var p = r.to.split('-'); return 'do ' + p[2] + '.' + p[1];
+  }
+  // Coloured-band segments over a list of consecutive dates: [{ i0, i1, mode }] (only modes other than aktywny)
+  function bands(modes, dates) {
+    var out = [], cur = null;
+    dates.forEach(function (d, i) {
+      var m = modeOn(modes, d);
+      if (m === 'aktywny') { cur = null; return; }
+      if (cur && cur.mode === m && cur.i1 === i - 1) cur.i1 = i; else { cur = { i0: i, i1: i, mode: m }; out.push(cur); }
+    });
+    return out;
+  }
+  // Goal for the day's strain, relaxed in a mode. band = {lo, hi} | null. Chory: 0-4, Podróż: 0-7, Urlop: no lower bound (upper bound stays).
+  function relaxBand(band, mode) {
+    if (mode === 'chory') return { lo: 0, hi: 4, relaxed: true };
+    if (mode === 'podroz') return { lo: 0, hi: 7, relaxed: true };
+    if (mode === 'urlop') return band ? { lo: 0, hi: band.hi, relaxed: true } : { lo: 0, hi: 10, relaxed: true };
+    return band;
+  }
+
+  // =====================================================================================================
+  // 2. PAS "TWÓJ TYPOWY ZAKRES" - personal norm of any daily metric: mean +- 0.75 SD of the 60 days BEFORE endDate,
+  //    mode-excluded days left out. Needs >= 14 valid days; otherwise no band.
+  // =====================================================================================================
+  var BAND_K = 0.75, WINDOW = 60;
+  // valueOf(date) -> number | null. isEx(date) -> bool (default: the installed hrv-core excluder).
+  function rangeBand(valueOf, endDate, isEx, k) {
+    isEx = isEx || H.isModeExcluded; k = k == null ? BAND_K : k;
+    var vals = [], e = H.dayNum(endDate);
+    for (var q = 1; q <= WINDOW; q++) {
+      var d = H.dateFromNum(e - q), v = valueOf(d);
+      if (!fin(v) || (isEx && isEx(d))) continue;
+      vals.push(v);
+    }
+    var n = vals.length;
+    if (n < NEED_DAYS) return { ok: false, n: n, need: NEED_DAYS };
+    var m = mean(vals), sd = H.sdnn(vals);
+    return { ok: true, n: n, need: NEED_DAYS, mean: m, sd: sd, lo: m - k * sd, hi: m + k * sd };
+  }
+  function rangeLabel(v, band) {
+    if (!fin(v) || !band || !band.ok) return null;
+    if (v < band.lo) return { key: 'nizej', label: 'poniżej' };
+    if (v > band.hi) return { key: 'wyzej', label: 'powyżej' };
+    return { key: 'norma', label: 'w normie' };
+  }
+
+  // =====================================================================================================
+  // 3. ODCHYLENIE OD NORMY - daily deviation in SD from the norm valid on that day (60 days before it, mode days left out).
+  //    HRV: z of ln(RMSSD), band +-0.75 SD (same as the HRV band elsewhere). RHR: z of HR, band +-1 SD (same as the RHR band elsewhere).
+  //    A day gets a point only when its own norm has >= 14 valid days. Smoothed line = mean of the daily deviations of the last
+  //    7 days (>= 2 values, mode-excluded days not included). Excluded days are returned with excluded:true (drawn grey).
+  // =====================================================================================================
+  function deviationSeries(days, endDate, nDays, kind, isEx) {
+    isEx = isEx || H.isModeExcluded;
+    var vf = H.viewForDate(days, endDate), view = vf.view, dm = {};
+    view.forEach(function (d) { dm[d.date] = d; });
+    var rhr = kind === 'rhr', k = rhr ? 1 : BAND_K, pts = [];
+    for (var i = 0; i < nDays; i++) {
+      var date = H.addDays(endDate, -(nDays - 1 - i)), r = dm[date];
+      var p = { i: i, date: date, v: null, z: null, pct: null, excluded: !!(isEx && isEx(date)), avg7: null };
+      if (r && fin(rhr ? r.hr : r.lnRmssd)) {
+        var b = H.baseline(view, date), nb = rhr ? b.hr.n : b.n;
+        p.v = rhr ? r.hr : r.rmssd;
+        if (nb >= NEED_DAYS) {
+          if (rhr) { p.z = (r.hr - b.hr.mean) / Math.max(fin(b.hr.sd) ? b.hr.sd : 0, MIN_SD_HR); p.pct = (r.hr / b.hr.mean - 1) * 100; p.norm = b.hr.mean; }
+          else { p.z = (r.lnRmssd - b.mean) / Math.max(fin(b.sd) ? b.sd : 0, MIN_SD_LN); p.pct = (r.rmssd / b.meanMs - 1) * 100; p.norm = b.meanMs; }
+        }
+      }
+      pts.push(p);
+    }
+    pts.forEach(function (p, i) {
+      var zs = [];
+      for (var j = Math.max(0, i - 6); j <= i; j++) if (pts[j].z != null && !pts[j].excluded) zs.push(pts[j].z);
+      if (zs.length >= 2) p.avg7 = mean(zs);
+    });
+    var b0 = H.baseline(view, endDate), nToday = rhr ? b0.hr.n : b0.n;
+    return { kind: kind, k: k, pts: pts, baseN: nToday, need: NEED_DAYS, ok: nToday >= NEED_DAYS && pts.some(function (p) { return p.z != null; }), group: vf.group };
+  }
+
+  // =====================================================================================================
+  // 4. STATUS HRV JEDNYM SŁOWEM: 7-day mean of ln(RMSSD) against the norm band (mean +- 0.75 SD of the 60 days before `date`).
+  //    inside the band 'zrównoważony', below 'niski', above 'wysoki'; < 14 days of norm or < 3 measurements in the 7 days 'za mało danych'.
+  // =====================================================================================================
+  var HRV_STATUS = {
+    zrownowazony: { key: 'zrownowazony', label: 'zrównoważony', color: '#2EE86B', tone: 'ok' },
+    niski: { key: 'niski', label: 'niski', color: '#F2A93B', tone: 'warn' },
+    wysoki: { key: 'wysoki', label: 'wysoki', color: '#2D9CFF', tone: 'recon' },
+    malo: { key: 'malo', label: 'za mało danych', color: '#9AA6B0', tone: 'recon' }
+  };
+  function hrvStatus(days, date) {
+    var view = H.viewForDate(days, date).view, b = H.baseline(view, date), r7 = H.rolling7(view, date);
+    var res = { baseN: b.n, n7: r7.n, need: NEED_DAYS, mean7Ms: r7.meanMs, normMs: b.meanMs, loMs: b.loMs, hiMs: b.hiMs };
+    var key;
+    if (b.n < NEED_DAYS || r7.n < 3 || !fin(r7.meanLn)) key = 'malo';
+    else if (r7.meanLn < b.lo) key = 'niski';
+    else if (r7.meanLn > b.hi) key = 'wysoki';
+    else key = 'zrownowazony';
+    return Object.assign(res, HRV_STATUS[key]);
+  }
+
+  // =====================================================================================================
+  // 5. ZAPOTRZEBOWANIE NA SEN + pora spać
+  //   need = base (7.5 h, editable 6-10 h)
+  //        + sleep debt: SUM of the shortfall (base - slept, never below 0) over the last 3 nights, capped at +1 h
+  //        + strain bonus by YESTERDAY's strain: < 10 -> 0, 10 .. < 14 -> +15 min, >= 14 -> +30 min
+  //   target bedtime = planned wake - need - 15 min to fall asleep
+  //   bedtime reminder = 30 min before the target bedtime
+  // =====================================================================================================
+  var BASE_SLEEP_H = 7.5, BASE_MIN_H = 6, BASE_MAX_H = 10, DEBT_CAP_H = 1, FALL_ASLEEP_MIN = 15, REMIND_BEFORE_MIN = 30;
+  function cleanBaseH(v) { v = typeof v === 'string' ? parseFloat(v.replace(',', '.')) : v; return fin(v) && v >= BASE_MIN_H && v <= BASE_MAX_H ? Math.round(v * 4) / 4 : null; }
+  function strainBonusMin(strainY) { return fin(strainY) ? (strainY >= 14 ? 30 : (strainY >= 10 ? 15 : 0)) : 0; }
+  // o: { baseH, prevDursH: [hours slept, last nights], strainY }
+  function sleepNeed(o) {
+    var base = cleanBaseH(o && o.baseH); if (base == null) base = BASE_SLEEP_H;
+    var d = ((o && o.prevDursH) || []).filter(fin).slice(-3), short = 0;
+    d.forEach(function (x) { short += Math.max(0, base - x); });
+    var debt = Math.min(DEBT_CAP_H, short), bonus = strainBonusMin(o && o.strainY);
+    var needMin = Math.round((base + debt) * 60 + bonus);
+    return { baseH: base, debtH: debt, debtRawH: short, strainMin: bonus, needMin: needMin, needH: needMin / 60, nights: d.length };
+  }
+  function bedtime(wakeHM, needMin) {
+    var w = F.parseHM(wakeHM); if (isNaN(w) || !fin(needMin)) return null;
+    return F.fmtHM(w - needMin - FALL_ASLEEP_MIN);
+  }
+  function reminderTime(bedHM) { var b = F.parseHM(bedHM); return isNaN(b) ? null : F.fmtHM(b - REMIND_BEFORE_MIN); }
+  // "8 h 10 min"
+  function fmtNeed(needMin) { return F.fmtDur(needMin / 60); }
+  function sleepSentence(needMin, bed) { return 'Dziś potrzebujesz ' + fmtNeed(needMin) + ' – idź spać o ' + bed; }
+  // web in-app note window: from the reminder time for 90 minutes (wraps midnight)
+  function reminderDue(remindHM, nowMin) {
+    var r = F.parseHM(remindHM); if (isNaN(r)) return false;
+    return ((nowMin - r) % 1440 + 1440) % 1440 < 90;
+  }
+
+  // =====================================================================================================
+  // 6. CZAS REGENERACJI po treningu
+  //   total hours = base hours by the workout's strain  x  factor from today's recovery %, clamped to 6-72 h, rounded to whole hours.
+  //   base hours: strain < 3 -> none; < 5 -> 6; < 8 -> 10; < 11 -> 16; < 14 -> 24; < 17 -> 36; < 19 -> 48; >= 19 -> 60.
+  //   factor = 1.3 - 0.005 x recovery%  (recovery 0 % -> x1.3, 60 % -> x1.0, 100 % -> x0.8); unknown recovery -> x1.0.
+  //   remaining = total - hours since the workout ended; shown while > 0 ("Pełna regeneracja za ok. 18 h") and counts down.
+  // =====================================================================================================
+  var REC_MIN_H = 6, REC_MAX_H = 72;
+  function recoveryBaseHours(strain) {
+    if (!fin(strain) || strain < 3) return null;
+    return strain < 5 ? 6 : (strain < 8 ? 10 : (strain < 11 ? 16 : (strain < 14 ? 24 : (strain < 17 ? 36 : (strain < 19 ? 48 : 60)))));
+  }
+  function recoveryFactor(recPct) { return fin(recPct) ? clamp(1.3 - 0.005 * recPct, 0.8, 1.3) : 1; }
+  function recoveryHours(strain, recPct) {
+    var b = recoveryBaseHours(strain); if (b == null) return null;
+    return Math.round(clamp(b * recoveryFactor(recPct), REC_MIN_H, REC_MAX_H));
+  }
+  function workoutEndMs(w) { return (w.start || 0) + (w.durMin || 0) * 60000; }
+  // text for the remaining time: "ok. 18 h", "ok. 40 min"
+  function remainingText(remH) {
+    if (!(remH > 0)) return '';
+    if (remH < 1) return 'ok. ' + Math.max(5, Math.round(remH * 12) * 5) + ' min';
+    return 'ok. ' + Math.round(remH) + ' h';
+  }
+  // Recovery state from the workouts of the last 3 days. recOf(date) -> recovery % of that day (or null).
+  // Returns { items: [{ w, strain, totalH, remH, endMs }], active: item with the most hours left | null }
+  function recoveryInfo(workouts, nowMs, recOf) {
+    var items = [];
+    (workouts || []).forEach(function (w) {
+      if (!w || w.type === 'sauna' || !fin(w.start)) return;
+      var end = workoutEndMs(w); if (end > nowMs + 3600000 || nowMs - end > REC_MAX_H * 3600000) return;
+      var strain = F.strainFromLoad(F.sessionLoad(w).load), tot = recoveryHours(strain, recOf ? recOf(w.date) : null);
+      if (tot == null) return;
+      items.push({ w: w, strain: strain, totalH: tot, remH: tot - Math.max(0, nowMs - end) / 3600000, endMs: end });
+    });
+    var active = null;
+    items.forEach(function (it) { if (it.remH > 0 && (!active || it.remH > active.remH)) active = it; });
+    return { items: items, active: active };
+  }
+
+  var api = {
+    MODES: MODES, MODE_ORDER: MODE_ORDER, setMode: setMode, cleanModes: cleanModes, modeOn: modeOn, rangeOn: rangeOn, isExcluded: isExcluded, isMuted: isMuted,
+    spanText: spanText, startOk: startOk, removeRange: removeRange, MAX_BACK_DAYS: MAX_BACK_DAYS, bands: bands, relaxBand: relaxBand,
+    rangeBand: rangeBand, rangeLabel: rangeLabel, deviationSeries: deviationSeries, hrvStatus: hrvStatus, HRV_STATUS: HRV_STATUS,
+    sleepNeed: sleepNeed, strainBonusMin: strainBonusMin, cleanBaseH: cleanBaseH, bedtime: bedtime, reminderTime: reminderTime, fmtNeed: fmtNeed, sleepSentence: sleepSentence, reminderDue: reminderDue,
+    recoveryBaseHours: recoveryBaseHours, recoveryFactor: recoveryFactor, recoveryHours: recoveryHours, recoveryInfo: recoveryInfo, remainingText: remainingText, workoutEndMs: workoutEndMs,
+    NEED_DAYS: NEED_DAYS, BASE_SLEEP_H: BASE_SLEEP_H, BASE_MIN_H: BASE_MIN_H, BASE_MAX_H: BASE_MAX_H, DEBT_CAP_H: DEBT_CAP_H, FALL_ASLEEP_MIN: FALL_ASLEEP_MIN, REMIND_BEFORE_MIN: REMIND_BEFORE_MIN
+  };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else root.E6Core = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
 <script>(function () {
 'use strict';
 /* ===== Forma 0.2 - base: state, storage, battery, Bluetooth, measurement engine, sessions, demo ===== */
@@ -4332,6 +4636,7 @@ function gpsRouteCount() { return S.workouts.filter(function (w) { return w.gps 
 function exportAll(withRoutes) {
   var wk = withRoutes ? S.workouts : S.workouts.map(function (w) { if (!w.gps || !w.gps.route || !w.gps.route.length) return w; var c = Object.assign({}, w); c.gps = Object.assign({}, w.gps, { route: [] }); return c; });
   var payload = { app: 'forma', version: 2, exportedAt: new Date().toISOString(), days: S.days, workouts: wk, profile: S.profile, weights: S.weights, tips: S.e4.tips };
+  if (typeof e6Export === 'function') payload.e6 = e6Export();
   if (gpsRouteCount()) payload.routesIncluded = !!withRoutes;
   if (typeof e5Export === 'function') payload.e5 = e5Export();
   download('forma-kopia-' + stamp() + '.json', JSON.stringify(payload, null, 1), 'application/json');
@@ -4360,12 +4665,13 @@ function importAll(j) {
   }
   if (j && j.tips && typeof j.tips === 'object' && !Array.isArray(j.tips) && typeof e4MergeTips === 'function') e4MergeTips(j.tips);
   if (j && j.e5 && typeof e5Import === 'function') e5Import(j.e5);
+  if (j && j.e6 && typeof e6Import === 'function') e6Import(j.e6);
   if (j && j.profile) { var p = FC.sanitizeProfile(j.profile); if (p) { S.profile = p; res.profile = true; persist('profile'); } }
   if (UI.onData) UI.onData();
   return res;
 }
 function wipeAll() {
-  S.days = []; S.workouts = []; S.profile = null; S.weights = []; if (typeof gpsOnWipe === 'function') gpsOnWipe(); if (typeof e4OnWipe === 'function') e4OnWipe(); if (typeof e5OnWipe === 'function') e5OnWipe(); S.pending = null; S.pendingWorkout = null; S.session = null; S.resume = null; S.editDay = null;
+  S.days = []; S.workouts = []; S.profile = null; S.weights = []; if (typeof gpsOnWipe === 'function') gpsOnWipe(); if (typeof e4OnWipe === 'function') e4OnWipe(); if (typeof e5OnWipe === 'function') e5OnWipe(); if (typeof e6OnWipe === 'function') e6OnWipe(); S.pending = null; S.pendingWorkout = null; S.session = null; S.resume = null; S.editDay = null;
   if (!DEMO) try { localStorage.removeItem(SKEY); localStorage.removeItem(SKEY + '.corrupt'); localStorage.removeItem(PKEY); Object.keys(KEYS).forEach(function (k) { localStorage.removeItem(KEYS[k]); localStorage.removeItem(KEYS[k] + '.corrupt'); }); localStorage.removeItem('forma.v1.nightsDone'); } catch (e) { /* ignore */ }
   if (typeof battOnWipe === 'function') battOnWipe();
   if (typeof whoopOnWipe === 'function') whoopOnWipe();
@@ -5788,7 +6094,7 @@ function e4MergeTips(t) { var c = e4Clean({ tips: t }).tips; Object.keys(c).forE
 function e4OnWipe() { S.e4 = e4Clean(null); S.steps = SC.normalize(null); if (DEMO) e4DemoSteps(); }
 
 // ---------- alarm ----------
-function bedSuggestion() { var tp = FC.tonightPlan(sleepDays(), S.workouts, todayStr(), plannedWake()); return tp && tp.bed ? tp.bed : null; }
+function bedSuggestion() { var tp = e6Tonight(); return tp && tp.bed ? tp.bed : null; } // Etap 6: base need + debt + strain bonus, only with a known wake time
 function alarmFor(date) { return AC.alarmStatus(S.days, date, { bed: bedSuggestion() }); }
 function alarmToday() { return alarmFor(todayStr()); }
 // latest status for the Alarm screen: today's, else the most recent record within 3 days (labelled with its date)
@@ -5856,7 +6162,7 @@ function e4StepsPermission(ev) {
 }
 function pushNudgeSettings() {
   if (!NATIVE || typeof window.FormaNative.setNudgeSettings !== 'function') return null;
-  var n = S.e4.nudge, r = nat('setNudgeSettings', JSON.stringify({ track: !!n.track, nudge: !!n.nudge, from: n.from, to: n.to, days: n.days }));
+  var n = S.e4.nudge, r = nat('setNudgeSettings', JSON.stringify({ track: !!n.track, nudge: !!n.nudge && !e6Quiet(), from: n.from, to: n.to, days: n.days }));
   if (r && r.permission === false) S.stepsPerm = false;
   return r;
 }
@@ -5887,11 +6193,11 @@ function hrmaxDecline() { var p = hrmaxPrompt(); if (!p) return; S.e4.hrmaxDismi
 // ---------- daily tip ----------
 function tipState() {
   var today = todayStr(), yday = C.addDays(today, -1), rec = dayRec(today), st = todayStatus();
-  var sl = FC.sleepNight(sleepDays(), S.workouts, today), tp = FC.tonightPlan(sleepDays(), S.workouts, today, plannedWake());
+  var sl = FC.sleepNight(sleepDays(), S.workouts, today), tp = e6Tonight();
   var al = rec ? alarmFor(today) : null, gym = TC.gymStats(S.workouts, today), walk = TC.walkMinutes(S.workouts, yday);
   var ys = SC.stepsOn(S.steps, yday);
   return {
-    date: today, alarmLevel: al ? al.level : 0, sleepDebtH: sl ? sl.shortH : 0, bedtime: tp.bed, readinessColor: st.scored ? st.color : null,
+    date: today, mode: modeToday(), alarmLevel: al ? al.level : 0, sleepDebtH: sl ? sl.shortH : 0, bedtime: tp.bed, readinessColor: st.scored ? st.color : null,
     gymThisWeek: gym.gymThisWeek, daysSinceGym: gym.daysSinceGym, stepsYesterday: ys, walkMinYesterday: walk.min, walkLogged: walk.logged, zones13Yesterday: TC.zones13Min(S.workouts, yday),
     alcoholYesterday: !!(rec && rec.tags.indexOf('Alkohol') >= 0), saunaYesterday: !!(rec && rec.tags.indexOf('Sauna') >= 0) || TC.hasSaunaOn(S.workouts, yday), history: TC.historyOf(S.e4.tips, today)
   };
@@ -6416,6 +6722,157 @@ function e5Demo() {
   S.hc.hhp = { bp: false, glucose: false };
 }
 
+/* ===== Forma Etap 6 (part 1) - state and glue: tryb dnia, typowy zakres, odchylenie od normy, sen + pora spać, status HRV, czas regeneracji ===== */
+var E6 = window.E6Core;
+KEYS.e6 = 'forma.v1.e6';
+DRAFT_IDS.sleepBase = 1;
+
+function e6Clean(o) {
+  var d = { v: 1, modes: [], sleepBaseH: E6.BASE_SLEEP_H, bedRemind: true, ui: { devTab: 'hrv', devRange: 30 } };
+  if (!o || typeof o !== 'object') return d;
+  d.modes = E6.cleanModes(o.modes);
+  var b = E6.cleanBaseH(o.sleepBaseH); if (b != null) d.sleepBaseH = b;
+  if (o.bedRemind === false) d.bedRemind = false;
+  if (o.ui && typeof o.ui === 'object') { if (o.ui.devTab === 'rhr') d.ui.devTab = 'rhr'; if (o.ui.devRange === 90 || o.ui.devRange === 180) d.ui.devRange = o.ui.devRange; }
+  return d;
+}
+S.e6 = e6Clean(null);
+// UI-only state (never saved): mode panel, its draft, the undo snapshot, what was last sent to the native bedtime reminder
+S.e6u = { open: false, pick: null, endKind: 'open', endDate: null, undo: null, err: '', bedSent: undefined, tickAt: 0 };
+// every norm in the app (60-day HRV / RHR band, alarm baseline, Karvonen resting HR) leaves out the days of Chory / Podróż
+C.setNormExcluder(function (date) { return E6.isExcluded(S.e6.modes, date); });
+// sleep need everywhere (Dziś, Sen, tips, weekly report): base from Profil + debt + strain bonus
+FC.setSleepNeedFn(function (prevDursH, strainY) { return E6.sleepNeed({ baseH: S.e6.sleepBaseH, prevDursH: prevDursH, strainY: strainY }); });
+
+function e6Save() { if (!S.storageBroken) persist('e6'); }
+function e6Init() { S.e6 = e6Clean(readKey(KEYS.e6)); if (DEMO) e6Demo(); }
+function e6OnWipe() { S.e6 = e6Clean(null); S.e6u.open = false; S.e6u.undo = null; S.e6u.bedSent = undefined; if (DEMO) e6Demo(); if (typeof pushNudgeSettings === 'function') pushNudgeSettings(); }
+function e6Demo() { // synthetic history so the coloured bands and the greyed points are visible in the demo
+  var t = todayStr(); S.e6.modes = E6.cleanModes([{ mode: 'podroz', from: C.addDays(t, -27), to: C.addDays(t, -24) }, { mode: 'chory', from: C.addDays(t, -13), to: C.addDays(t, -10) }]);
+}
+function e6Export() { return { modes: S.e6.modes, sleepBaseH: S.e6.sleepBaseH, bedRemind: S.e6.bedRemind }; }
+function e6Import(j) {
+  if (!j || typeof j !== 'object') return;
+  var c = e6Clean(j);
+  if (Array.isArray(j.modes)) S.e6.modes = c.modes;
+  if (j.sleepBaseH != null && E6.cleanBaseH(j.sleepBaseH) != null) S.e6.sleepBaseH = c.sleepBaseH;
+  if (typeof j.bedRemind === 'boolean') S.e6.bedRemind = j.bedRemind;
+  e6Save(); e6SyncBedtime(true);
+}
+function e6SetUi(k, v) { S.e6.ui[k] = v; e6Save(); }
+
+// ---------- tryb dnia ----------
+function modeToday() { return E6.modeOn(S.e6.modes, todayStr()); }
+function modeMeta(id) { return E6.MODES[id] || E6.MODES.aktywny; }
+function modeSpanToday() { return E6.rangeOn(S.e6.modes, todayStr()); }
+function modeChipText() { var m = modeToday(), r = modeSpanToday(); return 'Tryb: ' + modeMeta(m).label + (m !== 'aktywny' && r ? ' · ' + E6.spanText(r) : ''); }
+function e6OpenPanel() {
+  var u = S.e6u, r = modeSpanToday(); u.open = !u.open;
+  if (u.open) { u.pick = modeToday(); u.endKind = r && r.to ? 'date' : 'open'; u.endDate = r && r.to ? r.to : C.addDays(todayStr(), 3); u.startDate = todayStr(); u.edit = null; u.err = ''; }
+}
+function e6PickMode(id) { if (!E6.MODES[id]) return; S.e6u.pick = id; S.e6u.err = ''; }
+function dm(date) { var p = date.split('-'); return p[2] + '.' + p[1]; }
+function rangeText(r) { return E6.MODES[r.mode].label + ' ' + dm(r.from) + ' – ' + (r.to ? dm(r.to) : 'do odwołania'); }
+function e6SaveMode() {
+  var u = S.e6u, mode = u.pick || modeToday(), to = null, today = todayStr(), from = u.startDate || today;
+  var ed = u.edit, minFrom = ed ? ed.from : null;
+  var sEl = $('e6Start'); if (sEl && sEl.value) from = sEl.value;
+  if (!E6.startOk(from, today, minFrom)) { u.err = 'Początek trybu: od dziś do ' + E6.MAX_BACK_DAYS + ' dni wstecz.'; return false; }
+  u.startDate = from;
+  if (mode !== 'aktywny' && u.endKind === 'date') {
+    var el = $('e6Date'), v = el ? el.value : u.endDate;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v || '') || isNaN(C.dayNum(v))) { u.err = 'Wybierz dzień, do którego trwa tryb.'; return false; }
+    if (v < from) { u.err = 'Data końca nie może być przed początkiem.'; return false; }
+    if (C.dayNum(v) - C.dayNum(today) > 365) { u.err = 'Tryb może trwać najwyżej rok.'; return false; }
+    to = v; u.endDate = v;
+  }
+  u.undo = { modes: S.e6.modes.map(function (r) { return { mode: r.mode, from: r.from, to: r.to }; }) };
+  var base = ed ? E6.removeRange(S.e6.modes, ed.mode, ed.from) : S.e6.modes;
+  S.e6.modes = E6.setMode(base, mode, from, to); u.open = false; u.edit = null; u.err = ''; e6Save();
+  var rg = E6.rangeOn(S.e6.modes, today), lbl = from < today ? ' od ' + dm(from) : '';
+  markSaved('mode', mode === 'aktywny' ? 'Zapisano: tryb Aktywny' + lbl + ' (dni od tej daty liczą się do normy)' : 'Zapisano: tryb ' + modeMeta(mode).label + lbl + ' ' + (to ? 'do ' + dm(to) : 'do odwołania') + (from < today ? '; normy przeliczone wstecz' : ''), 9000);
+  if (typeof pushNudgeSettings === 'function') pushNudgeSettings();
+  buzz(30); if (UI.onData) UI.onData(); return true;
+}
+function e6EditRange(idx) {
+  var r = S.e6.modes[idx], u = S.e6u; if (!r) return;
+  u.open = true; u.edit = { mode: r.mode, from: r.from }; u.pick = r.mode; u.startDate = r.from; u.endKind = r.to ? 'date' : 'open'; u.endDate = r.to || C.addDays(todayStr(), 3); u.err = '';
+}
+function e6DeleteRange(idx) {
+  var r = S.e6.modes[idx], u = S.e6u; if (!r) return;
+  u.undo = { modes: S.e6.modes.map(function (x) { return { mode: x.mode, from: x.from, to: x.to }; }) };
+  S.e6.modes = E6.removeRange(S.e6.modes, r.mode, r.from); u.open = false; u.edit = null; e6Save();
+  markSaved('mode', 'Zapisano: usunięto okres trybu (' + rangeText(r) + '); normy przeliczone', 9000);
+  if (typeof pushNudgeSettings === 'function') pushNudgeSettings();
+  buzz(30); if (UI.onData) UI.onData();
+}
+function e6UndoMode() {
+  var u = S.e6u; if (!u.undo) return;
+  S.e6.modes = E6.cleanModes(u.undo.modes); u.undo = null; u.open = false; u.edit = null; e6Save();
+  markSaved('mode', 'Zapisano: cofnięto zmianę trybu, teraz ' + modeChipText().replace('Tryb: ', ''), 7000);
+  if (typeof pushNudgeSettings === 'function') pushNudgeSettings(); buzz(30); if (UI.onData) UI.onData();
+}
+// step nudges are off in every mode other than Aktywny (Chory, Podróż, Urlop); the app tells the Android side
+function e6Quiet() { return modeToday() !== 'aktywny'; }
+
+// ---------- sleep need + bedtime ----------
+function wakeKnown() { return !!((S.profile && S.profile.plannedWake) || FC.typicalWake(sleepDays(), todayStr())); }
+function e6Tonight() {
+  var today = todayStr(), t = C.dayNum(today), prev = [], sd = sleepDays();
+  for (var k = 2; k >= 0; k--) { var r = C.findDay(sd, C.dateFromNum(t - k)); if (r && r.sleep) { var m = FC.recSleepMin(r); if (m > 0) prev.push(m / 60); } }
+  var strainY = FC.dailyStrain(S.workouts, C.addDays(today, -1), S.days);
+  var nd = E6.sleepNeed({ baseH: S.e6.sleepBaseH, prevDursH: prev, strainY: strainY });
+  var known = wakeKnown(), wake = plannedWake(), bed = known ? E6.bedtime(wake, nd.needMin) : null;
+  return { nd: nd, needMin: nd.needMin, needH: nd.needH, strainY: strainY, known: known, wake: wake, bed: bed, remindAt: bed ? E6.reminderTime(bed) : null,
+    sentence: bed ? E6.sleepSentence(nd.needMin, bed) : null };
+}
+function e6PartsText(nd) {
+  var p = [E6.fmtNeed(nd.baseH * 60) + ' podstawa'];
+  if (nd.debtH > 0.001) p.push(E6.fmtNeed(Math.round(nd.debtH * 60)) + ' dług snu');
+  if (nd.strainMin) p.push(nd.strainMin + ' min po wczorajszym wysiłku');
+  return p.join(' + ');
+}
+function bedDue() { // web: the in-app stand-in for the notification
+  if (!S.e6.bedRemind) return null;
+  var t = e6Tonight(); if (!t.known || !t.remindAt) return null;
+  var d = new Date(); return E6.reminderDue(t.remindAt, d.getHours() * 60 + d.getMinutes()) ? t : null;
+}
+function e6SetBase(raw) {
+  var v = E6.cleanBaseH(raw); if (v == null) return false;
+  S.e6.sleepBaseH = v; e6Save(); e6SyncBedtime(); return true;
+}
+function e6SetBedRemind(on) {
+  S.e6.bedRemind = !!on; e6Save();
+  var t = e6Tonight();
+  markSaved('bedrem', on ? (t.known ? 'Zapisano: przypomnienie włączone, dziś o ' + t.remindAt : 'Zapisano: przypomnienie włączone, ustaw pobudkę na ekranie Dziś') : 'Zapisano: przypomnienie wyłączone', 7000);
+  e6SyncBedtime(true); buzz(30); if (UI.onData) UI.onData();
+}
+// Android: the reminder is armed natively (and repeats daily at the last time it was given, also after a reboot). We re-send it whenever the time changes.
+function e6SyncBedtime(force) {
+  if (!NATIVE || typeof window.FormaNative.scheduleBedtimeReminder !== 'function') return;
+  var t = e6Tonight(), want = S.e6.bedRemind && t.known && t.remindAt ? t.remindAt : null, sig = want || 'off';
+  if (!force && S.e6u.bedSent === sig) return;
+  S.e6u.bedSent = sig;
+  if (want) { var r = nat('scheduleBedtimeReminder', want, 'Pora spać', 'Za ' + E6.REMIND_BEFORE_MIN + ' min pora spać – połóż się o ' + t.bed + '.', '#/sen'); log('Przypomnienie „pora spać” na ' + want + (r && r.ok === false ? ' (nieudane: ' + (r.error || '') + ')' : '') + '.'); }
+  else { nat('cancelBedtimeReminder'); log('Przypomnienie „pora spać” wyłączone.'); }
+}
+
+// ---------- czas regeneracji ----------
+function recToday() { // today's recovery %, else the latest scored day of the last 2
+  for (var k = 0; k <= 2; k++) { var st = C.dayStatus(S.days, C.addDays(todayStr(), -k)); if (st && st.scored) return st.readiness; }
+  return null;
+}
+function recoveryNow() { var r = recToday(); return E6.recoveryInfo(S.workouts, Date.now(), function () { return r; }); }
+function recoveryOfWorkout(w) { var r = recToday(), info = E6.recoveryInfo([w], Date.now(), function () { return r; }); return info.items[0] || null; }
+function recoveryLine(remH) { return 'Pełna regeneracja za ' + E6.remainingText(remH); }
+
+// ---------- periodic work (called from the 250 ms tick, throttled) ----------
+function e6Tick() {
+  var now = Date.now(); if (now - S.e6u.tickAt < 30000) return; S.e6u.tickAt = now;
+  e6SyncBedtime();
+}
+function e6Start() { e6SyncBedtime(true); }
+
 /* ===== Forma Etap 5B - GPS route in Spacer / Bieg workouts: state, native transport (FormaNative.gps*), web geolocation, finish =====
    Pure rules live in gps-core.js. Location never leaves the phone and no map is loaded from the network.
    Android: GpsService (foreground type "location") stores the fixes natively; JS fetches them with gpsPoints(from) while it runs and on resume.
@@ -6725,7 +7182,9 @@ function chart(o) {
   function gc(col, kind) { var k = kind + col; if (!gcols[k]) { gcols[k] = cid + Object.keys(gcols).length; gdefs += kind === 'b' ? '<linearGradient id="' + gcols[k] + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + col + '"/><stop offset="1" stop-color="' + col + '" stop-opacity=".55"/></linearGradient>' : '<linearGradient id="' + gcols[k] + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + col + '" stop-opacity=".32"/><stop offset="1" stop-color="' + col + '" stop-opacity="0"/></linearGradient>'; } return 'url(#' + gcols[k] + ')'; }
   var s = '';
   (o.noAxis ? [] : (o.ticks || [])).forEach(function (t) { s += '<line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(t).toFixed(1) + '" y2="' + Y(t).toFixed(1) + '" stroke="rgba(255,255,255,.10)"/><text x="' + (pl - 4) + '" y="' + (Y(t) + 3.5).toFixed(1) + '" text-anchor="end" font-size="10" fill="#9AA6B0">' + (o.tickFmt ? o.tickFmt(t) : t) + '</text>'; });
+  (o.modeBands || []).forEach(function (m) { var mm = E6.MODES[m.mode]; if (mm) s += '<rect data-mode="' + m.mode + '" x="' + (pl + m.i0 * slot).toFixed(1) + '" y="' + pt + '" width="' + ((m.i1 - m.i0 + 1) * slot).toFixed(1) + '" height="' + ph + '" fill="' + mm.bg + '"/>'; });
   if (o.band && isFinite(o.band.lo) && isFinite(o.band.hi)) s += '<rect x="' + pl + '" y="' + Y(o.band.hi).toFixed(1) + '" width="' + pw + '" height="' + Math.max(1, Y(o.band.lo) - Y(o.band.hi)).toFixed(1) + '" fill="rgba(46,232,107,.14)" rx="3"/><line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(o.band.hi).toFixed(1) + '" y2="' + Y(o.band.hi).toFixed(1) + '" stroke="rgba(46,232,107,.5)" stroke-dasharray="3 3"/><line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(o.band.lo).toFixed(1) + '" y2="' + Y(o.band.lo).toFixed(1) + '" stroke="rgba(46,232,107,.5)" stroke-dasharray="3 3"/>';
+  if (o.zeroLine != null) s += '<line data-zero="1" x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(o.zeroLine).toFixed(1) + '" y2="' + Y(o.zeroLine).toFixed(1) + '" stroke="rgba(255,255,255,.45)" stroke-width="1.2"/>';
   var bw = Math.max(2, Math.min(18, slot * (o.bw || 0.62)));
   (o.bars || []).forEach(function (b) {
     var base = b.v0 || Math.max(y0, 0), ya = Y(Math.max(b.v, base)), yb = Y(Math.min(b.v, base));
@@ -7135,6 +7594,8 @@ function rDzis() {
   var h = header('Dziś', { gear: true, full: true });
   h += '<div class="body">';
   h += '<div class="row sp xs mut fu" style="margin-top:-6px" ' + dl(i++) + '><span>' + DOW[now.getDay()].replace(/^./, function (c) { return c.toUpperCase(); }) + ', ' + now.getDate() + ' ' + MON[now.getMonth()] + '</span><span>' + esc(S.connected ? (DEMO ? 'Demo – symulowany WHOOP' : 'Połączono: ' + S.name) : S.connText) + '</span></div>';
+  h += e6ModeBarHtml(i++);
+  h += e6BedDueHtml(i++);
   if (S.storageBroken) h += '<div class="note" ' + dl(i) + '>Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie</div>';
   if (S.flash && S.flash.to === 'dzis') h += '<div class="note ok fu" role="status" ' + dl(i++) + '>' + esc(S.flash.text) + '</div>';
   h += resumeBanner() + pendingBanner();
@@ -7182,21 +7643,23 @@ function rDzis() {
       var w = Math.min(50, Math.abs(v) / 20 * 50), pos = v >= 0, c = pos ? '#E9EEF2' : '#F2A93B';
       return '<span class="sm sub">' + label + '</span><div class="tr"><i class="gx" style="' + (pos ? 'left:50%' : 'right:50%;transform-origin:right') + ';width:' + w + '%;background:' + c + '"></i></div><span class="sm" style="font-weight:600;text-align:right;color:' + (pos ? '#F2F4F7' : '#F2A93B') + '">' + (v > 0 ? '+' + v : (v < 0 ? '−' + Math.abs(v) : '0')) + ' pkt</span>';
     };
-    h += '<a href="#/regeneracja" class="row sp xs mut" style="min-height:44px">Każdy poranek zaczyna się od ' + p.start + '%. Dziś:' + ico('chev', 12) + '</a><div class="pts">' +
+    h += (st.hasRecord ? e6HrvStatusRow() : '') + '<a href="#/regeneracja" class="row sp xs mut" style="min-height:44px">Każdy poranek zaczyna się od ' + p.start + '%. Dziś:' + ico('chev', 12) + '</a><div class="pts">' +
       rowp('HRV ' + nf(st.today.rmssd, 0) + ' ms, zwykle ' + nf(st.usual.rmssd, 0), p.hrv) + rowp('Tętno ' + nf(st.today.hr, 0) + ', zwykle ' + nf(st.usual.hr, 0), p.hr) + '</div>' +
       '<div class="scalebar" role="img" aria-label="Skala regeneracji, wynik ' + st.readiness + ' procent"><i class="gx" style="background:#FF4D5E;opacity:.4"></i><i class="gx" style="background:#F7D23E;opacity:.4;animation-delay:.3s"></i><i class="gx" style="background:#2EE86B;animation-delay:.4s"></i><b style="left:' + st.readiness + '%"></b></div>';
-  } else h += '<p class="lbl" style="padding-top:14px">Skąd ten wynik</p><p class="mut sm" style="margin:0">' + (st.hasRecord ? esc(st.label || '') + ' Rozbicie punktów pojawi się, gdy będzie norma z 5 poranków.' : 'Rozbicie punktów (HRV i tętno) pojawi się po pierwszym porannym pomiarze i po zebraniu normy z 5 poranków.') + '</p>';
+  } else h += '<p class="lbl" style="padding-top:14px">Skąd ten wynik</p>' + (st.hasRecord ? e6HrvStatusRow() : '') + '<p class="mut sm" style="margin:0">' + (st.hasRecord ? esc(st.label || '') + ' Rozbicie punktów pojawi się, gdy będzie norma z 5 poranków.' : 'Rozbicie punktów (HRV i tętno) pojawi się po pierwszym porannym pomiarze i po zebraniu normy z 5 poranków.') + '</p>';
   h += '</div>';
   // tiles
   h += '<div class="card tile fu" ' + dl(i++) + '><p class="lbl">Tętno dziś</p><div data-live="hr" class="col">' + hrTileHtml() + '</div></div>';
-  var tp = FC.tonightPlan(sleepDays(), S.workouts, today, plannedWake());
+  var tp = e6Tonight();
   h += '<div class="g2 fu" ' + dl(i++) + '>';
   h += '<a href="#/sen" class="card tile"><p class="row sp lbl">Sen' + ico('chev', 14) + '</p>' + (sl ? '<span class="n big" style="font-size:28px;white-space:nowrap">' + FC.fmtDur(sl.durH) + '</span><span class="sm sub">z ' + FC.fmtDur(sl.needH) + ' potrzeby' + (sl.shortH > 0.05 ? ',<br><b style="color:#fff">brakuje ' + FC.fmtDur(sl.shortH) + '</b>' : '') + '</span><div class="bar"><i class="gx" style="width:' + clamp(sl.durH / sl.needH * 100, 0, 100) + '%;background:#E07BF0"></i></div>' : '<span class="mut sm">Brak danych o śnie. Wpisz godziny snu w porannym pomiarze.</span>') + '</a>';
   h += '<div class="card tile"><p class="row lbl" style="gap:6px">' + ico('moon', 16) + 'Dziś wieczorem</p><span class="xs sub">Do łóżka do</span><span class="n big">' + esc(tp.bed || '—') + '</span><span class="xs mut">potrzeba ok. ' + FC.fmtDur(tp.needH) + ' snu</span>' +
     '<label class="xs sub">Pobudka<input class="inp num" type="time" lang="pl" data-in="wake" data-keep="1" value="' + esc(plannedWake()) + '" aria-label="Planowana pobudka"></label>' + savedSlot('wake') + '</div></div>';
+  h += e6SleepCardHtml(i++);
   if (NATIVE && !nightTop) h += nightBlock();
-  var tb = FC.targetBand(st.scored ? st.color : null);
-  h += '<div class="g2 fu" ' + dl(i++) + '><a href="#/trening" class="card tile span2"><p class="row sp lbl">Obciążenie' + ico('chev', 14) + '</p><span class="n big" style="font-size:44px">' + nf(strain, 1) + '</span><span class="xs mut">dotąd dziś</span>' + gaugeHtml(strain, tb) + (tb ? '' : '<span class="xs mut">Cel pojawi się po porannym pomiarze.</span>') + '</a>';
+  h += e6RecoveryCardHtml(i++);
+  var md = modeToday(), tb = E6.relaxBand(FC.targetBand(st.scored ? st.color : null), md);
+  h += '<div class="g2 fu" ' + dl(i++) + '><a href="#/trening" class="card tile span2"><p class="row sp lbl">Obciążenie' + ico('chev', 14) + '</p><span class="n big" style="font-size:44px">' + nf(strain, 1) + '</span><span class="xs mut">dotąd dziś</span>' + gaugeHtml(strain, tb) + (tb ? (tb.relaxed ? '<span class="xs mut" data-e6="goal-relaxed">Cel obniżony: tryb ' + esc(modeMeta(md).label) + '</span>' : '') : '<span class="xs mut">Cel pojawi się po porannym pomiarze.</span>') + '</a>';
   var wk = FC.weeklyVolume(S.workouts, today, 1)[0];
   h += '<a href="#/trening" class="card tile"><p class="lbl">Trening w tym tygodniu</p>' + (wk.sessions ? '<span class="n big" style="font-size:30px">' + nfi(wk.kg) + ' <span class="sm sub">kg</span></span><span class="xs mut">siłownia · ' + wk.gymSessions + ' ' + (wk.gymSessions === 1 ? 'sesja' : 'sesje/sesji') + (wk.runMin || wk.walkMin ? '<br>Bieg ' + Math.round(wk.runMin) + ' min · spacery ' + Math.round(wk.walkMin) + ' min' : '') + '</span>' : '<span class="n big" style="font-size:30px">0 <span class="sm sub">kg</span></span><span class="xs mut">Brak treningów w tym tygodniu.</span>') + weekDayBars(today) + '</a>';
   var w = S.weights;
@@ -7208,7 +7671,7 @@ function rDzis() {
 ROUTES.dzis = { tab: 'dzis', depth: 0, render: rDzis, mount: function (el) { renderBattery(); }, tick: function (el) {
   var n = Date.now(); if (n - (ROUTES.dzis.lastHr || 0) < 2500) return; ROUTES.dzis.lastHr = n;
   var t = el.querySelector('[data-live="hr"]'); if (t) t.innerHTML = hrTileHtml();
-  nightTick(el);
+  nightTick(el); e6DzisTick(el);
 } };
 
 // ====================== POMIAR (2 min) ======================
@@ -7561,7 +8024,10 @@ function rAlarm() {
   var col = st.color, ringF = st.calibrating || !st.hasRecord ? Math.min(1, st.n / st.need) : [1, 0.4, 0.7, 1][st.level];
   var ringCol = st.calibrating || !st.hasRecord ? '#9AA6B0' : col;
   if (v.stale) h += '<p class="note fu" ' + dl(i++) + '>Brak dzisiejszego pomiaru. Pokazuję stan z ' + ddmm(v.date) + '.</p>';
-  if (st.calibrating || !st.hasRecord) {
+  if (st.muted) {
+    var mmu = modeMeta(modeToday());
+    h += '<div class="card fu" ' + 'data-e6="alarm-muted" style="animation-delay:' + ((i++) * 60) + 'ms;gap:8px;border-color:' + mmu.color + '"><span class="lbl" style="font-size:12px;color:' + mmu.color + '">TRYB ' + esc(mmu.label.toUpperCase()) + '</span><span class="n" style="font-size:24px;line-height:1.15">Alarm wyciszony</span><p class="sm sub" style="margin:0">W trybie ' + esc(mmu.label) + ' nie oceniam odchyleń HRV i tętna, a te dni nie wchodzą do Twojej normy. Wskazówka dnia to odpoczynek. Alarm wróci, gdy zakończysz tryb na ekranie Dziś.</p><a class="btn full" href="#/dzis">Zmień tryb na ekranie Dziś</a></div>';
+  } else if (st.calibrating || !st.hasRecord) {
     h += '<div class="card fu" ' + dl(i++) + '><div class="row" style="gap:16px">' + illus('calib', 84) +
       '<div class="grow col" style="gap:4px"><span class="row sp" style="gap:6px"><span class="lbl" style="font-size:12px;color:#C5CED6">KALIBRACJA</span>' + pill('warn pulse', 'w toku') + '</span><span class="n" style="font-size:24px;line-height:1.15">' + (st.hasRecord ? 'Zbieram Twoją normę' : 'Brak pomiaru') + '</span></div></div>' +
       '<div class="bar" role="img" aria-label="Kalibracja ' + Math.min(st.n, st.need) + ' z ' + st.need + '"><i class="gx" style="width:' + Math.round(ringF * 100) + '%;background:linear-gradient(90deg,#2CE8B5,#16C7A0)"></i></div><span class="xs mut">Alarm aktywny po ' + st.need + ' dniach pomiarów: ' + Math.min(st.n, st.need) + '/' + st.need + '</span>' + '<p class="sub sm" style="margin:0">' + (st.hasRecord ? 'Alarm porównuje tętno spoczynkowe i HRV z Twoją normą z ostatnich 60 dni. Do tego potrzebuję co najmniej ' + st.need + ' dni pomiarów (z dowolnego źródła).' : esc(st.message)) + '</p></div>';
@@ -7589,9 +8055,10 @@ function rAlarm() {
     if (st.thirdDay) h += '<div class="card tint-a fu" ' + dl(i++) + ' style="gap:4px" data-alarm="third"><span class="n" style="font-size:17px;line-height:1.25;color:#FFE2B8">Trzeci dzień z rzędu? → rozważ dzień wolny / lekarz przy objawach</span><span class="xs" style="color:#E9D3A8">' + esc(st.disclaimer) + '</span></div>';
     else h += '<p class="xs mut fu" ' + dl(i++) + ' style="margin:0" data-alarm="disclaimer">' + esc(st.disclaimer) + '</p>';
   }
-  var calOk = !st.calibrating && st.hasRecord;
+  h += '<a href="#/odchylenia" class="card fu" ' + dl(i++) + ' data-e6="dev-link-alarm"><div class="row sp"><div><p class="lbl">Odchylenie od normy</p><span class="sm sub">Wykres HRV i tętna w SD od normy, 30 dni – 6 miesięcy</span></div>' + ico('chev', 20) + '</div></a>';
+  var calOk = !st.calibrating && st.hasRecord && !st.muted;
   h += '<div class="card fu" ' + dl(i++) + ' data-alarm="calibration"><div class="row" style="gap:12px;align-items:flex-start"><span style="color:#2CE8B5;flex:none;margin-top:2px">' + ico('clock', 26) + '</span><div class="grow col" style="gap:6px"><div class="row sp"><span class="lbl">Kalibracja</span><span style="display:inline-flex;align-items:center;gap:6px;min-height:26px;padding:0 10px;border-radius:999px;border:1px solid ' + (calOk ? '#2EE86B' : '#F7D23E') + ';color:' + (calOk ? '#2EE86B' : '#F7D23E') + ';font-size:12px;font-weight:600"><span style="width:6px;height:6px;border-radius:3px;background:currentColor"></span>' + (calOk ? 'aktywna' : 'w toku') + '</span></div>' +
-    '<span class="sm sub">' + (calOk ? 'Alarm aktywny. Norma z ' + st.norm.n + ' pomiarów z 60 dni (' + esc(st.group === 'whoop' ? 'dane WHOOP' : 'własne pomiary') + ').' : esc(st.calLabel)) + '</span>' +
+    '<span class="sm sub">' + (calOk ? 'Alarm aktywny. Norma z ' + st.norm.n + ' pomiarów z 60 dni (' + esc(st.group === 'whoop' ? 'dane WHOOP' : 'własne pomiary') + ').' : (st.muted ? 'Alarm wstrzymany na czas trybu ' + esc(modeMeta(modeToday()).label) + '. Dni z tego trybu nie liczą się do normy.' : esc(st.calLabel))) + '</span>' +
     '<div class="bar" role="img" aria-label="Postęp kalibracji ' + Math.min(st.n, st.need) + ' z ' + st.need + '"><i class="gx" style="width:' + Math.min(100, st.n / st.need * 100) + '%;background:#2CE8B5"></i></div></div></div></div>';
   return h + '</div>';
 }
@@ -7607,7 +8074,8 @@ ACT_E4.alarmUncheck = function (el) { alarmSet(el, false); };
 
 // chip on Dziś (level Uwaga or higher, today's record)
 function alarmChipHtml(i) {
-  var st = alarmToday(); if (!st.hasRecord || st.calibrating || st.level < 1) return '';
+  var st = alarmToday();
+  if (st.muted) return '<p class="note fu" role="status" data-e6="alarm-muted" style="animation-delay:' + (i * 60) + 'ms;margin:0">Alarm wyciszony: tryb ' + esc(modeMeta(modeToday()).label) + '. Wrócę do oceny odchyleń po zakończeniu trybu.</p>'; if (!st.hasRecord || st.calibrating || st.level < 1) return '';
   var txt = st.level === 1 ? 'Uwaga: organizm pod większym obciążeniem' : (st.level === 2 ? 'Alarm przemęczenia – zobacz, co zrobić' : 'Silny alarm – rozważ dzień wolny');
   return '<a href="#/alarm" data-e4="alarm-chip" class="fu" style="animation-delay:' + (i * 60) + 'ms;align-self:center;display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 14px;border-radius:999px;border:1px solid ' + st.color + ';background:rgba(255,255,255,.04);color:' + (st.level === 1 ? '#FFF3B8' : (st.level === 2 ? '#FFE2B8' : '#FFD6DA')) + ';font-size:13px;font-weight:600" aria-label="' + esc(st.label + ': ' + txt) + '"><span style="color:' + st.color + '">' + ico('alert', 18) + '</span>' + esc(txt) + '</a>';
 }
@@ -7787,23 +8255,28 @@ ACT_E4.hmTestSave = function () {
 
 // ====================== TRENDY: RHR / HRV, 30 / 90 days ======================
 function trendChartHtml(kind, n) {
-  var tr = AC.trendSeries(S.days, todayStr(), n, kind), pts = tr.pts, vals = pts.filter(function (p) { return p.v != null; }).map(function (p) { return p.v; });
+  var td0 = todayStr(), tr = AC.trendSeries(S.days, td0, n, kind), pts = tr.pts, vals = pts.filter(function (p) { return p.v != null; }).map(function (p) { return p.v; });
   var title = kind === 'rhr' ? 'Tętno spoczynkowe' : 'HRV (RMSSD)', unit = kind === 'rhr' ? 'ud/min' : 'ms', color = kind === 'rhr' ? '#2D9CFF' : '#2CE8B5';
   if (vals.length < 2) return '<div class="col" style="gap:4px" data-e4="trend-' + kind + '"><span class="sm sub">' + title + '</span><p class="xs mut" style="margin:0">Za mało danych (' + vals.length + ' z ' + n + ' dni). Wykres pojawi się po kilku pomiarach.</p></div>';
+  var bb0 = C.baseline(C.viewForDate(S.days, td0).view, td0), bn = kind === 'rhr' ? bb0.hr.n : bb0.n; // Etap 6: the band needs 14 valid days
+  if (bn < E6.NEED_DAYS) tr.band = null;
+  var curP = pts[pts.length - 1], lab = tr.band && curP && curP.v != null ? E6.rangeLabel(curP.v, { ok: true, lo: tr.band.lo, hi: tr.band.hi }) : null;
+  var mbs = E6.bands(S.e6.modes, pts.map(function (p) { return p.date; })), hs = kind === 'hrv' ? E6.hrvStatus(S.days, td0) : null;
   var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
   if (tr.band) { lo = Math.min(lo, tr.band.lo); hi = Math.max(hi, tr.band.hi); }
   var pad = kind === 'rhr' ? 2 : Math.max(4, (hi - lo) * 0.1), mn = Math.floor((lo - pad) / (kind === 'rhr' ? 1 : 5)) * (kind === 'rhr' ? 1 : 5), mx = Math.ceil((hi + pad) / (kind === 'rhr' ? 1 : 5)) * (kind === 'rhr' ? 1 : 5);
   var avg = pts.filter(function (p) { return p.avg7 != null; }).map(function (p) { return { i: p.i, v: p.avg7 }; });
   var last = pts.slice().reverse().filter(function (p) { return p.avg7 != null; })[0];
   return '<div class="col" style="gap:4px" data-e4="trend-' + kind + '"><div class="row sp"><span class="sm sub">' + title + '</span><span class="xs" style="color:' + color + '">' + (last ? 'śr. 7 dni: ' + nf(last.avg7, 0) + ' ' + unit : '') + '</span></div>' +
-    chart({ n: n, ymin: mn, ymax: mx, ticks: [mn, Math.round((mn + mx) / 2), mx], band: tr.band, label: title + ', ' + n + ' dni', lines: [{ pts: avg, color: color, w: 2 }], dots: pts.filter(function (p) { return p.v != null; }).map(function (p) { return { i: p.i, v: p.v, color: p.i === n - 1 ? '#fff' : '#8A96A0', r: n > 30 ? 1.6 : 2.4 }; }), xl: [{ i: 0, t: n + ' dni temu', a: 'start' }, { i: n - 1, t: 'dziś', a: 'end' }] }) + '</div>';
+    '<div class="row" style="gap:8px;flex-wrap:wrap" data-e6="trend-labels-' + kind + '">' + (hs ? '<span class="xs mut">Status HRV:</span>' + pill(hs.tone, hs.label) : '') + (lab ? pill(lab.key === 'norma' ? 'ok' : 'warn', 'dziś ' + lab.label) : '') + '</div>' +
+    chart({ n: n, ymin: mn, ymax: mx, ticks: [mn, Math.round((mn + mx) / 2), mx], band: tr.band, modeBands: mbs, label: title + ', ' + n + ' dni', lines: [{ pts: avg, color: color, w: 2 }], dots: pts.filter(function (p) { return p.v != null; }).map(function (p) { return { i: p.i, v: p.v, color: p.i === n - 1 ? '#fff' : '#8A96A0', r: n > 30 ? 1.6 : 2.4 }; }), xl: [{ i: 0, t: n + ' dni temu', a: 'start' }, { i: n - 1, t: 'dziś', a: 'end' }] }) + '</div>';
 }
 function trendCardsHtml(i) {
   var n = S.trendRange === 90 ? 90 : 30, sum = AC.weeklySummary(S.days, todayStr());
   return '<div class="card fu" ' + dl(i) + ' data-e4="trend-card"><div class="row sp"><p class="lbl">Tętno spoczynkowe i HRV</p><div class="chips" role="radiogroup" aria-label="Zakres wykresów">' + [30, 90].map(function (x) { return '<button class="chip s' + (n === x ? ' on' : '') + '" data-act="trendRange" data-v="' + x + '" role="radio" aria-checked="' + (n === x) + '">' + x + ' dni</button>'; }).join('') + '</div></div>' +
     '<p class="sm" style="margin:0;color:' + (sum.ok ? '#E9EEF2' : '#9AA6B0') + '" data-e4="trend-summary">' + esc(sum.text) + '</p>' +
     trendChartHtml('rhr', n) + trendChartHtml('hrv', n) +
-    '<div class="row xs mut" style="flex-wrap:wrap;gap:4px 12px"><span>● dzienna wartość</span><span style="color:#2CE8B5">— średnia 7 dni</span><span style="color:#2EE86B">▮ Twoja norma (60 dni)</span></div></div>';
+    '<div class="row xs mut" style="flex-wrap:wrap;gap:4px 12px"><span>● dzienna wartość</span><span style="color:#2CE8B5">— średnia 7 dni</span><span style="color:#2EE86B">▮ Twój typowy zakres (60 dni)</span>' + modeLegendHtml(E6.bands(S.e6.modes, (function () { var a = [], td = todayStr(); for (var q = n - 1; q >= 0; q--) a.push(C.addDays(td, -q)); return a; })())) + '</div>' + (function () { var b = C.baseline(C.viewForDate(S.days, todayStr()).view, todayStr()); return b.n < E6.NEED_DAYS ? '<p class="xs mut" style="margin:0" data-e6="band-note">Pas „Twój typowy zakres” pojawi się po ' + E6.NEED_DAYS + ' dniach pomiarów (masz ' + b.n + ').</p>' : ''; })() + '</div>';
 }
 ACT_E4.trendRange = function (el) { S.trendRange = el.dataset.v === '90' ? 90 : 30; e4SetUi('trendRange', S.trendRange); rerender(); };
 
@@ -8555,6 +9028,216 @@ ACT_GPS.gpsTgl = function (el) { gpsToggle(el.dataset.type); };
 ACT_GPS.gpsAllow = function () { gpsAllow(); };
 ACT_GPS.gpsAskNo = function () { gpsAskCancel(); };
 
+/* ===== Forma Etap 6 (part 1) - UI: tryb dnia, status HRV, pora spać, czas regeneracji, Twój typowy zakres, #/odchylenia, Profil ===== */
+var ACT_E6 = {};
+ICONS.swap = '<path d="M7 7h11l-3-3M17 17H6l3 3"/>';
+function pl1(v, d) { return nf(v, d == null ? 1 : d); }
+function sgnPl(v, d) { if (!isFinite(v)) return '—'; var r = Math.round(Math.abs(v) * Math.pow(10, d)) / Math.pow(10, d); return (v > 0 && r > 0 ? '+' : (v < 0 && r > 0 ? '−' : '')) + nf(Math.abs(v), d); }
+function modeDot(c) { return '<span style="width:9px;height:9px;border-radius:5px;background:' + c + ';flex:none"></span>'; }
+function modeLegendHtml(bands) {
+  var seen = {}, out = [];
+  (bands || []).forEach(function (b) { if (!seen[b.mode]) { seen[b.mode] = 1; out.push('<span style="color:' + E6.MODES[b.mode].color + '" data-e6="legend-' + b.mode + '">▮ ' + E6.MODES[b.mode].label + '</span>'); } });
+  return out.join('');
+}
+
+// ====================== TRYB DNIA on Dziś ======================
+function e6ModeBarHtml(i) {
+  var m = modeToday(), mm = modeMeta(m), u = S.e6u, h = '<div class="col fu" data-e6="mode-bar" style="animation-delay:' + (i * 60) + 'ms;gap:8px">';
+  h += '<div class="row" style="gap:8px;flex-wrap:wrap"><button class="row" data-act="e6Toggle" data-e6="mode-chip" aria-expanded="' + !!u.open + '" aria-label="Tryb dnia: ' + esc(modeChipText().replace('Tryb: ', '')) + '. Zmień" style="min-height:44px;gap:8px;padding:0 14px;border-radius:999px;border:1px solid ' + mm.color + ';background:' + mm.bg + ';color:#F2F4F7;font-weight:600;font-size:14px;cursor:pointer;max-width:100%">' +
+    modeDot(mm.color) + '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(modeChipText()) + '</span><span aria-hidden="true" style="font-size:11px;color:#C5CED6">' + (u.open ? '▴' : '▾') + '</span></button>' +
+    (u.undo ? '<button class="btn sm" data-act="e6Undo" data-e6="mode-undo">Cofnij</button>' : '') + '</div>';
+  h += savedSlot('mode', 'note ok');
+  if (u.open) {
+    var pick = u.pick || m, kids = E6.MODE_ORDER.map(function (id) {
+      var on = pick === id; return '<button class="chip' + (on ? ' on' : '') + '" data-act="e6Pick" data-v="' + id + '" role="radio" aria-checked="' + on + '">' + E6.MODES[id].label + '</button>';
+    }).join('');
+    h += '<div class="card" data-e6="mode-panel" style="gap:10px"><p class="lbl">Tryb dnia</p><div class="chips" role="radiogroup" aria-label="Tryb dnia">' + kids + '</div>' +
+      '<p class="xs sub" style="margin:0" data-e6="mode-desc">' + esc(E6.MODES[pick].desc) + '</p>';
+    if (pick !== 'aktywny') {
+      h += '<div class="chips" role="radiogroup" aria-label="Do kiedy"><button class="chip' + (u.endKind === 'open' ? ' on' : '') + '" data-act="e6End" data-v="open" role="radio" aria-checked="' + (u.endKind === 'open') + '">Do odwołania</button>' +
+        '<button class="chip' + (u.endKind === 'date' ? ' on' : '') + '" data-act="e6End" data-v="date" role="radio" aria-checked="' + (u.endKind === 'date') + '">Do dnia…</button></div>';
+      if (u.endKind === 'date') h += '<label class="row sp sm sub">Ostatni dzień trybu<input class="inp" style="width:160px" id="e6Date" type="date" lang="pl" data-in="e6date" min="' + todayStr() + '" value="' + esc(u.endDate || C.addDays(todayStr(), 3)) + '" aria-label="Ostatni dzień trybu"></label>';
+    } else if (m !== 'aktywny') h += '<p class="xs mut" style="margin:0">Wrócisz do zwykłego trybu od dziś. Dni sprzed dziś zostają w historii trybu.</p>';
+    var minS = u.edit && u.edit.from < C.addDays(todayStr(), -E6.MAX_BACK_DAYS) ? u.edit.from : C.addDays(todayStr(), -E6.MAX_BACK_DAYS);
+    h += '<label class="row sp sm sub">Od dnia<input class="inp" style="width:160px" id="e6Start" type="date" lang="pl" data-in="e6start" min="' + minS + '" max="' + todayStr() + '" value="' + esc(u.startDate || todayStr()) + '" aria-label="Pierwszy dzień trybu"></label>' +
+      '<p class="xs mut" style="margin:0">Możesz zacząć do ' + E6.MAX_BACK_DAYS + ' dni wstecz, np. „Chory od poniedziałku”. Normy i alarm przeliczą się wstecz.</p>';
+    h += '<p class="err" id="e6Err"' + (u.err ? '' : ' hidden') + '>' + esc(u.err) + '</p><div class="row"><button class="btn pri grow" data-act="e6Save">Zapisz tryb</button><button class="btn grow" data-act="e6Toggle">Anuluj</button></div></div>';
+  }
+  if (m !== 'aktywny') {
+    var r = modeSpanToday(), ex = mm.excludes;
+    h += '<p class="note' + (m === 'urlop' ? ' ok' : '') + '" data-e6="mode-note" style="margin:0">' + esc(mm.label + ' ' + E6.spanText(r) + '. ') +
+      (ex ? 'Te dni nie liczą się do Twojej normy HRV i tętna, alarm jest wyciszony, cel obciążenia jest niższy.' : 'Dni nadal liczą się do normy. Cel obciążenia jest luźniejszy, bez przypomnień o krokach.') + '</p>';
+  }
+  if (u.open) h += e6HistoryHtml();
+  return h + '</div>';
+}
+function e6HistoryHtml() {
+  var ms = S.e6.modes; if (!ms.length) return '';
+  var rows = ms.map(function (r, i) { return { r: r, i: i }; }).reverse().slice(0, 12).map(function (x) {
+    var mm = E6.MODES[x.r.mode];
+    return '<div class="row" style="min-height:48px;gap:8px;border-top:1px solid rgba(255,255,255,.08)" data-e6="hist-row">' + modeDot(mm.color) + '<span class="grow sm">' + esc(rangeText(x.r)) + '</span>' +
+      '<button class="btn sm" data-act="e6HistEdit" data-i="' + x.i + '">Edytuj</button><button class="btn sm danger" data-act="e6HistDel" data-i="' + x.i + '" data-confirm="Usuń">Usuń</button></div>';
+  }).join('');
+  return '<div class="card" data-e6="mode-history" style="gap:2px"><p class="lbl">Historia trybów</p>' + rows + '</div>';
+}
+ACT_E6.e6HistEdit = function (el) { e6EditRange(+el.dataset.i); rerender(); };
+ACT_E6.e6HistDel = function (el) { e6DeleteRange(+el.dataset.i); };
+ACT_E6.e6Toggle = function () { e6OpenPanel(); rerender(); };
+ACT_E6.e6Pick = function (el) { e6PickMode(el.dataset.v); rerender(); };
+ACT_E6.e6End = function (el) { S.e6u.endKind = el.dataset.v === 'date' ? 'date' : 'open'; S.e6u.err = ''; rerender(); };
+ACT_E6.e6Save = function () { if (!e6SaveMode()) rerender(); };
+ACT_E6.e6Undo = function () { e6UndoMode(); };
+$('stack').addEventListener('change', function (e) { var el = e.target; if (el.dataset && el.dataset.in === 'e6start' && /^\d{4}-\d{2}-\d{2}$/.test(el.value)) { S.e6u.startDate = el.value; S.e6u.err = ''; }
+  if (el.dataset && el.dataset.in === 'e6date' && /^\d{4}-\d{2}-\d{2}$/.test(el.value)) { S.e6u.endDate = el.value; S.e6u.err = ''; } });
+
+// ====================== STATUS HRV (one word) ======================
+function e6HrvStatusRow() {
+  var s = E6.hrvStatus(S.days, todayStr());
+  return '<div class="row sp" style="min-height:44px;gap:8px;flex-wrap:wrap" data-e6="hrv-status"><span class="xs mut">Status HRV (średnia 7 dni)</span>' + pill(s.tone, s.label) + '</div>' +
+    (s.key === 'malo' ? '<p class="xs mut" style="margin:-6px 0 0">' + (s.baseN < E6.NEED_DAYS ? 'Status pojawi się po ' + E6.NEED_DAYS + ' dniach norm (masz ' + s.baseN + ').' : 'Potrzeba co najmniej 3 pomiarów z ostatnich 7 dni (masz ' + s.n7 + ').') + '</p>' : '');
+}
+
+// ====================== SEN: pora spać on Dziś ======================
+function e6BedDueHtml(i) {
+  var t = bedDue(); if (!t) return '';
+  return '<a href="#/sen" class="note fu" role="status" data-e6="bed-due" style="animation-delay:' + (i * 60) + 'ms;display:flex;align-items:center;min-height:44px;border-color:rgba(224,123,240,.6);background:rgba(224,123,240,.14);color:#F6D8FB">Za ' + E6.REMIND_BEFORE_MIN + ' min pora spać – połóż się o ' + esc(t.bed) + '.</a>';
+}
+function e6SleepCardHtml(i) {
+  var tp = e6Tonight(), h = '<div class="card tint-p fu" data-e6="sleep-card" style="animation-delay:' + (i * 60) + 'ms;gap:6px"><p class="lbl">Pora spać</p>';
+  if (tp.known) {
+    h += '<span class="n" data-e6="sleep-sentence" style="font-size:20px;line-height:1.25">' + esc(tp.sentence) + '</span>' +
+      '<span class="xs sub" data-e6="sleep-parts">' + esc(e6PartsText(tp.nd)) + ' + ' + E6.FALL_ASLEEP_MIN + ' min na zaśnięcie, pobudka ' + esc(tp.wake) + '.</span>';
+    h += '<span class="xs mut" data-e6="bed-remind-line">' + (S.e6.bedRemind ? 'Przypomnienie o ' + esc(tp.remindAt) + ' (' + E6.REMIND_BEFORE_MIN + ' min przed)' + (NATIVE ? '' : ' – w przeglądarce jako notatka w aplikacji') + '. ' : 'Przypomnienie wyłączone. ') + '<a href="#/profil" style="display:inline-flex;align-items:center;min-height:44px">Zmień w Profilu</a></span>';
+  } else {
+    h += '<span class="n" data-e6="wake-prompt" style="font-size:20px;line-height:1.25">Ustaw planowaną pobudkę</span><span class="sm sub">Bez niej nie policzę pory snu ani nie wyślę przypomnienia. Wpisz godzinę w polu „Pobudka” albo przyjmij 07:00.</span>' +
+      '<button class="btn pri full" data-act="e6WakeDefault">Ustaw pobudkę na 07:00</button>';
+  }
+  return h + '</div>';
+}
+ACT_E6.e6WakeDefault = function () { markSaved('wake', 'Zapisano: pobudka 07:00'); applyProfile({ plannedWake: '07:00' }); e6SyncBedtime(); buzz(30); };
+
+// ====================== CZAS REGENERACJI ======================
+function e6RecoveryCardHtml(i) {
+  var ri = recoveryNow(), a = ri.active; if (!a) return '';
+  var nm = WK_NAME[a.w.type] || 'Trening';
+  return '<div class="card fu" ' + dl(i) + ' data-e6="recovery"><p class="lbl">Czas regeneracji</p><span class="n" data-e6="recovery-text" data-live="rec-time" data-end="' + a.endMs + '" data-total="' + a.totalH + '" style="font-size:24px;line-height:1.2">' + esc(recoveryLine(a.remH)) + '</span>' +
+    '<span class="xs mut">Po treningu: ' + esc(nm) + ', ' + esc(a.w.time || '') + ' (obciążenie ' + pl1(a.strain) + ') · szacunek z obciążenia i dzisiejszej regeneracji</span></div>';
+}
+function e6DzisTick(el) {
+  var n = Date.now(); if (n - (ROUTES.dzis.lastE6 || 0) < 20000) return; ROUTES.dzis.lastE6 = n;
+  var t = el.querySelector('[data-live="rec-time"]');
+  if (t) {
+    var rem = (+t.dataset.total) - (n - (+t.dataset.end)) / 3600000;
+    if (rem <= 0) { rerender(); return; }
+    var txt = recoveryLine(rem); if (t.textContent !== txt) t.textContent = txt;
+  }
+  var due = !!el.querySelector('[data-e6="bed-due"]'), now = !!bedDue(); if (due !== now) rerender();
+  e6Tick();
+}
+
+// ====================== TRENDY: Twój typowy zakres ======================
+var e6Memo = { key: '', rec: {} };
+function e6ReadinessOf(date) { // memo per (days array, today)
+  var key = (S.days.length) + '|' + todayStr() + '|' + S.e6.modes.length + '|' + (S.days.length ? S.days[S.days.length - 1].date + S.days[S.days.length - 1].time : '');
+  if (e6Memo.key !== key) e6Memo = { key: key, rec: {} };
+  if (!(date in e6Memo.rec)) { var st = C.dayStatus(S.days, date); e6Memo.rec[date] = st && st.scored ? st.readiness : null; }
+  return e6Memo.rec[date];
+}
+function e6Metric(kind) {
+  if (kind === 'rec') return { title: 'Regeneracja', unit: '%', dec: 0, ymax: 100, ticks: [0, 50, 100], valueOf: e6ReadinessOf, color: function (v) { return COL[C.colorFor(v)] || '#2EE86B'; } };
+  if (kind === 'sleep') return { title: 'Sen', unit: 'h', dec: 1, ymax: 10, ticks: [0, 4, 8], valueOf: function (d) { var r = C.findDay(sleepDays(), d), m = r && r.sleep ? FC.recSleepMin(r) : NaN; return m > 0 ? m / 60 : null; }, color: function () { return '#E07BF0'; } };
+  return { title: 'Obciążenie', unit: '', dec: 1, ymax: 21, ticks: [0, 7, 14, 21], valueOf: function (d) { var has = !!C.findDay(S.days, d) || S.workouts.some(function (w) { return w.date === d && w.type !== 'sauna'; }); return has ? FC.dailyStrain(S.workouts, d, S.days) : null; }, color: function () { return '#2D9CFF'; } };
+}
+function e6RangeChartHtml(kind, n) {
+  var mt = e6Metric(kind), td = todayStr(), dates = []; for (var q = n - 1; q >= 0; q--) dates.push(C.addDays(td, -q));
+  var vals = dates.map(mt.valueOf), band = E6.rangeBand(mt.valueOf, td), cur = vals[n - 1], lab = band.ok ? E6.rangeLabel(cur, band) : null;
+  var bars = []; vals.forEach(function (v, i) { if (v != null) bars.push({ i: i, v: v, color: mt.color(v), op: i === n - 1 ? 1 : 0.55 }); });
+  var mb = E6.bands(S.e6.modes, dates), head = '<div class="row sp" style="gap:8px;flex-wrap:wrap"><span class="sm sub">' + mt.title + '</span>';
+  if (lab) head += pill(lab.key === 'norma' ? 'ok' : 'warn', 'dziś ' + lab.label);
+  else if (band.ok) head += '<span class="xs mut" data-e6="range-nocur">brak dzisiejszej wartości</span>';
+  head += '</div>';
+  if (bars.length < 2) return '<div class="col" style="gap:4px" data-e6="range-' + kind + '">' + head + '<p class="xs mut" style="margin:0">Za mało danych (' + bars.length + ' z ' + n + ' dni).</p></div>';
+  var mx = mt.ymax; if (kind === 'sleep') { mx = Math.max(10, Math.ceil(Math.max.apply(null, vals.filter(function (v) { return v != null; })))); } if (kind === 'obc') mx = 21;
+  var ticks = kind === 'sleep' ? [0, 4, 8].filter(function (t) { return t <= mx; }) : mt.ticks;
+  var h = '<div class="col" style="gap:4px" data-e6="range-' + kind + '">' + head +
+    chart({ n: n, ymin: 0, ymax: mx, ticks: ticks, tickFmt: kind === 'sleep' ? function (t) { return t + ' h'; } : null, label: mt.title + ', ' + n + ' dni, z pasem typowego zakresu', band: band.ok ? { lo: Math.max(0, band.lo), hi: Math.min(mx, band.hi) } : null, modeBands: mb, bars: bars, bw: 0.8,
+      xl: [{ i: 0, t: n + ' dni temu', a: 'start' }, { i: n - 1, t: 'dziś', a: 'end' }] });
+  h += band.ok ? '<span class="xs mut" data-e6="range-text">Typowy zakres: ' + pl1(Math.max(0, band.lo), mt.dec) + '–' + pl1(band.hi, mt.dec) + (mt.unit ? ' ' + mt.unit : '') + ' (średnia ± 0,75 SD z 60 dni, ' + band.n + ' dni)</span>'
+    : '<span class="xs mut" data-e6="range-note">Pas „Twój typowy zakres” pojawi się po ' + band.need + ' dniach danych (masz ' + band.n + ').</span>';
+  return h + '</div>';
+}
+function e6TrendyHtml(i) {
+  var n = 30, h = '<div class="card fu" ' + dl(i) + ' data-e6="range-card"><p class="lbl">Twój typowy zakres</p><p class="xs mut" style="margin:0">Zacieniowany pas to Twoja norma z ostatnich 60 dni (średnia ± 0,75 SD). Dni w trybie Chory lub Podróż nie wchodzą do normy.</p>' +
+    e6RangeChartHtml('rec', n) + e6RangeChartHtml('sleep', n) + e6RangeChartHtml('obc', n);
+  var mb = E6.bands(S.e6.modes, (function () { var a = [], td = todayStr(); for (var q = n - 1; q >= 0; q--) a.push(C.addDays(td, -q)); return a; })()), lg = modeLegendHtml(mb);
+  h += '<div class="row xs mut" style="flex-wrap:wrap;gap:4px 12px"><span style="color:#2EE86B">▮ Twój typowy zakres</span>' + lg + '</div></div>';
+  var dv = E6.deviationSeries(S.days, todayStr(), 30, 'hrv'), last = dv.pts[dv.pts.length - 1];
+  h += '<a href="#/odchylenia" class="card fu" ' + dl(i + 1) + ' data-e6="dev-link"><div class="row sp"><div><p class="lbl">Odchylenie od normy</p><span class="sm sub">' + (dv.ok && last.z != null ? 'HRV dziś: ' + sgnPl(last.z, 1) + ' SD od normy' : 'Wykres HRV i tętna w SD od normy') + '</span></div>' + ico('chev', 20) + '</div></a>';
+  return h;
+}
+
+// ====================== #/odchylenia ======================
+function e6DevChart(ds, n) {
+  var pts = ds.pts, zs = pts.filter(function (p) { return p.z != null; }).map(function (p) { return Math.abs(p.z); });
+  var m = Math.max(2, Math.ceil(Math.max.apply(null, zs.concat([ds.k]))));
+  if (m > 5) m = 5;
+  var tk = []; for (var t = -m; t <= m; t++) tk.push(t);
+  var clampZ = function (z) { return Math.max(-m, Math.min(m, z)); };
+  var dates = pts.map(function (p) { return p.date; }), mb = E6.bands(S.e6.modes, dates);
+  var dots = pts.filter(function (p) { return p.z != null; }).map(function (p) {
+    var out = Math.abs(p.z) > ds.k, c = p.excluded ? '#8A96A0' : (p.i === n - 1 ? '#fff' : (out ? '#F2A93B' : '#C5CED6'));
+    return { i: p.i, v: clampZ(p.z), color: c, hollow: p.excluded, r: p.i === n - 1 ? (n > 90 ? 2.6 : 3.5) : (n > 90 ? 1.5 : (n > 30 ? 2 : 2.6)) };
+  });
+  var line = pts.filter(function (p) { return p.avg7 != null; }).map(function (p) { return { i: p.i, v: clampZ(p.avg7) }; });
+  var xl = [{ i: 0, t: (n === 30 ? '30 dni' : (n === 90 ? '3 mies.' : '6 mies.')) + ' temu', a: 'start' }, { i: n - 1, t: 'dziś', a: 'end' }];
+  return chart({ n: n, ymin: -m, ymax: m, H: 190, ticks: tk, tickFmt: function (v) { return v === 0 ? '0' : (v > 0 ? '+' + v : '−' + Math.abs(v)); }, label: 'Odchylenie od normy w SD, ' + n + ' dni', band: { lo: -ds.k, hi: ds.k }, zeroLine: 0, modeBands: mb,
+    lines: [{ pts: line, color: '#2CE8B5', w: 2, area: false, last: false }], dots: dots, xl: xl });
+}
+function rOdchylenia() {
+  var u = S.e6.ui, kind = u.devTab === 'rhr' ? 'rhr' : 'hrv', n = u.devRange, td = todayStr(), i = 0;
+  var h = header('Odchylenie', { back: 'trendy' }) + '<div class="body">';
+  h += '<div class="chips fu" ' + dl(i++) + ' role="radiogroup" aria-label="Wskaźnik">' + [['hrv', 'HRV'], ['rhr', 'Tętno spoczynkowe']].map(function (x) { var on = kind === x[0]; return '<button class="chip' + (on ? ' on' : '') + '" data-act="e6DevTab" data-v="' + x[0] + '" role="radio" aria-checked="' + on + '">' + x[1] + '</button>'; }).join('') + '</div>';
+  h += '<div class="chips fu" ' + dl(i++) + ' role="radiogroup" aria-label="Zakres">' + [[30, '30 dni'], [90, '3 mies.'], [180, '6 mies.']].map(function (x) { var on = n === x[0]; return '<button class="chip s' + (on ? ' on' : '') + '" data-act="e6DevRange" data-v="' + x[0] + '" role="radio" aria-checked="' + on + '">' + x[1] + '</button>'; }).join('') + '</div>';
+  var ds = E6.deviationSeries(S.days, td, n, kind);
+  if (!ds.ok) {
+    h += emptyCard('Za mało danych', 'Wykres odchylenia pojawi się, gdy norma będzie miała co najmniej ' + ds.need + ' dni pomiarów (masz ' + ds.baseN + '). Dni w trybie Chory i Podróż nie liczą się do normy.', '<button class="btn pri full" data-act="measure"' + (S.connected ? '' : ' disabled') + '>Poranny pomiar (2 min)</button>', 'chart');
+    return h + '</div>';
+  }
+  var last = ds.pts[n - 1], inB = last.z != null && Math.abs(last.z) <= ds.k;
+  var name = kind === 'rhr' ? 'Tętno spoczynkowe' : 'HRV';
+  h += '<div class="card fu" ' + dl(i++) + ' data-e6="dev-summary"><p class="lbl">' + name + ' – odchylenie od normy</p>' +
+    (last.z != null ? '<div class="row" style="align-items:baseline;gap:8px;flex-wrap:wrap"><span class="n" style="font-size:36px;line-height:1.1" data-e6="dev-today">' + sgnPl(last.z, 1) + ' <span style="font-size:18px">SD</span></span><span class="sm sub">(' + sgnPl(last.pct, 0) + '% względem normy)</span>' + pill(inB ? 'ok' : 'warn', inB ? 'w normie' : (last.z > 0 ? 'powyżej' : 'poniżej')) + '</div>'
+      : '<p class="sm sub" style="margin:0">Brak dzisiejszego pomiaru. Pokazuję dotychczasowe dni.</p>') +
+    e6DevChart(ds, n) +
+    '<div class="row xs mut" style="flex-wrap:wrap;gap:4px 12px"><span>● dzień</span><span style="color:#2CE8B5">— średnia 7 dni</span><span style="color:#2EE86B">▮ norma ±' + nf(ds.k, 2) + ' SD</span><span>○ dzień wyłączony z normy</span>' + modeLegendHtml(E6.bands(S.e6.modes, ds.pts.map(function (p) { return p.date; }))) + '</div></div>';
+  h += '<div class="card fu" ' + dl(i++) + '><p class="lbl">Jak czytać wykres</p><p class="sm sub" style="margin:0">Zero to Twoja norma z 60 dni przed danym dniem. Każdy punkt pokazuje, o ile odchylamy się od niej, liczone w odchyleniach standardowych (SD). Pas ' + (kind === 'rhr' ? '±1 SD' : '±0,75 SD') + ' to Twój typowy zakres. ' + (kind === 'rhr' ? 'Tętno powyżej pasa bywa oznaką zmęczenia lub infekcji.' : 'HRV poniżej pasa bywa oznaką zmęczenia lub infekcji.') + ' Szare puste punkty to dni w trybie Chory lub Podróż: widać je, ale nie liczą się do normy ani do linii średniej.</p></div>';
+  h += '<a href="#/alarm" class="card fu" ' + dl(i++) + '><div class="row sp"><div><p class="lbl">Alarm przemęczenia</p><span class="sm sub">Co dziś mówi alarm</span></div>' + ico('chev', 20) + '</div></a>';
+  return h + '</div>';
+}
+ROUTES.odchylenia = { tab: 'trendy', depth: 1, parent: 'trendy', render: rOdchylenia, mount: renderBattery };
+ACT_E6.e6DevTab = function (el) { e6SetUi('devTab', el.dataset.v === 'rhr' ? 'rhr' : 'hrv'); rerender(); };
+ACT_E6.e6DevRange = function (el) { var v = +el.dataset.v; e6SetUi('devRange', v === 90 || v === 180 ? v : 30); rerender(); };
+
+// ====================== PROFIL: sen i przypomnienie ======================
+function fmtBase(v) { return String(v).replace('.', ','); }
+function e6ProfilHtml() {
+  var tp = e6Tonight(), on = S.e6.bedRemind;
+  var h = '<div class="card" data-e6="sleep-settings"><p class="row sp lbl"><span>Sen i przypomnienie</span></p>' +
+    '<label class="row sp sm sub">Podstawowe zapotrzebowanie (h)<input class="inp num" style="width:110px" id="sleepBase" type="text" inputmode="decimal" data-keep="1" value="' + esc(fmtBase(S.e6.sleepBaseH)) + '" aria-label="Podstawowe zapotrzebowanie na sen w godzinach"></label>' +
+    '<p class="xs mut" style="margin:0">Od 6 do 10 h. Do tego dochodzi dług snu z 3 ostatnich nocy (najwyżej +1 h) i dodatek po wczorajszym wysiłku (+15 lub +30 min).</p>' +
+    '<p class="err" id="sbErr" hidden></p>' + savedSlot('sleepbase') + '<button class="btn sm" data-act="e6SaveBase" style="align-self:flex-start">Zapisz</button>' +
+    '<div class="row sp" style="margin-top:4px"><span class="sm sub">Przypomnienie „pora spać” (30 min przed)</span>' + tglHtml('e6BedRem', on, 'Przypomnienie pora spać') + '</div>' + savedSlot('bedrem') +
+    '<p class="xs mut" style="margin:0" data-e6="bed-remind-info">' + (!tp.known ? 'Najpierw ustaw planowaną pobudkę na ekranie Dziś – bez niej nie wyślę przypomnienia.' : (on ? 'Dziś o ' + esc(tp.remindAt) + ' (pora spać ' + esc(tp.bed) + ').' : 'Wyłączone.')) + (NATIVE ? '' : ' W przeglądarce pokażę je jako notatkę w aplikacji. Powiadomienie systemowe działa w aplikacji na Androida.') + '</p></div>';
+  return h;
+}
+ACT_E6.e6SaveBase = function () {
+  var el = $('sleepBase'), err = $('sbErr'), raw = el ? el.value.trim() : '';
+  var v = E6.cleanBaseH(raw);
+  if (v == null) { if (err) { err.textContent = 'Podaj godziny od 6 do 10, np. 7,5.'; err.hidden = false; } return; }
+  clearDraft('sleepBase'); e6SetBase(v); markSaved('sleepbase', 'Zapisano: podstawa ' + fmtBase(v) + ' h', 6000); buzz(30); if (UI.onData) UI.onData();
+};
+ACT_E6.e6BedRem = function () { e6SetBedRemind(!S.e6.bedRemind); };
+
 /* ===== Forma 0.2 - UI part B: Regeneracja, Sen, Trening, sesje, Forma, Trendy, Profil, Diagnostyka, events, init ===== */
 function weekdayShort(date) { return WD1[dowIdx(date)]; }
 
@@ -8663,7 +9346,7 @@ function sleepStagesCard(sl, idx) {
 }
 function rSen() {
   var today = todayStr(), sl = FC.sleepNight(sleepDays(), S.workouts, today), h = header('Sen', { back: 'dzis' }) + '<div class="body">';
-  var tp = FC.tonightPlan(sleepDays(), S.workouts, today, plannedWake());
+  var tp = e6Tonight();
   if (!sl) h += emptyCard('Brak danych o śnie', 'Godziny snu wpisujesz w porannym formularzu: „Zasnąłem o” i „Obudziłem się o”.', '<button class="btn pri full" data-act="measure"' + (S.connected ? '' : ' disabled') + '>Poranny pomiar (2 min)</button>', 'sleep');
   else {
     h += '<div class="card fu"><div class="row sp"><div><p class="lbl">Godziny snu</p><div class="n" style="font-size:36px;line-height:1.15;white-space:nowrap">' + FC.fmtDur(sl.durH) + '</div><div class="sub">z ' + FC.fmtDur(sl.needH) + ' potrzeby</div></div>' +
@@ -8680,9 +9363,10 @@ function rSen() {
       '<div class="row sp"><span class="sm sub">Wydajność · 60%</span><span class="n" style="font-size:22px">' + Math.round(sl.perf) + '</span></div>' + factorBar(sl.perf) +
       '<div class="row sp"><span class="sm sub">Regularność · 20%</span><span class="n" style="font-size:22px">' + (sl.reg == null ? '—' : Math.round(sl.reg)) + '</span></div>' + (sl.reg == null ? '<p class="xs mut" style="margin:0 0 6px">Potrzeba co najmniej 3 nocy z godzinami snu (masz ' + r.n + '). Do czasu zebrania danych wynik liczymy bez tego składnika.</p>' : factorBar(sl.reg) + '<p class="xs mut" style="margin:0">Odchylenie godzin: zasypianie ±' + nf(r.sdBed, 0) + ' min, pobudka ±' + nf(r.sdWake, 0) + ' min (−10 pkt za każde 30 min).</p>') +
       '<div class="row sp"><span class="sm sub">Efektywność · 20%</span><span class="n" style="font-size:22px">' + Math.round(sl.eff) + '</span></div>' + factorBar(sl.eff) + '<p class="xs mut" style="margin:0">' + (sl.effReal ? 'Efektywność snu z pomiaru ' + (sl.stagesSrc === 'hc' ? 'z Health Connect.' : 'WHOOP.') : 'Brak danych o czasie w łóżku – przyjęto 100.') + '</p></div>';
-    h += '<div class="card fu" ' + dl(2) + '><p class="lbl">Skąd ta potrzeba snu</p><p class="sm sub" style="margin:0">8,0 h podstawy + 0,05 h × (wczorajsze obciążenie ' + nf(sl.strainY, 1) + ' − 10, minimum 0) + 0,5 × dług z ostatnich nocy (' + nf(sl.debt3, 2) + ' h) = <b style="color:#fff">' + nf(sl.needH, 2) + ' h</b>.</p></div>';
+    h += '<div class="card fu" ' + dl(2) + ' data-e6="need-why"><p class="lbl">Skąd ta potrzeba snu</p><p class="sm sub" style="margin:0">' + (sl.needInfo ? 'Podstawa ' + nf(sl.needInfo.baseH, 2) + ' h (zmienisz ją w Profilu) + dług z 3 poprzednich nocy ' + nf(sl.needInfo.debtH, 2) + ' h (suma niedoborów, najwyżej 1 h) + dodatek po wczorajszym wysiłku (obciążenie ' + nf(sl.strainY, 1) + ') ' + sl.needInfo.strainMin + ' min = <b style="color:#fff">' + nf(sl.needH, 2) + ' h</b>.' : '8,0 h podstawy + 0,05 h × (wczorajsze obciążenie ' + nf(sl.strainY, 1) + ' − 10, minimum 0) + 0,5 × dług z ostatnich nocy (' + nf(sl.debt3, 2) + ' h) = <b style="color:#fff">' + nf(sl.needH, 2) + ' h</b>.') + '</p></div>';
   }
-  h += '<div class="card tint-p fu" ' + dl(3) + '><span class="n" style="font-size:20px">Dziś połóż się o ' + esc(tp.bed || '—') + '</span><span class="sm sub">Tak, by przespać ok. ' + FC.fmtDur(tp.needH) + ' i wstać o ' + esc(tp.wake) + (S.profile && S.profile.plannedWake ? '' : ' (przyjęta pobudka – zmienisz ją na ekranie Dziś)') + '. Godzina = pobudka − potrzeba snu − 15 min na zaśnięcie.</span></div>';
+  if (tp.known) h += '<div class="card tint-p fu" ' + dl(3) + ' data-e6="sleep-card"><span class="n" data-e6="sleep-sentence" style="font-size:20px">' + esc(tp.sentence) + '</span><span class="sm sub">' + esc(e6PartsText(tp.nd)) + ' + ' + E6.FALL_ASLEEP_MIN + ' min na zaśnięcie, pobudka ' + esc(tp.wake) + (S.profile && S.profile.plannedWake ? '' : ' (typowa z ostatnich nocy – zmienisz ją na ekranie Dziś)') + '. ' + (S.e6.bedRemind ? 'Przypomnienie o ' + esc(tp.remindAt) + '.' : 'Przypomnienie wyłączone (Profil).') + '</span></div>';
+  else h += '<div class="card tint-p fu" ' + dl(3) + ' data-e6="wake-prompt"><span class="n" style="font-size:20px">Ustaw planowaną pobudkę</span><span class="sm sub">Bez niej nie policzę pory snu ani nie wyślę przypomnienia. Godzinę wpiszesz na ekranie Dziś.</span><a class="btn pri full" href="#/dzis">Przejdź do Dziś</a></div>';
   return h + '</div>';
 }
 ROUTES.sen = { tab: 'dzis', depth: 1, parent: 'dzis', render: rSen, mount: renderBattery };
@@ -8701,10 +9385,11 @@ function workoutRow(w, open) {
   var meta = wkWhen(w.date) + ', ' + w.time + ' · ' + nf(w.durMin, 0) + ' min' + (w.hrAvg ? ' · śr. ' + Math.round(w.hrAvg) + ' ud/min' : '') + (w.source === 'whoop' ? ' · WHOOP' : '') + (w.source === 'hc' ? ' · ' + esc(HCC.originLabel(w.pkg)) + ' (Health Connect)' : '');
   var sp_ = sportPretty(w.sport), sp1 = sp_ && sp_.toLowerCase() !== String(WK_NAME[w.type]).toLowerCase() ? sp_ : '';
   var sum = (w.source === 'whoop' || w.source === 'hc') ? [sp1, w.distanceKm ? nf(w.distanceKm, 1) + ' km' : ''].filter(Boolean).join(' · ') : (w.type === 'gym' ? w.exercises.length + ' ćw. · ' + nfi(vol) + ' kg' : (w.distanceKm ? nf(w.distanceKm, 1) + ' km' : 'dystans nie podany'));
-  var saunaW = w.type === 'sauna', kc = w.kcalNet != null ? w.kcalNet : (w.kcal != null ? w.kcal : null);
+  var saunaW = w.type === 'sauna', kc = w.kcalNet != null ? w.kcalNet : (w.kcal != null ? w.kcal : null), rcv = saunaW ? null : recoveryOfWorkout(w);
+  if (rcv && rcv.remH > 0) meta += ' · regeneracja ' + E6.remainingText(rcv.remH);
   if (saunaW) sum = nf(w.durMin, 0) + ' min';
   return '<details class="card wk fu"' + (open ? ' open' : '') + '><summary><span style="color:#2D9CFF">' + ico(w.type, 26) + '</span><span class="grow"><span class="n" style="font-size:17px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + WK_NAME[w.type] + (sum ? ' · ' + sum : '') + '</span><span class="xs mut">' + meta + '</span></span><span class="n" style="font-size:' + (saunaW ? 14 : 24) + 'px;color:' + (saunaW ? '#9AA6B0' : '#2D9CFF') + '">' + (saunaW ? 'poza<br>obciążeniem' : nf(strain, 1)) + '</span></summary>' +
-    '<div class="col" style="margin-top:8px">' + (kc != null ? '<p class="sm" style="margin:0" data-e4="wk-kcal"><b class="n" style="font-size:18px">' + nfi(kc) + ' kcal</b> <span class="xs mut">ponad spoczynek, szacunek ±20%</span></p>' : '') + (saunaW ? '<p class="xs mut" style="margin:0">Sauna nie wlicza się do obciążenia, regeneracji ani wykrywania tętna maksymalnego. Dodamy tag Sauna do następnego pomiaru.</p>' : '') + (saunaW ? '' : w.zonesSec ? '<p class="lbl" style="font-size:12px">Czas w strefach tętna</p>' + zonesHtml(w.zonesSec) : '<p class="xs mut" style="margin:0">' + (w.hasHr ? 'Strefy tętna wymagają profilu i tętna spoczynkowego.' : 'Bez tętna z opaski – obciążenie z oceny wysiłku.') + '</p>') +
+    '<div class="col" style="margin-top:8px">' + (rcv ? '<p class="sm" style="margin:0" data-e6="wk-recovery">' + (rcv.remH > 0 ? '<b>' + esc(recoveryLine(rcv.remH)) + '</b> <span class="xs mut">szacunek z obciążenia ' + pl1(rcv.strain) + ' i dzisiejszej regeneracji</span>' : 'Po tym treningu jesteś już zregenerowany.') + '</p>' : '') + (kc != null ? '<p class="sm" style="margin:0" data-e4="wk-kcal"><b class="n" style="font-size:18px">' + nfi(kc) + ' kcal</b> <span class="xs mut">ponad spoczynek, szacunek ±20%</span></p>' : '') + (saunaW ? '<p class="xs mut" style="margin:0">Sauna nie wlicza się do obciążenia, regeneracji ani wykrywania tętna maksymalnego. Dodamy tag Sauna do następnego pomiaru.</p>' : '') + (saunaW ? '' : w.zonesSec ? '<p class="lbl" style="font-size:12px">Czas w strefach tętna</p>' + zonesHtml(w.zonesSec) : '<p class="xs mut" style="margin:0">' + (w.hasHr ? 'Strefy tętna wymagają profilu i tętna spoczynkowego.' : 'Bez tętna z opaski – obciążenie z oceny wysiłku.') + '</p>') +
     (saunaW ? '' : w.source === 'hc' ? '<p class="xs mut" style="margin:0" data-hc="wk-note">Trening zaimportowany z Health Connect (aplikacja: ' + esc(HCC.originLabel(w.pkg)) + ', pakiet ' + esc(w.pkg || '?') + ').' + (w.trimp != null ? ' Obciążenie ' + nf(strain, 1) + ' policzone ze średniego tętna ' + Math.round(w.hrAvg) + '.' : ' Bez tętna z opaski i bez oceny wysiłku nie wlicza się do obciążenia.') + '</p>' : w.source === 'whoop' ? '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ' = strain z WHOOP' + (w.hrMax ? ' · maks. tętno ' + Math.round(w.hrMax) : '') + '. Trening zaimportowany z WHOOP.</p>' : '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ': z tętna ' + (sl.fromHr ? nf(FC.strainFromLoad(sl.fromHr), 1) : 'brak') + ' · z oceny wysiłku ' + (sl.fromRpe ? nf(FC.strainFromLoad(sl.fromRpe), 1) + ' (RPE ' + w.rpe + ')' : 'brak') + '</p>') +
     gpsSummaryHtml(w, null, true) +
     (w.exercises.length ? '<p class="xs sub" style="margin:0">' + w.exercises.map(function (e) { return esc(e.name) + ' ' + e.sets.map(function (s) { return nf(s.kg, 1).replace(',0', '') + '×' + s.reps; }).join(', '); }).join('<br>') + '</p>' : '') +
@@ -8863,6 +9548,7 @@ function rTrendy() {
   h += '<a href="#/forma" class="card fu" ' + dl(1) + '><div class="row sp"><div><p class="lbl">Forma i HRV</p><span class="sm sub">Kondycja, zmęczenie, forma i ćwiartka HRV × tętno</span></div>' + ico('chev', 20) + '</div></a>';
   h += alarmTrendLink(2);
   h += trendCardsHtml(3);
+  h += e6TrendyHtml(3);
   var wv = FC.weeklyVolume(S.workouts, td, 12);
   if (!S.workouts.length) h += emptyCard('Wolumen treningowy', 'Brak treningów. Zapisane treningi pojawią się tu jako tygodniowa objętość siłowni (kg) oraz czas biegu i spacerów.', '<a class="btn" href="#/trening">Do treningów</a>', 'run');
   else {
@@ -9050,6 +9736,7 @@ function rProfil() {
   h += '<a href="#/bateria" class="card" data-bat="profil-link"><div class="row sp"><div><p class="lbl">Bateria opaski</p><span class="xs mut" data-bat="profil-verdict">' + esc(battVerdict().title) + '</span></div>' + ico('chev', 20) + '</div></a>';
   h += hcCardHtml();
   h += stepsSettingsHtml();
+  h += e6ProfilHtml();
   h += '<div class="card"><p class="lbl">Asystent AI</p><div class="row sp"><span>Poranna notatka AI</span><span class="tgl" role="switch" aria-checked="false" aria-disabled="true" aria-label="Poranna notatka AI – wkrótce"><i></i></span></div><p class="xs mut" style="margin:0">Asystent AI – wkrótce. Dziś notatka dnia powstaje z szablonu, bez wysyłania danych gdziekolwiek.</p></div>';
   h += '<div class="card"><p class="lbl">Kopia zapasowa</p><p class="xs mut" style="margin:0">Eksport zawiera wszystko: pomiary poranne (z godzinami snu i danymi WHOOP), treningi, profil i wagi. Dane logowania WHOOP nigdy nie trafiają do kopii.</p><label class="row" style="gap:10px;min-height:44px;cursor:pointer" data-gps="exp-routes"><input type="checkbox" id="expRoutes" style="width:22px;height:22px;flex:none"' + (gpsRouteCount() ? '' : ' disabled') + '><span class="sm">Dołącz trasy GPS <span class="xs mut">' + (gpsRouteCount() ? '(' + gpsRouteCount() + ' ' + (gpsRouteCount() === 1 ? 'trasa' : 'tras') + ', domyślnie bez – to Twoje miejsca)' : '(brak zapisanych tras)') + '</span></span></label><div class="row" style="flex-wrap:wrap"><button class="btn grow" data-act="expAll">Eksportuj kopię (JSON)</button><button class="btn grow" data-act="impAll">Wczytaj kopię (JSON)</button></div><input id="fileImport" type="file" accept=".json,application/json" hidden><p class="sm" id="bkMsg" role="status" hidden></p></div>';
   h += '<a href="#/pomiary" class="card"><div class="row sp"><div><p class="lbl">Pomiary poranne</p><span class="xs mut">' + S.days.length + ' zapisanych dni · usuwanie i edycja dzisiejszego zapisu</span></div>' + ico('chev', 20) + '</div></a>';
@@ -9115,7 +9802,7 @@ function pageTop() { return stack[stack.length - 1]; }
 function curForm() { if (!S.form && S.pending) initForm(); return S.form; }
 function applyProfile(patch) {
   var p = Object.assign({ age: null, sex: null, hrMax: null, plannedWake: null }, S.profile || {}, patch);
-  S.profile = FC.sanitizeProfile(p); persist('profile'); UI.onData();
+  S.profile = FC.sanitizeProfile(p); persist('profile'); if (typeof e6SyncBedtime === 'function') e6SyncBedtime(); UI.onData();
 }
 function addWeight(kgRaw) {
   var w = FC.sanitizeWeight({ date: todayStr(), kg: kgRaw }); if (!w) return false;
@@ -9193,8 +9880,8 @@ var ACT = {
   rpe: function (el) { S.rpe = +el.dataset.v; savePending(); var t = pageTop(); paint(t.el, t.path); t.el.classList.add('noanim'); },
   saveWorkout: function () {
     var w = S.pendingWorkout; if (!w) return;
-    var ok = commitWorkout(S.rpe), sl = FC.sessionLoad(w); buzz(30);
-    S.flash = { to: 'trening', text: 'Zapisano trening: ' + WK_NAME[w.type] + (w.type === 'sauna' ? ', poza obciążeniem' : ', obciążenie ' + nf(FC.strainFromLoad(sl.load), 1)) + (ok ? '' : '. Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie') + (DEMO ? ' (demo – tylko w pamięci)' : '') + '.' };
+    var ok = commitWorkout(S.rpe), sl = FC.sessionLoad(w), rcv = w.type === 'sauna' ? null : recoveryOfWorkout(w); buzz(30);
+    S.flash = { to: 'trening', text: 'Zapisano trening: ' + WK_NAME[w.type] + (w.type === 'sauna' ? ', poza obciążeniem' : ', obciążenie ' + nf(FC.strainFromLoad(sl.load), 1) + (rcv && rcv.remH > 0 ? '. ' + recoveryLine(rcv.remH) : '')) + (ok ? '' : '. Zapis niedostępny w tej przeglądarce – wyeksportuj dane ręcznie') + (DEMO ? ' (demo – tylko w pamięci)' : '') + '.' };
     goBackTo('trening');
   },
   discardWorkout: function () { S.pendingWorkout = null; S.rpe = null; savePending(); goBackTo('trening'); },
@@ -9262,7 +9949,7 @@ document.addEventListener('click', function (e) {
     delete el.dataset.armed;
   }
   buzz(10);
-  var fn = ACT[el.dataset.act] || ACT_BAT[el.dataset.act] || ACT_E4[el.dataset.act] || ACT_HC[el.dataset.act] || ACT_E5[el.dataset.act] || ACT_GPS[el.dataset.act]; if (fn) fn(el, e);
+  var fn = ACT[el.dataset.act] || ACT_BAT[el.dataset.act] || ACT_E4[el.dataset.act] || ACT_E6[el.dataset.act] || ACT_HC[el.dataset.act] || ACT_E5[el.dataset.act] || ACT_GPS[el.dataset.act]; if (fn) fn(el, e);
 });
 $('stack').addEventListener('input', function (e) {
   var el = e.target, k = el.dataset && el.dataset.in;
@@ -9307,7 +9994,7 @@ setInterval(function () {
   var t = pageTop(); if (t && ROUTES[t.path].tick) ROUTES[t.path].tick(t.el);
 }, 250);
 setInterval(renderBattery, 3000);
-storageProbe(); loadAll(); e4Init(); loadBattery(); whoopInit(); hcInit(); e5Init(); gpsInit();
+storageProbe(); loadAll(); e4Init(); e6Init(); loadBattery(); whoopInit(); hcInit(); e5Init(); gpsInit();
 log('Gotowe. Forma 0.2.');
 if (DEMO) startDemo();
 else if (window.top !== window.self) { showError(IFRAME_MSG); }
@@ -9320,9 +10007,10 @@ nativeInit();
 if (!NATIVE && !DEMO) ensureBand('start');
 whoopMaybeSync();
 e4Start();
+e6Start();
 hcStart();
 
-function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-26 20:31 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
+function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-26 21:31 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
 
 })();</script>
 </body>
