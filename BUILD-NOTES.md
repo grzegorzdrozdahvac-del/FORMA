@@ -35,3 +35,11 @@ Night CSV has "#start", "#gap", "#end" comment lines (parsed by NightStore, skip
 
 ## Web side (in /home/claude/forma-hrv/execution)
 hrv-core.js: processNight, nightRecord, mergeNightRecord, mergeMorningRecord, sanitizeDay (+source, validWindows, totalWindows, sleepEstimated, nightId, secondary), CSV column zrodlo. app2-base.js: nat(), native adapter, event handler, night processing. app2-ui-*.js: picker, Noc card, Regeneracja/Pomiary source labels. Tests: test-night.js (10), screenshot-native.py (mocked FormaNative).
+
+## Visual/native polish pass
+- FormaBridge.vibrate(ms: Int): VibratorManager on API 31+, Vibrator below, VibrationEffect.createOneShot (minSdk 26, no guard needed); clamps 1..200 ms; swallows exceptions. VIBRATE permission added. The web UI calls it with 10 ms on presses, 30 ms on save.
+- INTERNET permission added (web UI loads Barlow from Google Fonts; falls back to system-ui offline).
+- MainActivity: statusBarColor/navigationBarColor #0B0E11 + WindowInsetsControllerCompat light icons (no compileSdk 35 API); WebView alpha 0 until onPageFinished, then 200 ms fade-in (3 s safety timer); OVER_SCROLL_NEVER; scrollbars off; long-click consumed except on EDIT_TEXT_TYPE hit tests (inputs keep select/paste).
+- Theme: windowBackground #0B0E11 (already) + windowLightStatusBar=false (no splash flash). windowLightNavigationBar deliberately not used in XML (needs API 27 > minSdk 26); set in code instead.
+- Adaptive icon: drawable/ic_launcher_foreground.xml (mint #2CE8B5 ring arc 300 deg, gap at the bottom, with a pulse line), ic_launcher_monochrome.xml, mipmap-anydpi-v26/ic_launcher.xml and ic_launcher_round.xml (background #0B0E11). Manifest got roundIcon.
+- Not compiled here (no SDK). Compile-risk spots: the setOnLongClickListener lambda (returns Boolean from `type != EDIT_TEXT_TYPE`), `(v as WebView)`, onPageFinished(view: WebView?, ...) override.

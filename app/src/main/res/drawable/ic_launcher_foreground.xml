@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon foreground: mint ring (about 300 degrees, gap at the bottom) with a small pulse line inside.
+     Everything stays inside the 66dp safe zone of the 108dp canvas. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -6,9 +8,15 @@
     android:viewportHeight="108">
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#2EE86B"
+        android:strokeColor="#2CE8B5"
         android:strokeWidth="6"
         android:strokeLineCap="round"
+        android:pathData="M42,74.78 A24,24 0 1 1 66,74.78" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#2CE8B5"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:pathData="M30,56 L42,56 L48,40 L58,70 L65,52 L78,52" />
+        android:pathData="M40,54 L47,54 L50,45 L55,64 L58,50 L61,54 L68,54" />
 </vector>

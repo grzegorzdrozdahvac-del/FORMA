@@ -1,9 +1,13 @@
 package pl.forma.app
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.Settings
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -25,6 +29,25 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
         o.put("ok", false)
         o.put("error", msg)
         return o.toString()
+    }
+
+    /** Haptics for the web UI: window.FormaNative.vibrate(ms). Fire-and-forget, never throws. */
+    @JavascriptInterface
+    fun vibrate(ms: Int) {
+        try {
+            val duration: Long = ms.coerceIn(1, 200).toLong()
+            val vib: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vm = ctx.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                vm?.defaultVibrator
+            } else {
+                ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
+            if (vib != null && vib.hasVibrator()) {
+                vib.vibrate(VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE))
+            }
+        } catch (e: Exception) {
+            // ignore: haptics are optional
+        }
     }
 
     // ---------- events to JS ----------

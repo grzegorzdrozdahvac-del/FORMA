@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.os.Bundle
+import android.view.View
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -13,6 +14,7 @@ import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebViewAssetLoader
 
 class MainActivity : AppCompatActivity() {
@@ -24,6 +26,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var bridge: FormaBridge
+    private var revealed = false
 
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
@@ -37,6 +40,12 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // dark system bars with light icons (stable API, no compileSdk 35 needed)
+        window.statusBarColor = Color.parseColor("#0B0E11")
+        window.navigationBarColor = Color.parseColor("#0B0E11")
+        val insets = WindowInsetsControllerCompat(window, window.decorView)
+        insets.isAppearanceLightStatusBars = false
+        insets.isAppearanceLightNavigationBars = false
         BleManager.init(this)
         Notifications.ensureChannels(this)
 
@@ -46,6 +55,16 @@ class MainActivity : AppCompatActivity() {
 
         webView = WebView(this)
         webView.setBackgroundColor(Color.parseColor("#0B0E11"))
+        webView.alpha = 0f // hidden until the page has loaded, then faded in (no white or half-drawn flash)
+        webView.overScrollMode = View.OVER_SCROLL_NEVER
+        webView.isVerticalScrollBarEnabled = false
+        webView.isHorizontalScrollBarEnabled = false
+        webView.isHapticFeedbackEnabled = false
+        // no long-press context menu on plain content; text fields keep the default behaviour (select / paste)
+        webView.setOnLongClickListener { v ->
+            val type = (v as WebView).hitTestResult.type
+            type != WebView.HitTestResult.EDIT_TEXT_TYPE
+        }
         val s = webView.settings
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
@@ -56,6 +75,11 @@ class MainActivity : AppCompatActivity() {
             WebView.setWebContentsDebuggingEnabled(true)
         }
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                reveal()
+            }
+
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                 return loader.shouldInterceptRequest(request.url)
             }
@@ -79,8 +103,15 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        webView.postDelayed({ reveal() }, 3000) // safety net if onPageFinished never arrives
         val route = intent?.getStringExtra(EXTRA_ROUTE)
         webView.loadUrl(if (route != null && route.startsWith("#/")) BASE_URL + route else BASE_URL)
+    }
+
+    private fun reveal() {
+        if (revealed) return
+        revealed = true
+        webView.animate().alpha(1f).setDuration(200).start()
     }
 
     override fun onNewIntent(intent: Intent) {
