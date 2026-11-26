@@ -917,11 +917,253 @@ canvas{display:block;width:100%;height:200px}
   else root.HrvCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
+<script>/* Forma Etap 5B - GPS core: pure logic, no DOM, no network. Works in the browser (window.GpsCore) and in node.
+   Fix = { t: epoch ms, lat, lon, acc: metres (optional) }.
+   Pipeline: filterFixes (accuracy + speed jumps + order) -> smooth -> analyze (distance, moving time, pace, splits, EF, heart-rate drift)
+   -> compact (what is stored in the workout: summary + a thinned route). Location never leaves the phone: nothing here talks to a network. */
+(function (root) {
+  'use strict';
+  var node = typeof module !== 'undefined' && module.exports;
+  var R_EARTH = 6371008.8;
+  // per workout type: accuracy limit (m), speed jump limit (m/s) and the speed below which a segment counts as standing still
+  var LIM = { run: { acc: 25, spd: 12, still: 1.0 }, walk: { acc: 25, spd: 4, still: 0.5 } };
+  var EF_WARMUP_SEC = 600, EF_MIN_TOTAL_SEC = 1200, EF_MIN_STEADY_SEC = 300;
+  var DRIFT_MIN_TOTAL_SEC = 2400, DRIFT_MIN_HALF_SEC = 600;
+  var ROUTE_MAX_POINTS = 400, MAX_GAP_SEC = 15;
+
+  function fin(v) { return typeof v === 'number' && isFinite(v); }
+  function lim(type) { return LIM[type] || LIM.walk; }
+  function rad(d) { return d * Math.PI / 180; }
+
+  // great-circle distance in metres
+  function haversine(lat1, lon1, lat2, lon2) {
+    var p1 = rad(lat1), p2 = rad(lat2), dp = p2 - p1, dl = rad(lon2 - lon1);
+    var a = Math.sin(dp / 2) * Math.sin(dp / 2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2);
+    return 2 * R_EARTH * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+
+  // ---------------- filtering ----------------
+  // Drops: invalid values, out-of-order / duplicate timestamps, accuracy worse than 25 m, speed jumps (> 12 m/s run, > 4 m/s walk).
+  // If 5 fixes in a row are rejected as jumps the anchor was probably the bad one: the next fix becomes the new anchor.
+  function filterFixes(fixes, type) {
+    var L = lim(type), out = [], dropped = { invalid: 0, order: 0, acc: 0, jump: 0 }, jumpRun = 0, last = null;
+    (Array.isArray(fixes) ? fixes : []).forEach(function (f) {
+      if (!f || !fin(f.t) || !fin(f.lat) || !fin(f.lon) || Math.abs(f.lat) > 90 || Math.abs(f.lon) > 180 || (f.lat === 0 && f.lon === 0)) { dropped.invalid++; return; }
+      if (last && f.t <= last.t) { dropped.order++; return; }
+      if (fin(f.acc) && f.acc > L.acc) { dropped.acc++; return; }
+      if (last) {
+        var dt = Math.max(0.5, (f.t - last.t) / 1000), v = haversine(last.lat, last.lon, f.lat, f.lon) / dt;
+        if (v > L.spd && jumpRun < 5) { dropped.jump++; jumpRun++; return; }
+      }
+      jumpRun = 0; last = { t: f.t, lat: f.lat, lon: f.lon }; out.push(last);
+    });
+    return { pts: out, dropped: dropped, raw: Array.isArray(fixes) ? fixes.length : 0 };
+  }
+
+  // light smoothing: 1-2-1 weights on neighbours, ends kept as they are
+  function smooth(pts) {
+    if (pts.length < 3) return pts.slice();
+    var out = [pts[0]];
+    for (var i = 1; i < pts.length - 1; i++) {
+      out.push({ t: pts[i].t, lat: 0.25 * pts[i - 1].lat + 0.5 * pts[i].lat + 0.25 * pts[i + 1].lat, lon: 0.25 * pts[i - 1].lon + 0.5 * pts[i].lon + 0.25 * pts[i + 1].lon });
+    }
+    out.push(pts[pts.length - 1]);
+    return out;
+  }
+
+  // ---------------- segments ----------------
+  // One segment per pair of fixes: { ta, tb (ms), d (m), dt (s), moving }. Standing still (below the type's still-speed) adds neither distance nor moving time.
+  function segments(pts, type) {
+    var L = lim(type), segs = [];
+    for (var i = 1; i < pts.length; i++) {
+      var dt = (pts[i].t - pts[i - 1].t) / 1000; if (!(dt > 0)) continue;
+      var d = haversine(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
+      segs.push({ ta: pts[i - 1].t, tb: pts[i].t, d: d, dt: dt, moving: d / dt >= L.still, la: pts[i - 1], lb: pts[i] });
+    }
+    return segs;
+  }
+
+  function hrBetween(hr, t0, ta, tb) { // mean of the non-zero 1 Hz samples in [ta, tb]; null = none
+    if (!Array.isArray(hr) || !fin(t0)) return null;
+    var a = Math.max(0, Math.floor((ta - t0) / 1000)), b = Math.min(hr.length - 1, Math.max(a, Math.floor((tb - t0) / 1000))), s = 0, n = 0;
+    for (var i = a; i <= b; i++) { var v = hr[i]; if (v > 0 && v < 260) { s += v; n++; } }
+    return n ? s / n : null;
+  }
+
+  // ---------------- analysis ----------------
+  // opts: { type, t0 (workout start, ms), hr (1 Hz samples from t0, 0 = none), zoneOf: function (bpm) -> 0..5 | null, durSec }
+  function analyze(pts, opts) {
+    opts = opts || {}; var type = opts.type === 'run' ? 'run' : 'walk', t0 = fin(opts.t0) ? opts.t0 : (pts[0] ? pts[0].t : 0);
+    var res = { ok: false, type: type, n: pts.length, distM: 0, movingSec: 0, elapsedSec: 0, paceSecKm: null, speedMpm: null, splits: [], ef: { ok: false, reason: 'brak trasy' }, drift: { ok: false, reason: 'brak trasy' } };
+    if (pts.length < 2) return res;
+    var segs = segments(pts, type), dist = 0, mov = 0;
+    segs.forEach(function (s) { if (s.moving) { dist += s.d; mov += s.dt; } });
+    res.distM = dist; res.movingSec = mov; res.elapsedSec = (pts[pts.length - 1].t - pts[0].t) / 1000;
+    res.ok = dist >= 50 && mov > 0;
+    if (!res.ok) return res;
+    res.paceSecKm = mov / (dist / 1000); res.speedMpm = dist / (mov / 60);
+    res.splits = splitsOf(segs, opts, t0);
+    var durSec = fin(opts.durSec) ? opts.durSec : res.elapsedSec;
+    res.ef = efOf(segs, opts, t0, durSec); res.drift = driftOf(segs, opts, t0, durSec);
+    return res;
+  }
+
+  // per-km splits on moving time; the last partial km is kept when it is >= 100 m
+  function splitsOf(segs, opts, t0) {
+    var out = [], cd = 0, cm = 0, nextKm = 1, prevM = 0, prevT = null, firstT = segs.length ? segs[0].ta : 0, prevD = 0;
+    function push(km, distM, sec, ta, tb, partial) {
+      if (!(sec > 0)) return;
+      var hr = hrBetween(opts.hr, t0, ta, tb), o = { km: km, distM: Math.round(distM), sec: Math.round(sec), paceSecKm: Math.round(sec / (distM / 1000)), hr: hr == null ? null : Math.round(hr) };
+      if (partial) o.partial = true; out.push(o);
+    }
+    prevT = firstT;
+    segs.forEach(function (s) {
+      if (!s.moving) return;
+      var d0 = cd, m0 = cm; cd += s.d; cm += s.dt;
+      while (cd >= nextKm * 1000 - 1e-9) {
+        var f = s.d > 0 ? (nextKm * 1000 - d0) / s.d : 1, mAt = m0 + f * s.dt, tAt = s.ta + f * (s.tb - s.ta);
+        push(nextKm, 1000, mAt - prevM, prevT, tAt, false);
+        prevM = mAt; prevT = tAt; prevD = nextKm * 1000; nextKm++;
+      }
+    });
+    var rem = cd - prevD;
+    if (rem >= 100 && cm - prevM > 0) push(nextKm, rem, cm - prevM, prevT, segs[segs.length - 1].tb, true);
+    return out;
+  }
+
+  // EF (aerobic efficiency) = speed m/min / mean heart rate, only on steady stretches: after the first 10 min, heart rate up to zone 2 (below zone 1 counts too), moving.
+  // Needs >= 20 min of workout and >= 5 min of such stretches, otherwise a reason is returned instead of a number.
+  function efOf(segs, opts, t0, durSec) {
+    if (!(durSec >= EF_MIN_TOTAL_SEC)) return { ok: false, reason: 'za krótko' };
+    if (!Array.isArray(opts.hr) || !opts.hr.some(function (v) { return v > 0; })) return { ok: false, reason: 'brak tętna' };
+    if (typeof opts.zoneOf !== 'function') return { ok: false, reason: 'brak stref tętna (uzupełnij profil)' };
+    var sd = 0, st = 0, sh = 0;
+    segs.forEach(function (s) {
+      if (!s.moving || s.dt > MAX_GAP_SEC || s.ta < t0 + EF_WARMUP_SEC * 1000) return;
+      var h = hrBetween(opts.hr, t0, s.ta, s.tb); if (h == null) return;
+      var z = opts.zoneOf(h); if (z == null || z > 2) return; // zones 0-2: a calm walk often sits below zone 1, which is still steady aerobic work
+      sd += s.d; st += s.dt; sh += h * s.dt;
+    });
+    if (st < EF_MIN_STEADY_SEC) return { ok: false, reason: 'za mało spokojnych odcinków (tętno do strefy 2 po 10 min)' };
+    var v = (sd / st * 60) / (sh / st);
+    return fin(v) && v > 0 ? { ok: true, value: Math.round(v * 1000) / 1000, minutes: Math.round(st / 60) } : { ok: false, reason: 'brak danych' };
+  }
+
+  function driftLabel(pct) { return pct < 5 ? 'dobrze' : (pct <= 10 ? 'umiarkowany' : 'zmęczenie lub upał'); }
+  // Heart-rate drift (decoupling): speed / heart rate in the first vs the second half of the workout (warm-up of 10 min left out).
+  // Only for workouts >= 40 min; each half needs >= 10 min of moving data with heart rate.
+  function driftOf(segs, opts, t0, durSec) {
+    if (!(durSec >= DRIFT_MIN_TOTAL_SEC)) return { ok: false, reason: 'za krótko (od 40 min)' };
+    if (!Array.isArray(opts.hr) || !opts.hr.some(function (v) { return v > 0; })) return { ok: false, reason: 'brak tętna' };
+    var from = t0 + EF_WARMUP_SEC * 1000, to = segs.length ? segs[segs.length - 1].tb : from;
+    if (!(to - from > 2 * DRIFT_MIN_HALF_SEC * 1000)) return { ok: false, reason: 'za krótko (od 40 min)' };
+    var mid = from + (to - from) / 2, A = { d: 0, t: 0, h: 0 }, B = { d: 0, t: 0, h: 0 };
+    segs.forEach(function (s) {
+      if (!s.moving || s.dt > MAX_GAP_SEC || s.ta < from) return;
+      var h = hrBetween(opts.hr, t0, s.ta, s.tb); if (h == null) return;
+      var X = s.ta < mid ? A : B; X.d += s.d; X.t += s.dt; X.h += h * s.dt;
+    });
+    if (A.t < DRIFT_MIN_HALF_SEC || B.t < DRIFT_MIN_HALF_SEC) return { ok: false, reason: 'za mało danych z tętnem' };
+    var e1 = (A.d / A.t * 60) / (A.h / A.t), e2 = (B.d / B.t * 60) / (B.h / B.t);
+    if (!(e1 > 0) || !fin(e2)) return { ok: false, reason: 'brak danych' };
+    var pct = (e1 - e2) / e1 * 100;
+    return { ok: true, pct: Math.round(pct * 10) / 10, label: driftLabel(pct) };
+  }
+
+  // ---------------- route ----------------
+  function proj(pts) { // local equirectangular metres
+    var lat0 = pts.reduce(function (s, p) { return s + p.lat; }, 0) / pts.length, k = Math.cos(rad(lat0)) * R_EARTH * Math.PI / 180, m = R_EARTH * Math.PI / 180;
+    return pts.map(function (p) { return { x: p.lon * k, y: p.lat * m }; });
+  }
+  function rdp(xy, eps) { // iterative Ramer-Douglas-Peucker, returns the kept indices
+    var n = xy.length, keep = new Array(n).fill(false), stack = [[0, n - 1]]; keep[0] = keep[n - 1] = true;
+    while (stack.length) {
+      var se = stack.pop(), a = se[0], b = se[1]; if (b <= a + 1) continue;
+      var dx = xy[b].x - xy[a].x, dy = xy[b].y - xy[a].y, len = Math.sqrt(dx * dx + dy * dy), best = -1, bi = -1;
+      for (var i = a + 1; i < b; i++) {
+        var d = len > 0 ? Math.abs(dy * (xy[i].x - xy[a].x) - dx * (xy[i].y - xy[a].y)) / len : Math.sqrt(Math.pow(xy[i].x - xy[a].x, 2) + Math.pow(xy[i].y - xy[a].y, 2));
+        if (d > best) { best = d; bi = i; }
+      }
+      if (best > eps) { keep[bi] = true; stack.push([a, bi], [bi, b]); }
+    }
+    var idx = []; for (var j = 0; j < n; j++) if (keep[j]) idx.push(j);
+    return idx;
+  }
+  // thin a route to at most maxN points ([[lat, lon]] rounded to 5 decimals, about 1 m)
+  function simplifyRoute(pts, maxN) {
+    maxN = maxN || ROUTE_MAX_POINTS;
+    if (!pts || pts.length < 2) return [];
+    var xy = proj(pts), eps = 1, idx = rdp(xy, eps), guard = 0;
+    while (idx.length > maxN && guard++ < 30) { eps *= 1.5; idx = rdp(xy, eps); }
+    return idx.map(function (i) { return [Math.round(pts[i].lat * 1e5) / 1e5, Math.round(pts[i].lon * 1e5) / 1e5]; });
+  }
+  // route -> SVG coordinates inside a w x h box (aspect ratio kept, padded). Returns { d, start:[x,y], end:[x,y], w, h } or null.
+  function routePath(route, w, h, pad) {
+    if (!Array.isArray(route) || route.length < 2) return null;
+    pad = pad == null ? 14 : pad;
+    var pts = route.map(function (r) { return { lat: r[0], lon: r[1] }; }), xy = proj(pts);
+    var minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+    xy.forEach(function (p) { minx = Math.min(minx, p.x); maxx = Math.max(maxx, p.x); miny = Math.min(miny, p.y); maxy = Math.max(maxy, p.y); });
+    var sw = Math.max(maxx - minx, 20), sh = Math.max(maxy - miny, 20), sc = Math.min((w - 2 * pad) / sw, (h - 2 * pad) / sh);
+    var ox = (w - sw * sc) / 2 - minx * sc, oy = (h - sh * sc) / 2;
+    var P = xy.map(function (p) { return [Math.round((p.x * sc + ox) * 10) / 10, Math.round(((maxy - p.y) * sc + oy) * 10) / 10]; });
+    return { d: 'M' + P.map(function (p) { return p[0] + ' ' + p[1]; }).join('L'), start: P[0], end: P[P.length - 1], w: w, h: h };
+  }
+
+  // ---------------- what a workout stores ----------------
+  function compact(an, route, src) {
+    if (!an || !an.ok) return null;
+    var g = {
+      v: 1, distM: Math.round(an.distM), movingSec: Math.round(an.movingSec), paceSecKm: Math.round(an.paceSecKm), n: an.n,
+      splits: an.splits.slice(0, 200), route: Array.isArray(route) ? route : [], src: src === 'android' ? 'android' : 'web'
+    };
+    if (an.ef && an.ef.ok) { g.ef = an.ef.value; g.efMin = an.ef.minutes; } else if (an.ef && an.ef.reason) g.efNote = an.ef.reason;
+    if (an.drift && an.drift.ok) { g.drift = an.drift.pct; g.driftLabel = an.drift.label; } else if (an.drift && an.drift.reason) g.driftNote = an.drift.reason;
+    return g;
+  }
+  // stored object (backup / old data) -> clean object or null
+  function sanitizeGps(o) {
+    if (!o || typeof o !== 'object' || !fin(o.distM) || o.distM < 0 || !fin(o.movingSec) || o.movingSec <= 0) return null;
+    var route = (Array.isArray(o.route) ? o.route : []).slice(0, 2000).filter(function (r) { return Array.isArray(r) && fin(r[0]) && fin(r[1]) && Math.abs(r[0]) <= 90 && Math.abs(r[1]) <= 180; }).map(function (r) { return [r[0], r[1]]; });
+    var splits = (Array.isArray(o.splits) ? o.splits : []).slice(0, 200).filter(function (s) { return s && fin(s.km) && fin(s.sec) && s.sec > 0 && fin(s.distM) && s.distM > 0; }).map(function (s) {
+      var q = { km: Math.round(s.km), distM: Math.round(s.distM), sec: Math.round(s.sec), paceSecKm: fin(s.paceSecKm) ? Math.round(s.paceSecKm) : Math.round(s.sec / (s.distM / 1000)), hr: fin(s.hr) && s.hr > 0 ? Math.round(s.hr) : null };
+      if (s.partial) q.partial = true; return q;
+    });
+    var g = { v: 1, distM: Math.round(o.distM), movingSec: Math.round(o.movingSec), paceSecKm: fin(o.paceSecKm) && o.paceSecKm > 0 ? Math.round(o.paceSecKm) : (o.distM > 0 ? Math.round(o.movingSec / (o.distM / 1000)) : null), n: fin(o.n) ? Math.round(o.n) : 0, splits: splits, route: route, src: o.src === 'android' ? 'android' : 'web' };
+    if (fin(o.ef) && o.ef > 0 && o.ef < 10) { g.ef = o.ef; if (fin(o.efMin)) g.efMin = Math.round(o.efMin); } else if (typeof o.efNote === 'string') g.efNote = o.efNote.slice(0, 80);
+    if (fin(o.drift) && Math.abs(o.drift) < 200) { g.drift = o.drift; g.driftLabel = driftLabel(o.drift); } else if (typeof o.driftNote === 'string') g.driftNote = o.driftNote.slice(0, 80);
+    return g;
+  }
+
+  // ---------------- formatting / trend ----------------
+  function fmtPace(secKm) {
+    if (!fin(secKm) || secKm <= 0 || secKm > 5999) return '—';
+    var s = Math.round(secKm); return Math.floor(s / 60) + ':' + (s % 60 < 10 ? '0' : '') + (s % 60);
+  }
+  function fmtSec(sec) {
+    if (!fin(sec) || sec < 0) return '—';
+    var s = Math.round(sec), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = s % 60;
+    return h ? h + ':' + (m < 10 ? '0' : '') + m + ':' + (r < 10 ? '0' : '') + r : m + ':' + (r < 10 ? '0' : '') + r;
+  }
+  // EF values of saved workouts of one type, oldest first: [{ id, date, v }]
+  function efSeries(workouts, type) {
+    return (workouts || []).filter(function (w) { return w && w.type === type && w.gps && fin(w.gps.ef) && w.gps.ef > 0; })
+      .sort(function (a, b) { return (a.start || 0) - (b.start || 0); }).map(function (w) { return { id: w.id, date: w.date, v: w.gps.ef }; });
+  }
+
+  var api = {
+    LIMITS: LIM, ROUTE_MAX_POINTS: ROUTE_MAX_POINTS, haversine: haversine, filterFixes: filterFixes, smooth: smooth, segments: segments, analyze: analyze,
+    simplifyRoute: simplifyRoute, routePath: routePath, compact: compact, sanitizeGps: sanitizeGps, driftLabel: driftLabel, fmtPace: fmtPace, fmtSec: fmtSec, efSeries: efSeries
+  };
+  if (node) module.exports = api; else root.GpsCore = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
 <script>/* Forma 0.2 core - pure logic for sleep, training load, fitness/fatigue, stores. No DOM.
    Works in the browser (window.FormaCore, needs window.HrvCore loaded first) and in node. */
 (function (root) {
   'use strict';
   var H = (typeof module !== 'undefined' && module.exports) ? require('./hrv-core.js') : root.HrvCore;
+  var GC = (typeof module !== 'undefined' && module.exports) ? require('./gps-core.js') : root.GpsCore; // optional: route / pace data of a workout
   function clamp(x, a, b) { return Math.min(b, Math.max(a, x)); }
   function p2(n) { return (n < 10 ? '0' : '') + n; }
   function mean(a) { if (!a.length) return NaN; var s = 0; a.forEach(function (v) { s += v; }); return s / a.length; }
@@ -1263,6 +1505,8 @@ canvas{display:block;width:100%;height:200px}
     if (kn != null && kn >= 0 && kn < 20000) res.kcalNet = Math.round(kn);
     if (pk != null && pk >= 100 && pk <= 230) res.hrPeak = Math.round(pk);
     if (res.source === 'hc' && typeof o.pkg === 'string' && o.pkg) res.pkg = o.pkg.slice(0, 80); // Health Connect data origin (app package)
+    // GPS summary (distance, pace, splits, EF, drift, thinned route): only our own run / walk workouts, only when it passes the sanitizer
+    if (o.gps && res.source === 'forma' && (res.type === 'run' || res.type === 'walk') && GC) { var gp = GC.sanitizeGps(o.gps); if (gp) res.gps = gp; }
     // heart rate every 5 s from the start (0 = no sample); kept only until it has been written to Health Connect
     if (Array.isArray(o.hr5) && res.source === 'forma') {
       var h5 = o.hr5.slice(0, 2160).map(function (v) { v = num(v); return v != null && v >= 30 && v <= 240 ? Math.round(v) : 0; });
@@ -1353,7 +1597,7 @@ canvas{display:block;width:100%;height:200px}
     var hr = [], smp = s.samples || [];
     for (var i = 0; i < smp.length; i += SESSION_HR_STEP) hr.push(Math.round(smp[i]) || 0);
     return {
-      v: 1, type: s.type, t0: s.t0, savedAt: savedAt, step: SESSION_HR_STEP, hr: hr, distance: String(s.distance == null ? '' : s.distance),
+      v: 1, type: s.type, t0: s.t0, savedAt: savedAt, step: SESSION_HR_STEP, hr: hr, distance: String(s.distance == null ? '' : s.distance), gps: s.gps && s.gps.on ? { on: true, src: s.gps.src === 'native' ? 'native' : 'web' } : null,
       exercises: (s.exercises || []).map(function (e) {
         return {
           name: String(e.name || '').slice(0, 60), last: e.last && isFinite(e.last.kg) && isFinite(e.last.reps) ? { kg: e.last.kg, reps: e.last.reps } : null,
@@ -1377,6 +1621,7 @@ canvas{display:block;width:100%;height:200px}
     while (samples.length < n) samples.push(0);
     return {
       type: raw.type, t0: raw.t0, samples: samples, distance: String(raw.distance || ''),
+      gps: raw.gps && raw.gps.on && (raw.type === 'run' || raw.type === 'walk') ? { on: true, src: raw.gps.src === 'native' ? 'native' : 'web', fixes: [], next: 0, state: 'wait' } : null,
       exercises: (Array.isArray(raw.exercises) ? raw.exercises : []).map(function (e) {
         return {
           name: String(e && e.name || '').slice(0, 60), last: e && e.last && isFinite(e.last.kg) && isFinite(e.last.reps) ? { kg: +e.last.kg, reps: +e.last.reps } : null,
@@ -3032,6 +3277,8 @@ canvas{display:block;width:100%;height:200px}
     { id: 'kcalActive', label: 'Kalorie aktywne', read: 'READ_ACTIVE_CALORIES_BURNED', write: null },
     { id: 'kcalTotal', label: 'Kalorie całkowite', read: 'READ_TOTAL_CALORIES_BURNED', write: null }
   ];
+  // record kind (as in planWrites / hcWrite) -> write permission
+  var WRITE_PERM = { hrv: 'WRITE_HEART_RATE_VARIABILITY', rhr: 'WRITE_RESTING_HEART_RATE', exercise: 'WRITE_EXERCISE', hr: 'WRITE_HEART_RATE', sleep: 'WRITE_SLEEP', bp: 'WRITE_BLOOD_PRESSURE', glucose: 'WRITE_BLOOD_GLUCOSE' };
   function allReadPerms() { return GROUPS.map(function (g) { return PFX + g.read; }); }
   function allWritePerms() { return GROUPS.filter(function (g) { return g.write; }).map(function (g) { return PFX + g.write; }); }
   function allPerms() { return allReadPerms().concat(allWritePerms()); }
@@ -3043,9 +3290,13 @@ canvas{display:block;width:100%;height:200px}
       return { id: g.id, label: g.label, canWrite: !!g.write, readOk: !!set[PFX + g.read], writeOk: g.write ? !!set[PFX + g.write] : null };
     });
     var missingRead = groups.filter(function (g) { return !g.readOk; }), missingWrite = groups.filter(function (g) { return g.canWrite && !g.writeOk; });
-    var anyRead = groups.some(function (g) { return g.readOk; }), anyWrite = groups.some(function (g) { return g.writeOk; });
+    var anyRead = groups.some(function (g) { return g.readOk; });
+    // Write permissions are per record type: besides the groups above, blood pressure and glucose (typed in "Zdrowie serca") have their own.
+    // A user who granted only those two can write them, so they count for anyWrite / connected too.
+    var anyWrite = groups.some(function (g) { return g.writeOk; }) || !!set[PFX + WRITE_PERM.bp] || !!set[PFX + WRITE_PERM.glucose];
     return {
       groups: groups, anyRead: anyRead, anyWrite: anyWrite, connected: anyRead || anyWrite,
+      can: function (kind) { return !!WRITE_PERM[kind] && !!set[PFX + WRITE_PERM[kind]]; }, // kind: hrv | rhr | exercise | hr | sleep | bp | glucose
       complete: !missingRead.length && !missingWrite.length, partial: (anyRead || anyWrite) && (missingRead.length + missingWrite.length > 0),
       missingRead: missingRead.map(function (g) { return g.label; }), missingWrite: missingWrite.map(function (g) { return g.label; }),
       has: function (id, mode) { var g = groups.filter(function (x) { return x.id === id; })[0]; return !!g && (mode === 'write' ? g.writeOk === true : g.readOk); }
@@ -4050,6 +4301,7 @@ function saveSession() { // called on every change and at least every 10 s while
   lastSessSave = Date.now();
   try { localStorage.setItem(SKEY, JSON.stringify(FC.serializeSession(S.session, Date.now()))); }
   catch (e) { S.storageBroken = true; log('Zapis treningu nieudany: ' + e.message); }
+  if (typeof gpsSaveTrack === 'function') gpsSaveTrack(); // web GPS: the fixes so far survive a reload
 }
 // a finished workout waits for "Zapisz" (RPE): it is kept in storage until it is saved or discarded, so leaving the summary or closing the app loses nothing
 function savePending() {
@@ -4066,16 +4318,21 @@ function loadPending() {
 function resumeSession() {
   if (!S.resume || S.session) return false;
   S.session = S.resume; S.resume = null; log('Wznowiono trening ' + S.session.type + ' (start ' + C.localTimeStr(new Date(S.session.t0)) + ').');
+  if (typeof gpsResume === 'function') gpsResume(S.session);
   saveSession(); return true;
 }
-function discardResume() { S.resume = null; clearSessionStore(); log('Odrzucono niezakończony trening.'); }
+function discardResume() { if (S.resume && S.resume.gps && typeof gpsAbort === 'function') gpsAbort(); S.resume = null; clearSessionStore(); log('Odrzucono niezakończony trening.'); }
 function persist(which) { // which: 'days' | 'workouts' | 'profile' | 'weights'
   if (DEMO) return true;
   try { localStorage.setItem(KEYS[which], JSON.stringify(S[which])); return true; }
   catch (e) { S.storageBroken = true; log('Zapis nieudany (' + which + '): ' + e.message); if (UI.onData) UI.onData(); return false; }
 }
-function exportAll() {
-  var payload = { app: 'forma', version: 2, exportedAt: new Date().toISOString(), days: S.days, workouts: S.workouts, profile: S.profile, weights: S.weights, tips: S.e4.tips };
+// withRoutes: GPS routes (places the user has been) go into the file only when asked for; the pace / split / EF summary of a workout always does
+function gpsRouteCount() { return S.workouts.filter(function (w) { return w.gps && w.gps.route && w.gps.route.length > 1; }).length; }
+function exportAll(withRoutes) {
+  var wk = withRoutes ? S.workouts : S.workouts.map(function (w) { if (!w.gps || !w.gps.route || !w.gps.route.length) return w; var c = Object.assign({}, w); c.gps = Object.assign({}, w.gps, { route: [] }); return c; });
+  var payload = { app: 'forma', version: 2, exportedAt: new Date().toISOString(), days: S.days, workouts: wk, profile: S.profile, weights: S.weights, tips: S.e4.tips };
+  if (gpsRouteCount()) payload.routesIncluded = !!withRoutes;
   if (typeof e5Export === 'function') payload.e5 = e5Export();
   download('forma-kopia-' + stamp() + '.json', JSON.stringify(payload, null, 1), 'application/json');
   return payload;
@@ -4091,6 +4348,10 @@ function importAll(j) {
   }
   if (j && Array.isArray(j.workouts)) {
     var wi = j.workouts.map(FC.sanitizeWorkout).filter(Boolean); res.bad += j.workouts.length - wi.length;
+    wi.forEach(function (x) { // a backup without routes must not wipe a route that is already on this phone
+      if (!x.gps || (x.gps.route && x.gps.route.length)) return;
+      var own = S.workouts.filter(function (y) { return y.id === x.id; })[0]; if (own && own.gps && own.gps.route && own.gps.route.length) x.gps.route = own.gps.route;
+    });
     var mw = FC.mergeById(S.workouts, wi, 'id'); S.workouts = FC.sortWorkouts(mw.items); res.workouts = wi.length; res.replaced += mw.replaced; persist('workouts');
   }
   if (j && Array.isArray(j.weights)) {
@@ -4104,7 +4365,7 @@ function importAll(j) {
   return res;
 }
 function wipeAll() {
-  S.days = []; S.workouts = []; S.profile = null; S.weights = []; if (typeof e4OnWipe === 'function') e4OnWipe(); if (typeof e5OnWipe === 'function') e5OnWipe(); S.pending = null; S.pendingWorkout = null; S.session = null; S.resume = null; S.editDay = null;
+  S.days = []; S.workouts = []; S.profile = null; S.weights = []; if (typeof gpsOnWipe === 'function') gpsOnWipe(); if (typeof e4OnWipe === 'function') e4OnWipe(); if (typeof e5OnWipe === 'function') e5OnWipe(); S.pending = null; S.pendingWorkout = null; S.session = null; S.resume = null; S.editDay = null;
   if (!DEMO) try { localStorage.removeItem(SKEY); localStorage.removeItem(SKEY + '.corrupt'); localStorage.removeItem(PKEY); Object.keys(KEYS).forEach(function (k) { localStorage.removeItem(KEYS[k]); localStorage.removeItem(KEYS[k] + '.corrupt'); }); localStorage.removeItem('forma.v1.nightsDone'); } catch (e) { /* ignore */ }
   if (typeof battOnWipe === 'function') battOnWipe();
   if (typeof whoopOnWipe === 'function') whoopOnWipe();
@@ -4266,7 +4527,9 @@ function commitDay(rec) {
 function startSession(type) {
   if (S.session) return S.session;
   if (S.resume) discardResume(); // starting a new one replaces the offered unfinished session
-  S.session = { type: type, t0: Date.now(), samples: [], exercises: [], distance: '' }; saveSession();
+  S.session = { type: type, t0: Date.now(), samples: [], exercises: [], distance: '' };
+  if (typeof gpsStartSession === 'function') gpsStartSession(S.session); // Spacer / Bieg with the GPS switch on
+  saveSession();
   log('Start treningu: ' + type + (hrFresh() ? ' (z tętnem z opaski)' : ' (bez tętna – tylko czas i ocena wysiłku)') + (FAST ? ' [demo ×' + F + ']' : '') + '.');
   return S.session;
 }
@@ -4275,6 +4538,7 @@ function sessionTick() {
   var s = S.session; if (!s) return;
   var n = sessionSec();
   while (s.samples.length < n) s.samples.push(hrFresh() ? S.hr : 0);
+  if (s.gps && typeof gpsTick === 'function') gpsTick(s);
   if (Date.now() - lastSessSave >= 10000) saveSession();
 }
 function sessionVolume() {
@@ -4291,6 +4555,8 @@ function finishSession() {
     return { name: e.name, sets: e.sets.filter(function (st) { return st.done; }).map(function (st) { return { kg: parseFloat(String(st.kg).replace(',', '.')), reps: parseFloat(st.reps) }; }) };
   });
   var km = parseFloat(String(s.distance).replace(',', '.'));
+  var gres = s.gps && typeof gpsFinish === 'function' ? gpsFinish(s) : null; // stops the GPS, analyses the track
+  if (!(km >= 0) && gres && gres.gps) km = Math.round(gres.gps.distM / 10) / 100; // typed distance wins; otherwise the GPS one
   var durMin = Math.max(0.1, Math.round(sec / 6) / 10);
   // energy (Keytel from the 1 Hz samples; sauna = BMR/1440 x 1.5 x minutes) and the cleaned peak heart rate (not for sauna)
   var kctx = KC.makeCtx(S.profile, KC.weightOn(S.weights, C.localDateStr(now)), pc.hrRest, pc.hrMax), kc = null, peak = null;
@@ -4306,8 +4572,10 @@ function finishSession() {
     zonesSec: hasHr && pc.hrMax && pc.hrRest != null ? FC.zoneSeconds(s.samples, pc.hrMax, pc.hrRest) : null,
     rpe: null, distanceKm: km >= 0 ? km : null, exercises: ex, hasHr: hasHr,
     kcal: kc ? kc.gross : null, kcalNet: kc ? kc.net : null, hrPeak: peak,
-    hr5: hasHr && typeof hcSupported === 'function' && hcSupported() ? hr5Series(s.samples) : null // heart rate every 5 s, kept only until it has been written to Health Connect
+    hr5: hasHr && typeof hcSupported === 'function' && hcSupported() ? hr5Series(s.samples) : null, // heart rate every 5 s, kept only until it has been written to Health Connect
+    gps: gres && gres.gps ? gres.gps : null
   });
+  if (w && gres && gres.note) S.gps.notes[w.id] = gres.note;
   if (w && typeof e5OnSessionEnd === 'function') { try { e5OnSessionEnd(s, w); } catch (e) { /* optional */ } }
   S.pendingWorkout = w; S.session = null; clearSessionStore(); S.rpe = null; savePending();
   log('Koniec treningu ' + s.type + ': ' + (w ? w.durMin + ' min' + (w.trimp != null ? ', TRIMP ' + nf(w.trimp, 1) : '') + (w.kcalNet != null ? ', ok. ' + w.kcalNet + ' kcal ponad spoczynek' : '') + (w.hrPeak ? ', szczyt tętna ' + w.hrPeak : '') : 'za krótki'));
@@ -4674,7 +4942,8 @@ if (window.FormaNative) window.__formaNativeEvent = function (ev) {
         if (ev.code === 'lowBattery' && battUnreliable()) log('Pominięto ostrzeżenie o niskiej baterii: odczyt tej opaski jest oznaczony jako niewiarygodny.');
         else if (ev.code === 'lowBattery') { S.night.warn = 'Bateria opaski: ' + ev.level + '%' + (battVerdict().state === 'stuck' ? ' (odczyt niepewny)' : '') + '. Może nie wystarczyć do rana – pomiar działa dalej.'; log(S.night.warn); if (UI.onNight) UI.onNight(); }
         break;
-      case 'appResumed': nightRefresh(); nativeSync(); mergeNativeBattery(); checkNights(); if (!S.connected) ensureBand('powrót'); if (typeof e4Resume === 'function') e4Resume(); if (UI.onNight) UI.onNight(); if (typeof whoopMaybeSync === 'function') whoopMaybeSync(); if (typeof hcResume === 'function') hcResume(); break;
+      case 'appResumed': nightRefresh(); nativeSync(); mergeNativeBattery(); checkNights(); if (!S.connected) ensureBand('powrót'); if (typeof e4Resume === 'function') e4Resume(); if (UI.onNight) UI.onNight(); if (typeof whoopMaybeSync === 'function') whoopMaybeSync(); if (typeof hcResume === 'function') hcResume(); if (typeof gpsOnResume === 'function') gpsOnResume(); break;
+      case 'gpsPermission': if (typeof gpsOnPermission === 'function') gpsOnPermission(ev); break;
       case 'stepsPermission': if (typeof e4StepsPermission === 'function') e4StepsPermission(ev); break;
       case 'whoopAuth': case 'whoopSync': if (typeof whoopNativeEvent === 'function') whoopNativeEvent(ev); break;
       case 'hcStatus': case 'hcPermissions': case 'hcSyncResult': case 'hcWriteResult': case 'hcError': if (typeof hcNativeEvent === 'function') hcNativeEvent(ev); break;
@@ -4687,6 +4956,7 @@ function nativeInit() {
   if (!NATIVE) return;
   log('Natywna aplikacja Android: Bluetooth i pomiar nocy przez FormaNative.');
   nativeSync(); mergeNativeBattery(); nightRefresh(); checkNights();
+  if (typeof gpsOnResume === 'function') gpsOnResume();
   if (!S.connected) ensureBand('start');
 }
 
@@ -5729,7 +5999,11 @@ function hcSetErr(code, detail, soft) {
   hcUi();
 }
 function hcConnected() { return !!(S.hc.avail === 'available' && S.hc.rep && S.hc.rep.anyRead); }
-function hcCanWrite() { return !!(S.hc.avail === 'available' && S.hc.rep && S.hc.rep.anyWrite); }
+// Write permission is checked per record type (hrv | rhr | exercise | hr | sleep | bp | glucose); without a kind: is there any write permission at all
+function hcCanWrite(kind) {
+  if (!(S.hc.avail === 'available' && S.hc.rep)) return false;
+  return kind ? S.hc.rep.can(kind) : S.hc.rep.anyWrite;
+}
 // 'web' | 'checking' | 'na' | 'off' | 'partial' | 'on' | 'error'
 function hcState() {
   if (!hcSupported()) return 'web';
@@ -5837,8 +6111,8 @@ function hcWriteNow() {
   if (!hcSupported() || !hcCanWrite()) return false;
   if (S.hc.writing) { S.hc.writeAgain = true; return false; }
   var plan = HCC.planWrites(S.days, S.workouts, S.hc.store.written, { nowMs: Date.now(), today: todayStr(), nights: HCC.nightsOf(S.hc.store) });
-  var recs = plan.records.filter(function (r) { return S.hc.rep.has(HC_WRITE_GROUP[r.kind], 'write'); });
-  if (typeof e5HcRecords === 'function') recs = recs.concat(e5HcRecords(S.hc.store.written));
+  var recs = plan.records.filter(function (r) { return hcCanWrite(r.kind); });
+  if (typeof e5HcRecords === 'function') recs = recs.concat(e5HcRecords(S.hc.store.written).filter(function (r) { return hcCanWrite(r.kind); }));
   if (!recs.length) return false;
   S.hc.writing = true; S.hc.inflight = recs;
   log('Health Connect: zapis ' + recs.length + ' rekordów (' + recs.map(function (r) { return r.kind; }).filter(function (k, i, a) { return a.indexOf(k) === i; }).join(', ') + ').');
@@ -6141,6 +6415,199 @@ function e5Demo() {
   S.e5.challenges = E5.cleanChallenges({ km300: { start: C.addDays(t, -12), stopped: null } });
   S.hc.hhp = { bp: false, glucose: false };
 }
+
+/* ===== Forma Etap 5B - GPS route in Spacer / Bieg workouts: state, native transport (FormaNative.gps*), web geolocation, finish =====
+   Pure rules live in gps-core.js. Location never leaves the phone and no map is loaded from the network.
+   Android: GpsService (foreground type "location") stores the fixes natively; JS fetches them with gpsPoints(from) while it runs and on resume.
+   Web: navigator.geolocation.watchPosition during the workout (best effort: the screen must stay on). Demo: no GPS. */
+var GPC = window.GpsCore;
+var GPREF = 'forma.v1.gpsPrefs', GTRK = 'forma.v1.gpsTrack'; // outside KEYS: a setting and a temporary track of the running workout (never in the backup)
+var GPS_TYPES = { run: 'Bieg', walk: 'Spacer' }, GPS_MAX_FIXES = 25000;
+S.gps = { pref: { run: false, walk: false }, ask: null, askNote: '', notes: {}, trackLen: -1 };
+var gpsWid = null;
+
+function gpsMode() { // 'native' | 'web' | 'none'
+  if (DEMO) return 'none';
+  if (NATIVE && natHas('gpsStart')) return 'native';
+  if (!NATIVE && typeof navigator !== 'undefined' && navigator.geolocation && typeof navigator.geolocation.watchPosition === 'function') return 'web';
+  return 'none';
+}
+function gpsLoadPrefs() {
+  if (DEMO) return;
+  try { var o = JSON.parse(localStorage.getItem(GPREF) || 'null'); if (o && typeof o === 'object') S.gps.pref = { run: o.run === true, walk: o.walk === true }; } catch (e) { /* default: off */ }
+}
+function gpsSavePrefs() { if (DEMO) return true; try { localStorage.setItem(GPREF, JSON.stringify(S.gps.pref)); return true; } catch (e) { return false; } }
+function gpsNativePerm() { var r = nat('gpsStatus'); return !!(r && r.permission); }
+
+// ---------- the switch on the start screen (remembered per type); the permission is asked only when it is turned on ----------
+function gpsToggle(type) {
+  if (!GPS_TYPES[type] || gpsMode() === 'none') return;
+  S.gps.askNote = '';
+  if (S.gps.pref[type]) {
+    S.gps.pref[type] = false; S.gps.ask = null; gpsSavePrefs();
+    markSaved('gps', 'Zapisano: trasa GPS wyłączona (' + GPS_TYPES[type] + ')'); log('GPS: wyłączono dla ' + type + '.');
+    gpsCardRefresh(); return;
+  }
+  if (gpsMode() === 'native' && gpsNativePerm()) { gpsEnable(type); return; }
+  S.gps.ask = type; gpsCardRefresh(); // Polish explanation first, then the system dialog
+}
+function gpsEnable(type) {
+  S.gps.pref[type] = true; S.gps.ask = null; S.gps.askNote = '';
+  var ok = gpsSavePrefs();
+  markSaved('gps', ok ? 'Zapisano: trasa GPS włączona (' + GPS_TYPES[type] + ')' : 'Włączono do końca tej sesji – zapis ustawień niedostępny w tej przeglądarce', ok ? 4500 : 7000);
+  log('GPS: włączono dla ' + type + '.'); gpsCardRefresh();
+}
+function gpsDeniedNote(coarse) {
+  return (coarse ? 'Telefon dał tylko przybliżoną lokalizację, a do trasy potrzebna jest dokładna. ' : 'Brak zgody na lokalizację. ') + 'Trening będzie działał bez trasy. ' +
+    (gpsMode() === 'native' ? 'Zgodę włączysz w ustawieniach telefonu: Aplikacje → Forma → Uprawnienia → Lokalizacja.' : 'Zezwól na lokalizację w ustawieniach przeglądarki dla tej strony.');
+}
+function gpsAllow() { // "Zezwól i włącz"
+  var type = S.gps.ask; if (!type) return;
+  if (gpsMode() === 'native') { var r = nat('gpsRequestPermission'); if (!r || r.ok === false) { S.gps.ask = null; S.gps.askNote = (r && r.error) || 'Nie udało się poprosić o zgodę na lokalizację.'; gpsCardRefresh(); } return; } // the answer arrives as the event gpsPermission
+  try {
+    navigator.geolocation.getCurrentPosition(function () { gpsEnable(type); }, function (err) { if (err && err.code === 1) { S.gps.ask = null; S.gps.askNote = gpsDeniedNote(false); gpsCardRefresh(); } else gpsEnable(type); /* no fix yet is not a refusal */ }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 });
+  } catch (e) { S.gps.ask = null; S.gps.askNote = 'Ta przeglądarka nie udostępnia lokalizacji.'; gpsCardRefresh(); }
+}
+function gpsAskCancel() { S.gps.ask = null; S.gps.askNote = ''; gpsCardRefresh(); }
+function gpsOnPermission(ev) { // native event {type:'gpsPermission', granted, coarse}
+  var type = S.gps.ask; S.gps.ask = null;
+  if (!type) { gpsCardRefresh(); return; }
+  if (ev.granted) gpsEnable(type); else { S.gps.pref[type] = false; gpsSavePrefs(); S.gps.askNote = gpsDeniedNote(!!ev.coarse); gpsCardRefresh(); }
+}
+
+// ---------- a running workout ----------
+function gpsStartSession(s) {
+  if (!s || (s.type !== 'run' && s.type !== 'walk')) return;
+  var mode = gpsMode(); if (mode === 'none' || !S.gps.pref[s.type]) return;
+  s.gps = { on: false, src: mode === 'native' ? 'native' : 'web', fixes: [], next: 0, state: 'wait', note: '', live: null, liveAt: 0, pollAt: 0, lastFixAt: 0, lastAcc: null };
+  gpsBegin(s);
+}
+function gpsBegin(s) { // starts the source of fixes for s.gps (new workout or resumed one)
+  var g = s.gps;
+  if (g.src === 'native') {
+    if (!gpsNativePerm()) { g.on = false; g.state = 'denied'; g.note = 'Trasa nie jest zapisywana: Forma nie ma zgody na lokalizację (ustawienia telefonu → Aplikacje → Forma → Uprawnienia). Trening działa bez GPS.'; return; }
+    var r = nat('gpsStart', String(s.t0));
+    if (!r || r.ok === false) { g.on = false; g.state = 'error'; g.note = 'Trasa nie jest zapisywana: ' + ((r && r.error) || 'nie udało się uruchomić GPS') + '. Trening działa bez GPS.'; return; }
+    g.on = true; g.next = 0; g.note = '';
+  } else {
+    g.on = true; g.note = ''; gpsWatch(s);
+  }
+  log('GPS: start trasy (' + g.src + ').');
+}
+function gpsResume(s) { // unfinished workout taken up again
+  if (!s || !s.gps || !s.gps.on) return;
+  var g = s.gps, mode = gpsMode();
+  if (mode === 'none' || (mode === 'native') !== (g.src === 'native')) { g.on = false; g.state = 'error'; g.note = 'Trasa nie jest zapisywana: GPS nie jest teraz dostępny. Trening działa bez GPS.'; return; }
+  if (g.src === 'web') gpsLoadTrack(s);
+  gpsBegin(s);
+}
+function gpsWatch(s) {
+  gpsUnwatch();
+  try {
+    gpsWid = navigator.geolocation.watchPosition(function (p) {
+      var c = p && p.coords; if (!c) return;
+      var now = Date.now(), t = p.timestamp > 0 && Math.abs(p.timestamp - now) < 300000 ? p.timestamp : now;
+      gpsAddFix(s, { t: t, lat: c.latitude, lon: c.longitude, acc: c.accuracy });
+    }, function (err) {
+      if (!s.gps) return;
+      if (err && err.code === 1) { s.gps.on = false; s.gps.state = 'denied'; s.gps.note = 'Trasa nie jest zapisywana: przeglądarka nie ma zgody na lokalizację. Trening działa bez GPS.'; gpsUnwatch(); }
+      else s.gps.state = 'wait';
+    }, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+  } catch (e) { s.gps.on = false; s.gps.state = 'error'; s.gps.note = 'Trasa nie jest zapisywana: nie udało się uruchomić lokalizacji.'; }
+}
+function gpsUnwatch() { if (gpsWid != null) { try { navigator.geolocation.clearWatch(gpsWid); } catch (e) { /* ignore */ } gpsWid = null; } }
+function gpsAddFix(s, f) {
+  var g = s && s.gps; if (!g || !g.on || !isFinite(f.t) || !isFinite(f.lat) || !isFinite(f.lon)) return;
+  var last = g.fixes[g.fixes.length - 1]; if (last && f.t <= last.t) return;
+  if (g.fixes.length >= GPS_MAX_FIXES) return;
+  g.fixes.push({ t: f.t, lat: f.lat, lon: f.lon, acc: isFinite(f.acc) ? f.acc : null }); g.lastFixAt = Date.now(); g.lastAcc = isFinite(f.acc) ? f.acc : null;
+}
+function gpsPoll(s) { // native: fetch the fixes that arrived since the last call (also those collected with the screen off)
+  var g = s && s.gps; if (!g || !g.on || g.src !== 'native') return;
+  g.pollAt = Date.now();
+  var r = nat('gpsPoints', g.next);
+  if (!r || r.ok === false || !Array.isArray(r.pts)) return;
+  r.pts.forEach(function (p) { if (Array.isArray(p)) gpsAddFix(s, { t: +p[0], lat: +p[1], lon: +p[2], acc: p[3] == null ? null : +p[3] }); });
+  if (isFinite(r.next)) g.next = r.next;
+  if (r.pts.length) g.lastFixAt = Date.now();
+  g.state = r.state === 'off' || r.state === 'denied' ? r.state : g.state;
+  if (r.running === false && !g.stopNoted) { g.stopNoted = true; g.note = 'System zatrzymał zapis trasy. Trasa będzie obejmować tylko czas do tego momentu.'; }
+}
+function gpsLive(s) { // cached live numbers (distance, pace), recomputed every 3 s
+  var g = s.gps; if (!g) return null;
+  if (g.live && Date.now() - g.liveAt < 3000) return g.live;
+  var fl = GPC.filterFixes(g.fixes, s.type), a = GPC.analyze(GPC.smooth(fl.pts), { type: s.type, t0: s.t0 });
+  g.liveAt = Date.now(); g.live = { distM: a.distM || 0, paceSecKm: a.ok ? a.paceSecKm : null, n: fl.pts.length, raw: fl.raw, dropped: fl.raw - fl.pts.length };
+  return g.live;
+}
+// 'off' (not recording) | 'denied' | 'wait' (looking for a signal) | 'weak' | 'ok'
+function gpsView(s) {
+  var g = s && s.gps; if (!g) return { state: 'off', text: '' };
+  if (!g.on) return { state: g.state === 'denied' ? 'denied' : 'off', text: g.note };
+  if (g.state === 'off') return { state: 'off', text: 'GPS jest wyłączony w telefonie. Włącz lokalizację, żeby zapisać trasę.' };
+  var age = Date.now() - (g.lastFixAt || 0);
+  if (!g.fixes.length || age > 20000) return { state: 'wait', text: 'Szukam sygnału GPS… Wyjdź na otwartą przestrzeń.' };
+  if (g.lastAcc != null && g.lastAcc > 25) return { state: 'weak', text: 'Słaby sygnał GPS (dokładność ' + Math.round(g.lastAcc) + ' m). Nieścisłe punkty są pomijane.' };
+  return { state: 'ok', text: 'Zapisuję trasę.' };
+}
+function gpsTick(s) { // from sessionTick, once a second
+  var g = s && s.gps; if (!g || !g.on) return;
+  if (g.src === 'native' && Date.now() - g.pollAt >= 3000) gpsPoll(s);
+}
+function gpsOnResume() { // app back in front (Android)
+  var s = S.session;
+  if (s && s.gps && s.gps.on && s.gps.src === 'native') { gpsPoll(s); return; }
+  if (gpsMode() !== 'native') return;
+  var r = nat('gpsStatus'); // GPS must never keep running without a workout
+  if (r && r.running && !(s && s.gps) && !(S.resume && S.resume.gps)) { nat('gpsStop'); log('GPS: zatrzymano zapis bez trwającego treningu.'); }
+}
+
+// web: the fixes of the running workout survive a reload (outside the backup, removed when the workout ends)
+function gpsSaveTrack() {
+  var s = S.session, g = s && s.gps; if (DEMO || !g || g.src !== 'web' || !g.on || g.fixes.length === S.gps.trackLen) return;
+  S.gps.trackLen = g.fixes.length;
+  try { localStorage.setItem(GTRK, JSON.stringify({ t0: s.t0, f: g.fixes.map(function (f) { return [f.t, Math.round(f.lat * 1e6) / 1e6, Math.round(f.lon * 1e6) / 1e6, f.acc == null ? null : Math.round(f.acc)]; }) })); } catch (e) { /* the workout still runs; only a reload would lose the track */ }
+}
+function gpsLoadTrack(s) {
+  try {
+    var o = JSON.parse(localStorage.getItem(GTRK) || 'null');
+    if (o && o.t0 === s.t0 && Array.isArray(o.f)) s.gps.fixes = o.f.filter(Array.isArray).map(function (a) { return { t: +a[0], lat: +a[1], lon: +a[2], acc: a[3] == null ? null : +a[3] }; }).filter(function (f) { return isFinite(f.t) && isFinite(f.lat) && isFinite(f.lon); });
+    S.gps.trackLen = s.gps.fixes.length;
+  } catch (e) { /* start with an empty track */ }
+}
+function gpsClearTrack() { S.gps.trackLen = -1; if (!DEMO) try { localStorage.removeItem(GTRK); } catch (e) { /* ignore */ } }
+
+// stops every source of fixes and forgets the temporary track (finish, discard, wipe)
+function gpsStopAll() {
+  gpsUnwatch();
+  if (gpsMode() === 'native') nat('gpsStop');
+  gpsClearTrack();
+}
+function gpsAbort() { if (S.session && S.session.gps || S.resume && S.resume.gps || gpsWid != null) { gpsStopAll(); log('GPS: zatrzymano.'); } }
+
+// finish: filter, smooth, analyse with the heart rate of the workout. Returns { gps: summary | null, note: text } (null when the workout had no GPS)
+function gpsFinish(s) {
+  var g = s && s.gps; if (!g) return null;
+  if (g.on && g.src === 'native') gpsPoll(s); // the last fixes, collected while the screen was off
+  gpsStopAll();
+  var out = { gps: null, note: g.note || '' };
+  var fl = GPC.filterFixes(g.fixes, s.type), pts = GPC.smooth(fl.pts), pc = profileCtx();
+  var zf = pc.hrMax && pc.hrRest != null ? function (b) { return FC.zoneOf(b, pc.hrMax, pc.hrRest); } : null;
+  var an = GPC.analyze(pts, { type: s.type, t0: s.t0, hr: s.samples, zoneOf: zf, durSec: sessionSec() });
+  if (an.ok) {
+    out.gps = GPC.compact(an, GPC.simplifyRoute(pts, GPC.ROUTE_MAX_POINTS), g.src === 'native' ? 'android' : 'web');
+    log('GPS: ' + (an.distM / 1000).toFixed(2) + ' km, ' + an.n + ' punktów (pominięte: ' + (fl.raw - fl.pts.length) + ').');
+  } else if (!out.note) {
+    out.note = g.fixes.length ? 'Za mało dokładnych punktów GPS, żeby narysować trasę (' + g.fixes.length + ' pozycji, ' + fl.pts.length + ' użytecznych). Trening zapisze się bez trasy.' : 'Nie złapano sygnału GPS, więc trening zapisze się bez trasy.';
+  }
+  return out;
+}
+function gpsOnWipe() {
+  S.gps.notes = {}; S.gps.ask = null; S.gps.askNote = ''; S.gps.pref = { run: false, walk: false };
+  if (gpsMode() !== 'none') gpsStopAll();
+  if (!DEMO) try { localStorage.removeItem(GTRK); localStorage.removeItem(GPREF); } catch (e) { /* ignore */ }
+}
+function gpsInit() { gpsLoadPrefs(); }
 
 /* ===== Forma 0.2 - UI part A: helpers, charts, shell/router, Dziś, Pomiar, Poranek ===== */
 var REDUCED = false;
@@ -7991,6 +8458,103 @@ function e5ProfilLinksHtml() {
   return '<div class="card" data-e5="profil-links" style="gap:0;padding-top:4px;padding-bottom:4px"><p class="lbl" style="padding:8px 0 2px">Skróty</p>' + L.map(function (x, k) { return '<a href="#/' + x[0] + '" class="row sp" style="min-height:52px;color:inherit;border-top:' + (k ? '1px solid rgba(255,255,255,.08)' : '0') + '" data-e5="plink-' + x[0] + '"><span class="row" style="gap:12px"><span style="color:' + x[2] + '">' + ico(x[1], 22) + '</span><span class="sm" style="font-weight:500">' + x[3] + '</span></span>' + ico('chev', 18) + '</a>'; }).join('') + '</div>';
 }
 
+/* ===== Forma Etap 5B - GPS UI: start-screen switches, live card, route + splits + EF + drift summary, EF trend ===== */
+var ACT_GPS = {};
+var GPS_PRIVACY = 'Trasa zostaje tylko w tym telefonie. Forma nie wysyła lokalizacji nigdzie i nie ładuje map z internetu. GPS działa tylko w czasie treningu – od „Start” do „Zakończ”.';
+var GPS_WEB_NOTE = 'W przeglądarce GPS działa tylko przy włączonym ekranie i otwartej karcie z Formą.';
+function gpsKm(m) { return nf(m / 1000, 2); }
+
+// ---------- start screen (inside the "Dodaj trening" menu) ----------
+function gpsSwitch(type) {
+  var on = !!S.gps.pref[type];
+  return tglHtml('gpsTgl', on, 'Zapisuj trasę (GPS) – ' + GPS_TYPES[type]).replace('data-act="gpsTgl"', 'data-act="gpsTgl" data-type="' + type + '" data-gps="switch-' + type + '"');
+}
+function gpsCardInner() {
+  var h = '<div class="row sp"><p class="lbl">Trasa GPS</p>' + savedSlot('gps') + '</div>';
+  ['run', 'walk'].forEach(function (t) {
+    h += '<div class="row sp" style="gap:8px"><span class="sm" style="font-weight:500;min-width:0">Zapisuj trasę (GPS)<span class="xs mut" style="display:block;font-weight:400">' + GPS_TYPES[t] + '</span></span>' + gpsSwitch(t) + '</div>';
+  });
+  if (S.gps.ask) {
+    h += '<div class="note" role="alert" data-gps="ask"><b>Zgoda na lokalizację</b><br>Forma użyje GPS tylko podczas treningu (od „Start” do „Zakończ”), żeby narysować trasę oraz policzyć dystans i tempo. Lokalizacja nie jest nigdzie wysyłana. ' +
+      (gpsMode() === 'native' ? 'Telefon zaraz zapyta o zgodę – wybierz dokładną lokalizację i zgodę tylko podczas używania aplikacji.' : 'Przeglądarka zaraz zapyta o zgodę. ' + GPS_WEB_NOTE) + '</div>' +
+      '<div class="row" style="gap:8px"><button class="btn pri grow" data-act="gpsAllow" data-gps="allow">Zezwól i włącz</button><button class="btn grow" data-act="gpsAskNo" data-gps="ask-no">Nie teraz</button></div>';
+  }
+  if (S.gps.askNote) h += '<div class="note" role="status" data-gps="denied">' + esc(S.gps.askNote) + '</div>';
+  h += '<p class="xs mut" style="margin:0" data-gps="privacy">' + GPS_PRIVACY + (gpsMode() === 'web' ? ' ' + GPS_WEB_NOTE : '') + '</p>';
+  return h;
+}
+function gpsCardHtml() { return gpsMode() === 'none' ? '' : '<div class="card" id="gpsStart" data-gps="start">' + gpsCardInner() + '</div>'; }
+function gpsCardRefresh() { var el = $('gpsStart'); if (el) el.innerHTML = gpsCardInner(); }
+
+// ---------- running workout ----------
+var GPS_DOT = { ok: '#2EE86B', weak: '#F2A93B', wait: '#F2A93B', denied: '#FF4D5E', off: '#9AA6B0' };
+function gpsLiveHtml(s) {
+  var g = s.gps; if (!g) return '';
+  var v = gpsView(s), lv = g.on ? gpsLive(s) : null;
+  if (!g.on) return '<div class="note" role="status" data-gps="live-note" id="gpsNote">' + esc(v.text || 'Trasa nie jest zapisywana.') + '</div>';
+  return '<div class="card" data-gps="live"><div class="row sp"><p class="lbl">Trasa GPS</p><span class="xs" id="gpsSt" role="status" style="color:' + GPS_DOT[v.state] + '">● ' + ({ ok: 'zapisuję', weak: 'słaby sygnał', wait: 'szukam sygnału', off: 'GPS wyłączony' }[v.state] || '') + '</span></div>' +
+    '<div class="g2"><div class="stat"><div class="k">Dystans</div><div class="v n"><span id="gpsDist">' + gpsKm(lv.distM) + '</span> <span class="xs sub">km</span></div></div><div class="stat"><div class="k">Tempo</div><div class="v n"><span id="gpsPace">' + GPC.fmtPace(lv.paceSecKm) + '</span> <span class="xs sub">min/km</span></div></div></div>' +
+    '<p class="xs mut" style="margin:0" id="gpsNote">' + esc(v.text) + (g.src === 'web' ? ' ' + GPS_WEB_NOTE : '') + '</p></div>';
+}
+function gpsLiveTick() {
+  var s = S.session; if (!s || !s.gps) return;
+  var v = gpsView(s), st = $('gpsSt'), nt = $('gpsNote');
+  if (s.gps.on) {
+    var lv = gpsLive(s);
+    if ($('gpsDist')) $('gpsDist').textContent = gpsKm(lv.distM);
+    if ($('gpsPace')) $('gpsPace').textContent = GPC.fmtPace(lv.paceSecKm);
+    if (st) { st.style.color = GPS_DOT[v.state]; st.textContent = '● ' + ({ ok: 'zapisuję', weak: 'słaby sygnał', wait: 'szukam sygnału', off: 'GPS wyłączony' }[v.state] || ''); }
+    if (nt) nt.textContent = v.text + (s.gps.src === 'web' ? ' ' + GPS_WEB_NOTE : '');
+  } else if (nt && v.text && nt.textContent !== v.text) nt.textContent = v.text;
+}
+
+// ---------- summary (pending and saved workouts) ----------
+function gpsSummaryHtml(w, note, inner) {
+  var g = w && w.gps;
+  if (!g) return note ? '<div class="note" role="status" data-gps="summary-note">' + esc(note) + '</div>' : '';
+  var P = GPC.routePath(g.route, 320, 200, 16);
+  var svg = P ? '<svg viewBox="0 0 320 200" width="100%" role="img" aria-label="Trasa treningu, ' + gpsKm(g.distM) + ' km. Zielony punkt to start, czerwony meta." style="display:block;background:#161C20;border-radius:14px" data-gps="route"><path d="' + P.d + '" fill="none" stroke="#2CE8B5" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>' +
+    '<circle cx="' + P.start[0] + '" cy="' + P.start[1] + '" r="6" fill="#2EE86B" stroke="#fff" stroke-width="2"/><circle cx="' + P.end[0] + '" cy="' + P.end[1] + '" r="6" fill="#FF4D5E" stroke="#fff" stroke-width="2"/></svg>' +
+    '<div class="row xs mut" style="gap:14px"><span style="color:#2EE86B">● start</span><span style="color:#FF4D5E">● meta</span><span>bez mapy – trasa rysowana na telefonie</span></div>' : '<p class="xs mut" style="margin:0">Trasa jest za krótka, żeby ją narysować.</p>';
+  var h = '<div ' + (inner ? 'style="display:flex;flex-direction:column;gap:8px;border-top:1px solid rgba(255,255,255,.1);padding-top:8px"' : 'class="card"') + ' data-gps="summary"><p class="lbl"' + (inner ? ' style="font-size:12px"' : '') + '>Trasa GPS</p>' + svg +
+    '<div class="g2"><div class="stat"><div class="k">Dystans</div><div class="v n">' + gpsKm(g.distM) + ' <span class="xs sub">km</span></div></div><div class="stat"><div class="k">Tempo</div><div class="v n">' + GPC.fmtPace(g.paceSecKm) + ' <span class="xs sub">min/km</span></div></div></div>' +
+    '<p class="xs mut" style="margin:0">Czas w ruchu ' + GPC.fmtSec(g.movingSec) + ' (postoje nie liczą się do tempa).</p>';
+  if (g.splits && g.splits.length) {
+    var row = function (a, b, c, d, cls) { return '<div class="' + (cls || 'sm') + '" style="display:grid;grid-template-columns:52px minmax(0,1fr) minmax(0,1fr) 44px;gap:6px;align-items:baseline"><span>' + a + '</span><span style="text-align:right">' + b + '</span><span style="text-align:right">' + c + '</span><span style="text-align:right">' + d + '</span></div>'; };
+    h += '<p class="lbl" style="font-size:12px;margin-top:4px">Podział na kilometry</p><div data-gps="splits" style="display:flex;flex-direction:column;gap:4px">' + row('Km', 'Czas', 'Tempo', 'Tętno', 'xs mut') +
+      g.splits.map(function (sp) { return row(sp.partial ? gpsKm(sp.distM) : sp.km, GPC.fmtSec(sp.sec), GPC.fmtPace(sp.paceSecKm), sp.hr ? sp.hr : '—'); }).join('') + '</div>';
+  }
+  h += '<div class="col" style="gap:2px" data-gps="ef">' + (g.ef != null ?
+    '<div class="row sp"><span class="sm" style="font-weight:500">Wydajność tlenowa (EF)</span><span class="n" style="font-size:22px">' + nf(g.ef, 2) + '</span></div><p class="xs mut" style="margin:0">Metry na minutę przypadające na 1 uderzenie serca, z ok. ' + (g.efMin || '?') + ' min spokojnych odcinków (po 10 min, tętno do strefy 2). Wyższy EF = ta sama prędkość przy niższym tętnie. Porównuj tylko z własnymi treningami.</p>' :
+    '<div class="row sp"><span class="sm" style="font-weight:500">Wydajność tlenowa (EF)</span><span class="sm mut">' + esc(g.efNote || 'brak danych') + '</span></div>') + '</div>';
+  var dc = g.drift != null ? (g.drift < 5 ? '#2EE86B' : (g.drift <= 10 ? '#F2A93B' : '#FF4D5E')) : '#9AA6B0';
+  h += '<div class="col" style="gap:2px" data-gps="drift">' + (g.drift != null ?
+    '<div class="row sp"><span class="sm" style="font-weight:500">Dryf tętna</span><span class="n" style="font-size:22px;color:' + dc + '">' + (g.drift > 0 ? '+' : '') + nf(g.drift, 1) + '% <span class="sm" style="font-weight:600">' + esc(g.driftLabel) + '</span></span></div><p class="xs mut" style="margin:0">Spadek wydajności (prędkość / tętno) w drugiej połowie treningu względem pierwszej, bez 10 min rozgrzewki. Poniżej 5% dobrze, 5–10% umiarkowany, powyżej 10% zmęczenie lub upał.</p>' :
+    '<div class="row sp"><span class="sm" style="font-weight:500">Dryf tętna</span><span class="sm mut">' + esc(g.driftNote || 'brak danych') + '</span></div>') + '</div>';
+  return h + '</div>';
+}
+
+// ---------- trend: EF of Spacer / Bieg workouts (from 3 values) ----------
+function gpsTrendHtml() {
+  var h = '', k = 0;
+  [['run', 'Bieg', '#F2A93B'], ['walk', 'Spacer', '#2CE8B5']].forEach(function (x) {
+    var ser = GPC.efSeries(S.workouts, x[0]).slice(-30); if (ser.length < 3) return;
+    var vals = ser.map(function (p) { return p.v; }), lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals), pad = Math.max(0.02, (hi - lo) * 0.25);
+    var y0 = Math.max(0, Math.floor((lo - pad) * 20) / 20), y1 = Math.ceil((hi + pad) * 20) / 20; if (y1 - y0 < 0.1) y1 = y0 + 0.1;
+    var last = ser[ser.length - 1];
+    h += '<div class="card fu" data-gps="ef-trend" data-type="' + x[0] + '"><div class="row sp"><p class="lbl">Wydajność tlenowa (EF) – ' + x[1] + '</p><span class="n" style="font-size:20px;color:' + x[2] + '">' + nf(last.v, 2) + '</span></div>' +
+      chart({ n: ser.length, ymin: y0, ymax: y1, ticks: [y0, (y0 + y1) / 2, y1], tickFmt: function (t) { return nf(t, 2); }, label: 'EF z ' + ser.length + ' treningów: ' + x[1], lines: [{ pts: ser.map(function (p, i) { return { i: i, v: p.v }; }), color: x[2], w: 2 }], dots: ser.map(function (p, i) { return { i: i, v: p.v, color: x[2], r: 2.6 }; }), xl: [{ i: 0, t: ddmm(ser[0].date), a: 'start' }, { i: ser.length - 1, t: 'ostatni', a: 'end' }] }) +
+      '<span class="xs mut">Metry na minutę na 1 uderzenie serca na spokojnych odcinkach. Rośnie, gdy kondycja rośnie. ' + ser.length + ' ' + (ser.length < 5 ? 'treningi' : 'treningów') + ' z GPS i tętnem.</span></div>';
+    k++;
+  });
+  return h;
+}
+
+// ---------- actions ----------
+ACT_GPS.gpsTgl = function (el) { gpsToggle(el.dataset.type); };
+ACT_GPS.gpsAllow = function () { gpsAllow(); };
+ACT_GPS.gpsAskNo = function () { gpsAskCancel(); };
+
 /* ===== Forma 0.2 - UI part B: Regeneracja, Sen, Trening, sesje, Forma, Trendy, Profil, Diagnostyka, events, init ===== */
 function weekdayShort(date) { return WD1[dowIdx(date)]; }
 
@@ -8142,6 +8706,7 @@ function workoutRow(w, open) {
   return '<details class="card wk fu"' + (open ? ' open' : '') + '><summary><span style="color:#2D9CFF">' + ico(w.type, 26) + '</span><span class="grow"><span class="n" style="font-size:17px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + WK_NAME[w.type] + (sum ? ' · ' + sum : '') + '</span><span class="xs mut">' + meta + '</span></span><span class="n" style="font-size:' + (saunaW ? 14 : 24) + 'px;color:' + (saunaW ? '#9AA6B0' : '#2D9CFF') + '">' + (saunaW ? 'poza<br>obciążeniem' : nf(strain, 1)) + '</span></summary>' +
     '<div class="col" style="margin-top:8px">' + (kc != null ? '<p class="sm" style="margin:0" data-e4="wk-kcal"><b class="n" style="font-size:18px">' + nfi(kc) + ' kcal</b> <span class="xs mut">ponad spoczynek, szacunek ±20%</span></p>' : '') + (saunaW ? '<p class="xs mut" style="margin:0">Sauna nie wlicza się do obciążenia, regeneracji ani wykrywania tętna maksymalnego. Dodamy tag Sauna do następnego pomiaru.</p>' : '') + (saunaW ? '' : w.zonesSec ? '<p class="lbl" style="font-size:12px">Czas w strefach tętna</p>' + zonesHtml(w.zonesSec) : '<p class="xs mut" style="margin:0">' + (w.hasHr ? 'Strefy tętna wymagają profilu i tętna spoczynkowego.' : 'Bez tętna z opaski – obciążenie z oceny wysiłku.') + '</p>') +
     (saunaW ? '' : w.source === 'hc' ? '<p class="xs mut" style="margin:0" data-hc="wk-note">Trening zaimportowany z Health Connect (aplikacja: ' + esc(HCC.originLabel(w.pkg)) + ', pakiet ' + esc(w.pkg || '?') + ').' + (w.trimp != null ? ' Obciążenie ' + nf(strain, 1) + ' policzone ze średniego tętna ' + Math.round(w.hrAvg) + '.' : ' Bez tętna z opaski i bez oceny wysiłku nie wlicza się do obciążenia.') + '</p>' : w.source === 'whoop' ? '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ' = strain z WHOOP' + (w.hrMax ? ' · maks. tętno ' + Math.round(w.hrMax) : '') + '. Trening zaimportowany z WHOOP.</p>' : '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ': z tętna ' + (sl.fromHr ? nf(FC.strainFromLoad(sl.fromHr), 1) : 'brak') + ' · z oceny wysiłku ' + (sl.fromRpe ? nf(FC.strainFromLoad(sl.fromRpe), 1) + ' (RPE ' + w.rpe + ')' : 'brak') + '</p>') +
+    gpsSummaryHtml(w, null, true) +
     (w.exercises.length ? '<p class="xs sub" style="margin:0">' + w.exercises.map(function (e) { return esc(e.name) + ' ' + e.sets.map(function (s) { return nf(s.kg, 1).replace(',0', '') + '×' + s.reps; }).join(', '); }).join('<br>') + '</p>' : '') +
     (w.source === 'whoop' || w.source === 'hc' ? '' : '<button class="btn sm danger" style="align-self:flex-start" data-act="delWorkout" data-id="' + esc(w.id) + '" data-confirm="Usuń">Usuń</button>') + '</div></details>';
 }
@@ -8161,7 +8726,7 @@ function rTrening() {
   if (S.session) h += '<a href="#/' + sessionPath(S.session.type) + '" class="card tint-g"><span class="lbl">Trwa trening</span><span class="n" style="font-size:18px">' + WK_NAME[S.session.type] + ' – wróć do treningu</span></a>';
   else {
     h += '<button class="btn blue full fu" data-act="addMenu" aria-expanded="false" id="addBtn">' + ico('plus', 20) + ' Dodaj trening</button>' +
-      '<div class="g2" id="addMenu" hidden>' + ['gym', 'run', 'walk', 'sauna'].map(function (t) { return '<button class="btn" data-act="startSess" data-type="' + t + '" style="flex-direction:column;gap:4px;min-height:64px">' + ico(t, 24) + WK_NAME[t] + '</button>'; }).join('') + '</div>';
+      '<div class="col" id="addMenu" hidden><div class="g2">' + ['gym', 'run', 'walk', 'sauna'].map(function (t) { return '<button class="btn" data-act="startSess" data-type="' + t + '" style="flex-direction:column;gap:4px;min-height:64px">' + ico(t, 24) + WK_NAME[t] + '</button>'; }).join('') + '</div>' + gpsCardHtml() + '</div>';
   }
   var gap = tb ? Math.max(0, tb.lo - strain) : null;
   h += '<div class="card fu" ' + dl(1) + '><div class="row" style="gap:16px">' + ringHtml(124, 10, strain / 21, '#2D9CFF', '<div style="text-align:center"><div class="n pop" style="font-size:40px;line-height:1">' + nf(strain, 1) + '</div><div class="xs sub">/ 21</div></div>') +
@@ -8205,7 +8770,7 @@ function rSession() {
       '<div class="card"><p class="lbl">Dodaj ćwiczenie</p><div class="row"><input class="inp grow" id="exName" list="exlist" type="text" placeholder="np. Wyciskanie sztangi leżąc" data-keep="1" autocomplete="off" aria-label="Nazwa ćwiczenia"><button class="btn sm" data-act="addEx">Dodaj</button></div><datalist id="exlist">' + EX_LIST.map(function (x) { return '<option value="' + esc(x) + '">'; }).join('') + '</datalist></div>';
   } else {
     h += '<div class="card"><p class="lbl">Czas w strefach tętna</p><div id="seZones">' + (pc.ok ? zonesHtml([0, 0, 0, 0, 0, 0]) : '<p class="xs mut" style="margin:0">Strefy wymagają profilu i tętna spoczynkowego.</p>') + '</div></div>' +
-      '<div class="card"><label class="sm sub" for="inKm">Dystans, km (opcjonalnie, ręcznie)</label><input class="inp" id="inKm" type="text" inputmode="decimal" data-in="km" data-keep="1" placeholder="np. 5,2" value="' + esc(s.distance) + '"></div>';
+      gpsLiveHtml(s) + (s.gps && s.gps.on ? '' : '<div class="card"><label class="sm sub" for="inKm">Dystans, km (opcjonalnie, ręcznie)</label><input class="inp" id="inKm" type="text" inputmode="decimal" data-in="km" data-keep="1" placeholder="np. 5,2" value="' + esc(s.distance) + '"></div>');
   }
   h += '<button class="btn sm danger" style="align-self:flex-start" data-act="discardSess" data-confirm="Odrzuć trening">Odrzuć trening</button></div>';
   h += '<div class="foot">' + (t === 'gym' ? '<div class="row sp"><span class="lbl" style="font-size:12px">Objętość</span><span class="n" id="seVol" style="font-size:26px">0 kg</span></div>' : '') + '<button class="btn pri big" style="min-height:56px" data-act="finishSess">Zakończ trening</button></div>';
@@ -8221,6 +8786,7 @@ function tickSession(el) {
   $('seSrc').textContent = fresh ? 'tętno z opaski' : (S.connected ? 'czekam na tętno z opaski…' : (S.link.state === 'reconnecting' ? 'łączenie ponownie – brak tętna' : 'bez opaski – tylko czas i ocena wysiłku'));
   if (s.type === 'gym') $('seVol').textContent = nfi(sessionVolume()) + ' kg';
   else if (pc.ok && $('seZones')) $('seZones').innerHTML = zonesHtml(FC.zoneSeconds(s.samples, pc.hrMax, pc.hrRest));
+  if (s.gps) gpsLiveTick();
 }
 ['sila:gym', 'bieg:run', 'spacer:walk', 'sauna:sauna'].forEach(function (x) {
   var p = x.split(':'); ROUTES['trening/' + p[0]] = { tab: 'trening', depth: 1, full: true, parent: 'trening', sess: p[1], render: rSession, mount: function () { renderBattery(); tickSession(); }, tick: tickSession };
@@ -8238,6 +8804,7 @@ function rSummary() {
     '<div class="stat"><div class="k">Śr. tętno</div><div class="v n">' + (w.hrAvg ? Math.round(w.hrAvg) : '—') + ' <span class="xs sub">ud/min</span></div></div>' +
     (sau ? '<div class="stat"><div class="k">Kalorie ponad spoczynek</div><div class="v n">' + (w.kcalNet != null ? nfi(w.kcalNet) : '—') + ' <span class="xs sub">kcal</span></div></div>' : '<div class="stat"><div class="k">Obciążenie</div><div class="v n">' + (sl.load > 0 ? nf(strain, 1) : '—') + ' <span class="xs sub">/ 21</span></div></div>') + (!sau && w.kcalNet != null ? '<div class="stat"><div class="k">Kalorie ponad spoczynek</div><div class="v n">' + nfi(w.kcalNet) + ' <span class="xs sub">kcal</span></div></div>' : '') + '</div>';
   if (sau) h += '<p class="sm sub" style="margin:0">Sauna nie wlicza się do obciążenia dnia. Kalorie to szacunek ±20%.</p>'; else h += '<p class="sm sub" style="margin:0">Obciążenie: z tętna ' + (sl.fromHr ? nf(FC.strainFromLoad(sl.fromHr), 1) : 'brak') + ' · z oceny wysiłku ' + (sl.fromRpe ? nf(FC.strainFromLoad(sl.fromRpe), 1) : 'wybierz ocenę') + (sl.fromHr && sl.fromRpe ? ' → bierzemy wyższe' : '') + '</p>';
+  h += gpsSummaryHtml(w, S.gps.notes[w.id]);
   h += '<button class="btn sm danger" style="align-self:flex-start" data-act="discardWorkout" data-confirm="Odrzuć trening">Odrzuć trening</button></div>';
   h += '<div class="foot"><button class="btn pri big" style="min-height:56px" data-act="saveWorkout"' + (sau || rpe || w.hasHr ? '' : ' disabled') + '>Zapisz</button>' + (!sau && !rpe && !w.hasHr ? '<p class="xs mut" style="margin:0;text-align:center">Wybierz ocenę wysiłku, żeby zapisać.</p>' : '') + '</div>';
   return h;
@@ -8304,6 +8871,7 @@ function rTrendy() {
     h += '<div class="card fu" ' + dl(4) + '><p class="lbl">Siłownia – objętość tygodniowa</p>' + chart({ n: 12, ymax: mk, ticks: [0, mk / 2, mk], tickFmt: function (t) { return t ? t / 1000 + 'k' : '0'; }, label: 'Objętość siłowni na tydzień, kg', bars: wv.map(function (x, i) { return { i: i, v: x.kg, color: i === 11 ? '#2D9CFF' : '#4C6A87' }; }), xl: xl }) + '<span class="xs mut">kg (serie × powtórzenia × ciężar), tygodnie od poniedziałku</span></div>';
     h += '<div class="card fu" ' + dl(5) + '><p class="lbl">Bieg i spacery – minuty tygodniowo</p>' + chart({ n: 12, ymax: mm, ticks: [0, mm / 2, mm], label: 'Czas biegu i spacerów na tydzień, minuty', bars: wv.map(function (x, i) { return { i: i, v: x.runMin, color: '#F2A93B' }; }).concat(wv.map(function (x, i) { return { i: i, v: x.runMin + x.walkMin, v0: x.runMin, color: '#2CE8B5' }; })), xl: xl }) + '<div class="row xs mut" style="gap:12px"><span style="color:#F2A93B">● bieg</span><span style="color:#2CE8B5">● spacery</span></div></div>';
   }
+  h += gpsTrendHtml();
   return h + '</div>';
 }
 ROUTES.trendy = { tab: 'trendy', depth: 0, render: rTrendy, mount: renderBattery };
@@ -8483,7 +9051,7 @@ function rProfil() {
   h += hcCardHtml();
   h += stepsSettingsHtml();
   h += '<div class="card"><p class="lbl">Asystent AI</p><div class="row sp"><span>Poranna notatka AI</span><span class="tgl" role="switch" aria-checked="false" aria-disabled="true" aria-label="Poranna notatka AI – wkrótce"><i></i></span></div><p class="xs mut" style="margin:0">Asystent AI – wkrótce. Dziś notatka dnia powstaje z szablonu, bez wysyłania danych gdziekolwiek.</p></div>';
-  h += '<div class="card"><p class="lbl">Kopia zapasowa</p><p class="xs mut" style="margin:0">Eksport zawiera wszystko: pomiary poranne (z godzinami snu i danymi WHOOP), treningi, profil i wagi. Dane logowania WHOOP nigdy nie trafiają do kopii.</p><div class="row" style="flex-wrap:wrap"><button class="btn grow" data-act="expAll">Eksportuj kopię (JSON)</button><button class="btn grow" data-act="impAll">Wczytaj kopię (JSON)</button></div><input id="fileImport" type="file" accept=".json,application/json" hidden><p class="sm" id="bkMsg" role="status" hidden></p></div>';
+  h += '<div class="card"><p class="lbl">Kopia zapasowa</p><p class="xs mut" style="margin:0">Eksport zawiera wszystko: pomiary poranne (z godzinami snu i danymi WHOOP), treningi, profil i wagi. Dane logowania WHOOP nigdy nie trafiają do kopii.</p><label class="row" style="gap:10px;min-height:44px;cursor:pointer" data-gps="exp-routes"><input type="checkbox" id="expRoutes" style="width:22px;height:22px;flex:none"' + (gpsRouteCount() ? '' : ' disabled') + '><span class="sm">Dołącz trasy GPS <span class="xs mut">' + (gpsRouteCount() ? '(' + gpsRouteCount() + ' ' + (gpsRouteCount() === 1 ? 'trasa' : 'tras') + ', domyślnie bez – to Twoje miejsca)' : '(brak zapisanych tras)') + '</span></span></label><div class="row" style="flex-wrap:wrap"><button class="btn grow" data-act="expAll">Eksportuj kopię (JSON)</button><button class="btn grow" data-act="impAll">Wczytaj kopię (JSON)</button></div><input id="fileImport" type="file" accept=".json,application/json" hidden><p class="sm" id="bkMsg" role="status" hidden></p></div>';
   h += '<a href="#/pomiary" class="card"><div class="row sp"><div><p class="lbl">Pomiary poranne</p><span class="xs mut">' + S.days.length + ' zapisanych dni · usuwanie i edycja dzisiejszego zapisu</span></div>' + ico('chev', 20) + '</div></a>';
   h += '<a href="#/diagnostyka" class="card"><div class="row sp"><div><p class="lbl">Diagnostyka</p><span class="xs mut">Tętno na żywo, tachogram, surowe dane CSV, dziennik zdarzeń</span></div>' + ico('chev', 20) + '</div></a>';
   h += '<div class="card tint-r"><p class="lbl">Usuń wszystkie dane</p><p class="xs" style="margin:0;color:#FFD6DA">Kasuje pomiary, treningi, profil i wagi z tej przeglądarki. Tego nie da się cofnąć – najpierw zrób kopię. Aby potwierdzić, wpisz słowo USUŃ.</p><input class="inp" id="wipeWord" type="text" autocomplete="off" data-in="wipe" data-keep="1" placeholder="USUŃ" aria-label="Wpisz USUŃ, aby potwierdzić"><button class="btn danger full" id="wipeBtn" data-act="wipe" disabled>Usuń wszystkie dane</button></div>';
@@ -8616,7 +9184,7 @@ var ACT = {
     var st = S.session.exercises[+el.dataset.e].sets[+el.dataset.s]; st.done = false;
     $('exList').innerHTML = exListHtml(); tickSession(); saveSession();
   },
-  discardSess: function () { S.session = null; clearSessionStore(); log('Trening odrzucony.'); goBackTo('trening'); },
+  discardSess: function () { if (typeof gpsAbort === 'function') gpsAbort(); S.session = null; clearSessionStore(); log('Trening odrzucony.'); goBackTo('trening'); },
   finishSess: function () {
     var w = finishSession(); S.rpe = null;
     if (!w) { S.flash = null; goBackTo('trening'); return; }
@@ -8669,7 +9237,7 @@ var ACT = {
   pfResetHr: function () { S.pfDraft = null; S.pfHmTouched = false; markSaved('profile', 'Zapisano: tętno maks. wyliczone z wieku'); applyProfile({ hrMax: null, hrMaxSource: null, hrMaxDate: null }); },
   kgAdd: function () { var v = $('pfKg').value.trim(); if (!addWeight(v)) { var e = $('kgErr'); e.textContent = 'Podaj wagę w kg (20–400).'; e.hidden = false; return; } clearDraft('pfKg'); markSaved('weight', 'Zapisano ważenie: ' + nf(FC.sanitizeWeight({ date: todayStr(), kg: v }).kg, 1) + ' kg'); UI.onData(); },
   kgDel: function (el) { S.weights = S.weights.filter(function (x) { return x.date !== el.dataset.d; }); persist('weights'); markSaved('weight', 'Usunięto ważenie z ' + ddmm(el.dataset.d) + '.' + el.dataset.d.slice(0, 4)); UI.onData(); },
-  expAll: function () { exportAll(); showMsg('bkMsg', 'Wyeksportowano: ' + S.days.length + ' dni, ' + S.workouts.length + ' treningów, ' + S.weights.length + ' ważeń.', 'ok'); },
+  expAll: function () { var rt = !!($('expRoutes') && $('expRoutes').checked && !$('expRoutes').disabled); exportAll(rt); showMsg('bkMsg', 'Wyeksportowano: ' + S.days.length + ' dni, ' + S.workouts.length + ' treningów, ' + S.weights.length + ' ważeń' + (rt ? ', z trasami GPS (' + gpsRouteCount() + ')' : (gpsRouteCount() ? '. Trasy GPS (' + gpsRouteCount() + ') pominięto – zostają tylko w telefonie' : '')) + '.', 'ok'); },
   impAll: function () { $('fileImport').click(); },
   whConnect: function () {
     var a = $('whId'), b = $('whSecret');
@@ -8694,7 +9262,7 @@ document.addEventListener('click', function (e) {
     delete el.dataset.armed;
   }
   buzz(10);
-  var fn = ACT[el.dataset.act] || ACT_BAT[el.dataset.act] || ACT_E4[el.dataset.act] || ACT_HC[el.dataset.act] || ACT_E5[el.dataset.act]; if (fn) fn(el, e);
+  var fn = ACT[el.dataset.act] || ACT_BAT[el.dataset.act] || ACT_E4[el.dataset.act] || ACT_HC[el.dataset.act] || ACT_E5[el.dataset.act] || ACT_GPS[el.dataset.act]; if (fn) fn(el, e);
 });
 $('stack').addEventListener('input', function (e) {
   var el = e.target, k = el.dataset && el.dataset.in;
@@ -8739,7 +9307,7 @@ setInterval(function () {
   var t = pageTop(); if (t && ROUTES[t.path].tick) ROUTES[t.path].tick(t.el);
 }, 250);
 setInterval(renderBattery, 3000);
-storageProbe(); loadAll(); e4Init(); loadBattery(); whoopInit(); hcInit(); e5Init();
+storageProbe(); loadAll(); e4Init(); loadBattery(); whoopInit(); hcInit(); e5Init(); gpsInit();
 log('Gotowe. Forma 0.2.');
 if (DEMO) startDemo();
 else if (window.top !== window.self) { showError(IFRAME_MSG); }
@@ -8754,7 +9322,7 @@ whoopMaybeSync();
 e4Start();
 hcStart();
 
-function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-26 20:01 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
+function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-26 20:31 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
 
 })();</script>
 </body>

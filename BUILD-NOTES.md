@@ -130,3 +130,9 @@ Not compiled locally (no SDK, no Google Maven). The version choice below could n
 - `aggregateGroupByDuration` over 31 days = 744 buckets (fine); hourly sums can differ by a few steps from the daily total (the web uses the daily value for the total and the hourly values only for the distribution).
 - Exercise type numbers in the web label map (SPORT) and the stage codes (1 awake, 2 sleeping, 3 out of bed, 4 light, 5 deep, 6 REM, 7 awake in bed) are written from memory of the Health Connect constants; a wrong label would only be cosmetic, a wrong stage code would shift minutes between stages.
 - Reads happen only while the app is in the foreground (no background-read permission); the first sync after the user grants permissions is limited by Health Connect to 30 days of past data.
+
+## Etap 5B: GPS route (Spacer / Bieg)
+- GpsService.kt (new; manifest foregroundServiceType="location", permissions ACCESS_FINE/COARSE_LOCATION without maxSdkVersion + FOREGROUND_SERVICE_LOCATION): runs only between Start and Zakończ of a workout with the "Zapisuj trasę (GPS)" switch on; LocationManager GPS_PROVIDER every 1 s; raw fixes in `GpsTrack` (memory + files/gps_track.csv, first line "#<sessionId>"). Web code filters/analyses (gps-core.js). Stops after 8 h at the latest. Only "while in use" location is needed.
+- Bridge: gpsStatus, gpsRequestPermission (event gpsPermission {granted, coarse}), gpsStart(sessionId), gpsPoints(from), gpsStop. MainActivity.gpsLauncher asks FINE+COARSE only when the user turns the switch on.
+- Health Connect ExerciseRoute: NOT written (alpha07 API / WRITE_EXERCISE_ROUTE availability uncertain, so skipped on purpose).
+- Compile-risk spots: LocationListener overrides (onStatusChanged deprecated, `provider: String` nullability), `return` inside `synchronized` in GpsTrack.begin, `Math.round(Double)/10.0` in GpsTrack.since, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION (API 29+, guarded).

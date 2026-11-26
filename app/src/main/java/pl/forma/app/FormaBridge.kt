@@ -171,6 +171,15 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
         emit(o)
     }
 
+    /** Result of the location dialog: granted = precise location; coarse = only approximate location was given (not enough for a route). */
+    fun emitGpsPermission() {
+        val o = ev("gpsPermission")
+        val fine = GpsService.hasFine(ctx)
+        o.put("granted", fine)
+        o.put("coarse", !fine && GpsService.hasCoarse(ctx))
+        emit(o)
+    }
+
     private fun btPermissionsGranted(): Boolean = BleManager.hasScanPermission() && BleManager.hasConnectPermission()
 
     private fun notificationsGranted(): Boolean =
@@ -278,6 +287,53 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
     @JavascriptInterface
     fun setWorkoutRunning(running: Boolean): String {
         Prefs.setWorkoutRunning(ctx, running)
+        return ok()
+    }
+
+    // ---------- Etap 5B: route of a Spacer / Bieg workout (GpsService stores the fixes; the web code fetches and analyses them) ----------
+    /** {ok, supported, permission (precise location granted), coarse, running, count, gpsOn (GPS switched on in the phone)}. */
+    @JavascriptInterface
+    fun gpsStatus(): String {
+        val o = JSONObject()
+        o.put("ok", true)
+        o.put("supported", true)
+        o.put("permission", GpsService.hasFine(ctx))
+        o.put("coarse", GpsService.hasCoarse(ctx))
+        o.put("running", GpsService.running)
+        o.put("count", GpsTrack.count())
+        val lmgr = ctx.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
+        o.put("gpsOn", try { lmgr != null && lmgr.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) } catch (e: Exception) { false })
+        return o.toString()
+    }
+
+    /** Only called when the user turns the GPS switch on (after the Polish explanation). Result = event gpsPermission. */
+    @JavascriptInterface
+    fun gpsRequestPermission(): String {
+        if (GpsService.hasFine(ctx)) {
+            emitGpsPermission()
+        } else {
+            activity.runOnUiThread { activity.askGpsPermission() }
+        }
+        return ok()
+    }
+
+    /** "Start" of a Spacer / Bieg workout with the switch on. Same sessionId again = continue the same track. */
+    @JavascriptInterface
+    fun gpsStart(sessionId: String): String {
+        if (sessionId.isEmpty() || sessionId.length > 40) return errCode("arg", "Nieprawidłowy identyfikator treningu.")
+        if (!GpsService.hasFine(ctx)) return errCode("permission", "Brak zgody na dokładną lokalizację.")
+        return if (GpsService.start(ctx, sessionId)) ok() else errCode("service", "Nie udało się uruchomić GPS.")
+    }
+
+    /** Fixes from index [from] on: {ok, next, state, running, pts:[[t, lat, lon, acc|null]]}. Works with the screen off (the points are stored natively). */
+    @JavascriptInterface
+    fun gpsPoints(from: Int): String = GpsTrack.since(from).toString()
+
+    /** "Zakończ" / discard: stops the service and removes the stored track (the web code has already fetched everything). */
+    @JavascriptInterface
+    fun gpsStop(): String {
+        GpsService.stop()
+        GpsTrack.clear(ctx)
         return ok()
     }
 

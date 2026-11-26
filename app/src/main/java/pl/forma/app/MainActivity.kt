@@ -44,6 +44,12 @@ class MainActivity : AppCompatActivity() {
             StepAlarmReceiver.applySettings(this)
         }
 
+    /** Location for the route of a workout (asked only when the user turns the GPS switch on); the real state is re-read and sent as the event gpsPermission. */
+    private val gpsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
+            bridge.emitGpsPermission()
+        }
+
     /** Health Connect permission dialog; the real grants are re-read by HealthConnectManager and sent as the event hcPermissions. */
     private val hcLauncher =
         registerForActivityResult(PermissionController.createRequestPermissionResultContract()) { _ ->
@@ -69,6 +75,10 @@ class MainActivity : AppCompatActivity() {
 
     fun askHealthPermissions(perms: Set<String>) {
         hcLauncher.launch(perms)
+    }
+
+    fun askGpsPermission() {
+        gpsLauncher.launch(arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION))
     }
 
     fun askStepsPermission() {

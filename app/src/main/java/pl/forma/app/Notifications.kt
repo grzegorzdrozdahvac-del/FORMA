@@ -67,6 +67,18 @@ object Notifications {
             .build()
     }
 
+    /** Foreground notification of GpsService (route of a Spacer / Bieg workout). */
+    fun gps(ctx: Context): Notification {
+        return NotificationCompat.Builder(ctx, CH_LIVE)
+            .setSmallIcon(R.drawable.ic_stat_forma)
+            .setContentTitle("Forma – zapisuję trasę (GPS)")
+            .setContentText("GPS działa tylko do końca treningu. Lokalizacja zostaje w telefonie.")
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(openApp(ctx, 5, null))
+            .build()
+    }
+
     fun postResult(ctx: Context) {
         ensureChannels(ctx)
         val n = NotificationCompat.Builder(ctx, CH_MORNING)
