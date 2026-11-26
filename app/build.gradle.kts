@@ -47,4 +47,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.webkit:webkit:1.11.0")
+    // Health Connect. 1.1.0-alpha07 is built against compileSdk 34; newer 1.1.0 releases may need compileSdk 35 (see BUILD-NOTES.md, fallback plan)
+    implementation("androidx.health.connect:connect-client:1.1.0-alpha07")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 }

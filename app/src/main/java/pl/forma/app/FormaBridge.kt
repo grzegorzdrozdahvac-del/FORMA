@@ -23,6 +23,11 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
 
     private val ctx = activity.applicationContext
 
+    init {
+        // Health Connect results (any thread) -> JS events (emit posts to the main thread itself)
+        HealthConnectManager.emitter = { o -> emit(o) }
+    }
+
     private fun ok(): String = "{\"ok\":true}"
 
     private fun err(msg: String): String {
@@ -437,6 +442,49 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
                 }
             }
         }
+        return ok()
+    }
+
+    // ---------- Health Connect (HealthConnectManager does the work on Dispatchers.IO; results arrive as events) ----------
+    /** {ok, status: "available"|"update"|"unavailable", sdk}. The permission lists follow as the event hcStatus. */
+    @JavascriptInterface
+    fun hcStatus(): String {
+        HealthConnectManager.emitStatus(ctx)
+        return HealthConnectManager.statusJson(ctx).toString()
+    }
+
+    /** System permission dialog for all read + write permissions; result = event hcPermissions. Missing / old Health Connect -> Play Store. */
+    @JavascriptInterface
+    fun hcRequestPermissions(): String {
+        if (!HealthConnectManager.isAvailable(ctx)) {
+            activity.runOnUiThread { HealthConnectManager.openPlayStore(activity) }
+            HealthConnectManager.emitStatus(ctx)
+            return errCode("unavailable", "Zainstaluj lub zaktualizuj Health Connect.")
+        }
+        activity.runOnUiThread { activity.askHealthPermissions(HealthConnectManager.ALL_PERMISSIONS) }
+        return ok()
+    }
+
+    /** Result = event hcSyncResult {ok, data{stepsDaily, stepsHourly, weight, height, exercise, sleep, rhr, hrv, calDaily}, failed[]} or {ok:false, code, message}. */
+    @JavascriptInterface
+    fun hcSync(sinceIso: String): String {
+        if (!HealthConnectManager.isAvailable(ctx)) return errCode("unavailable", "Health Connect nie jest dostępny.")
+        HealthConnectManager.sync(ctx, sinceIso)
+        return ok()
+    }
+
+    /** json {"records":[{kind: hrv|rhr|exercise|hr|sleep, cid, ver, ...}]}; result = event hcWriteResult. */
+    @JavascriptInterface
+    fun hcWrite(json: String): String {
+        if (!HealthConnectManager.isAvailable(ctx)) return errCode("unavailable", "Health Connect nie jest dostępny.")
+        HealthConnectManager.write(ctx, json)
+        return ok()
+    }
+
+    /** Health Connect settings (permissions); the Play Store page when Health Connect is missing or must be updated. */
+    @JavascriptInterface
+    fun hcOpenSettings(): String {
+        activity.runOnUiThread { HealthConnectManager.openSettings(activity) }
         return ok()
     }
 

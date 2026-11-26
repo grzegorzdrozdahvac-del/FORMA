@@ -18,6 +18,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.health.connect.client.PermissionController
 import androidx.webkit.WebViewAssetLoader
 
 class MainActivity : AppCompatActivity() {
@@ -43,6 +44,12 @@ class MainActivity : AppCompatActivity() {
             StepAlarmReceiver.applySettings(this)
         }
 
+    /** Health Connect permission dialog; the real grants are re-read by HealthConnectManager and sent as the event hcPermissions. */
+    private val hcLauncher =
+        registerForActivityResult(PermissionController.createRequestPermissionResultContract()) { _ ->
+            HealthConnectManager.onPermissionResult(this)
+        }
+
     /** Pending <input type=file> request from the WebView; exactly one onReceiveValue per request (null = cancelled). */
     private var fileCallback: ValueCallback<Array<Uri>>? = null
 
@@ -58,6 +65,10 @@ class MainActivity : AppCompatActivity() {
 
     fun askPermissions(perms: Array<String>) {
         permLauncher.launch(perms)
+    }
+
+    fun askHealthPermissions(perms: Set<String>) {
+        hcLauncher.launch(perms)
     }
 
     fun askStepsPermission() {
@@ -221,6 +232,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         fileCallback?.onReceiveValue(null)
         fileCallback = null
+        HealthConnectManager.emitter = null
         BleManager.removeListener(bridge.listener)
         webView.destroy()
         super.onDestroy()
