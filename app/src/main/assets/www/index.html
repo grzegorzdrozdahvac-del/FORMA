@@ -42,6 +42,7 @@ button,input,select{font:inherit;color:inherit}
 a.card:active,.tap:active{transform:scale(.985)}
 .card.tint-g{background:linear-gradient(160deg,#1E3A33,#1B2A2A);border-color:rgba(44,232,181,.35)}
 .card.tint-p{background:linear-gradient(160deg,#3A2A44,#2A2230);border-color:rgba(224,123,240,.4)}
+.card.tint-a{background:linear-gradient(160deg,#3A3322,#2A2820);border-color:rgba(242,169,59,.45)}
 .card.tint-r{background:rgba(255,77,94,.12);border-color:rgba(255,77,94,.5)}
 .g2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
 .g3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
@@ -85,10 +86,15 @@ input[type=time].inp{font-size:15px}
 .bp{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);border-radius:999px;padding:6px 12px;font-family:var(--fn);font-size:15px;font-weight:700;color:#C5CED6;white-space:nowrap;flex-shrink:0;min-height:36px}
 .bp .bp-p{font-size:15px;line-height:1}
 .bp.none{font-weight:600}
+.bp{position:relative;cursor:pointer}
+.bp::after{content:"";position:absolute;inset:-4px -6px}
+.bp.stuck{border:1px dashed rgba(197,206,214,.6);background:repeating-linear-gradient(135deg,rgba(255,255,255,.11) 0 5px,rgba(255,255,255,.02) 5px 10px);color:#C5CED6}
 .bp.low{animation:pb 2s ease-in-out infinite}
 .bp-c{display:inline-flex;align-items:center;gap:3px;color:#2CE8B5;font-size:13px;animation:po 1.8s ease-in-out infinite}
 .hd:not(.full) .bp-ct{display:none}
 .banner{display:flex;align-items:center;gap:8px;border-radius:14px;padding:2px 4px 2px 12px;font-size:12px;line-height:1.3;font-weight:400;border:1px solid rgba(255,77,94,.55);background:rgba(255,77,94,.14);color:#FFD6DA}
+.banner.unc{border-color:rgba(242,169,59,.55);background:rgba(242,169,59,.12);color:#FFE2B8}
+.banner .bn-link{flex:none;min-height:44px;display:inline-flex;align-items:center;padding:0 6px;color:#F2A93B;font-family:var(--fn);font-weight:600;font-size:14px}
 .banner.chg{border-color:rgba(44,232,181,.6);background:rgba(44,232,181,.14);color:#CFFFF0}
 .banner svg{flex:none}
 .banner>span{flex:1}
@@ -125,6 +131,14 @@ input[type=time].inp{font-size:15px}
 .quad .dt{width:14px;height:14px;border-radius:7px;background:#2CE8B5;flex:none;margin-top:2px}
 details.wk>summary{list-style:none;cursor:pointer;min-height:44px;display:flex;align-items:center;gap:10px}
 details.wk>summary::-webkit-details-marker{display:none}
+details.wopt>summary,details.tech>summary,details.faq>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;min-height:44px}
+details.wopt>summary{min-height:56px;flex-direction:row;padding:12px 16px}
+details.wopt>summary::-webkit-details-marker,details.tech>summary::-webkit-details-marker,details.faq>summary::-webkit-details-marker{display:none}
+details.faq{border-top:1px solid rgba(255,255,255,.08)}
+details.faq>summary{font-size:14px;font-weight:600;color:#E9EEF2}
+.wchev{flex:none;display:inline-flex;color:#9AA6B0;transition:transform .2s}
+details[open]>summary .wchev{transform:rotate(90deg)}
+.mono{margin:0;font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#C5CED6;white-space:pre-wrap;overflow-wrap:anywhere;background:#161B1F;border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:8px 10px}
 .stepper{display:flex;align-items:center;gap:6px;font-size:12px;color:#9AA6B0}
 .stepper .s{display:flex;align-items:center;gap:6px}
 .stepper b{width:22px;height:22px;border-radius:11px;background:#2F383F;display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:#fff}
@@ -1818,10 +1832,238 @@ canvas{display:block;width:100%;height:200px}
   if (isNode) module.exports = api; else root.WhoopExport = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
+<script>/* Forma battery core - pure logic, no DOM. Works in browser (window.BatteryCore) and node (module.exports).
+ * Log entries: readings {t, level, via:'read'|'notify', device, connected:true}
+ *              test results {kind:'test', t, t0, result:'rose'|'flat'|'fell'|'broken', from, to, device}
+ * Question this answers: does the number the band reports (0x2A19) mean anything? WHOOP 4.0 in HR Broadcast mode may
+ * keep reporting one frozen value. Nothing here claims more than the data supports. */
+(function (root) {
+  'use strict';
+
+  var MIN = 60000, H = 3600000;
+  var GAP_MS = 15 * MIN;            // readings further apart than this are a disconnected gap: not counted as connected time
+  var CHARGE_WINDOW_MS = 20 * MIN;  // a rise of >= 1 point inside this window means charging
+  var STUCK_MS = 3 * H, STUCK_READINGS = 30;
+  var MIN_RATE = 0.5, MAX_RATE = 15; // plausible drain, %/h
+  var FALLING_RECENT_MS = 6 * H;    // the last drop must be this recent to call the battery "draining now"
+  var CAP = 2000, BUCKET_MS = 10 * MIN, OLD_MS = 24 * H, MAX_TESTS = 50;
+  var TEST_MS = 20 * MIN, TEST_GAP_MS = 4 * MIN, TEST_MIN_READINGS = 8;
+
+  function isTest(e) { return !!e && e.kind === 'test'; }
+  function isReading(e) { return !!e && !isTest(e) && isFinite(e.t) && isFinite(e.level) && e.level >= 0 && e.level <= 100; }
+  function byT(a, b) { return a.t - b.t; }
+  function readings(log) { return (log || []).filter(isReading).slice().sort(byT); }
+  function tests(log) { return (log || []).filter(function (e) { return isTest(e) && isFinite(e.t); }).slice().sort(byT); }
+
+  function sanitizeEntry(e) {
+    if (!e || typeof e !== 'object' || !isFinite(e.t)) return null;
+    if (isTest(e)) {
+      var res = ['rose', 'flat', 'fell', 'broken'].indexOf(e.result) >= 0 ? e.result : null;
+      if (!res) return null;
+      return { kind: 'test', t: Math.round(+e.t), t0: isFinite(e.t0) ? Math.round(+e.t0) : Math.round(+e.t), result: res,
+        from: isFinite(e.from) ? +e.from : null, to: isFinite(e.to) ? +e.to : null, device: String(e.device || '').slice(0, 60) };
+    }
+    if (!isFinite(e.level) || e.level < 0 || e.level > 100) return null;
+    return { t: Math.round(+e.t), level: Math.round(+e.level), via: e.via === 'notify' ? 'notify' : 'read', device: String(e.device || '').slice(0, 60), connected: true };
+  }
+  function sanitizeLog(log) {
+    return (Array.isArray(log) ? log : []).map(sanitizeEntry).filter(Boolean).sort(byT);
+  }
+  function keyOf(e) { return isTest(e) ? 'test|' + e.t0 : e.t + '|' + e.level + '|' + e.via; }
+  // union of two logs (web + native), de-duplicated, oldest first
+  function mergeLogs(a, b) {
+    var seen = {}, out = [];
+    sanitizeLog(a).concat(sanitizeLog(b)).forEach(function (e) { var k = keyOf(e); if (!seen[k]) { seen[k] = 1; out.push(e); } });
+    return out.sort(byT);
+  }
+  // cap the log: when over `cap`, entries older than 24 h are thinned to one per 10 min, then the oldest are dropped. Test results are kept.
+  function compactLog(log, now, cap) {
+    cap = cap || CAP;
+    var rs = readings(log), ts = tests(log).slice(-MAX_TESTS), room = Math.max(10, cap - ts.length);
+    if (rs.length > room) {
+      var cutoff = now - OLD_MS, seen = {}, out = [];
+      rs.forEach(function (r) {
+        if (r.t >= cutoff) out.push(r);
+        else { var b = Math.floor(r.t / BUCKET_MS); if (!seen[b]) { seen[b] = 1; out.push(r); } }
+      });
+      rs = out.length > room ? out.slice(out.length - room) : out;
+    }
+    return rs.concat(ts).sort(byT);
+  }
+  function addEntry(log, entry, now) {
+    var e = sanitizeEntry(entry); if (!e) return log || [];
+    var out = (log || []).concat([e]);
+    return out.length > CAP ? compactLog(out, now == null ? e.t : now) : out;
+  }
+
+  // ---------- formatting ----------
+  function p2(n) { return ('0' + n).slice(-2); }
+  function hhmm(t) { var d = new Date(t); return p2(d.getHours()) + ':' + p2(d.getMinutes()); }
+  function dayStart(t) { var d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); }
+  // "dziś 21:40" / "wczoraj 21:40" / "24.11 21:40"
+  function fmtWhen(t, now) {
+    if (!isFinite(t)) return '—';
+    var dd = Math.round((dayStart(now) - dayStart(t)) / 86400000);
+    if (dd === 0) return 'dziś ' + hhmm(t);
+    if (dd === 1) return 'wczoraj ' + hhmm(t);
+    var d = new Date(t); return p2(d.getDate()) + '.' + p2(d.getMonth() + 1) + ' ' + hhmm(t);
+  }
+  function fmtDur(ms) {
+    var m = Math.max(0, Math.round(ms / MIN));
+    if (m < 60) return m + ' min';
+    var h = Math.floor(m / 60), r = m % 60;
+    if (h >= 48) return Math.round(h / 24) + ' dni';
+    return h + ' h' + (r ? ' ' + r + ' min' : '');
+  }
+  function dec(x, n) { return x.toFixed(n == null ? 1 : n).replace('.', ','); }
+
+  // ---------- verdict ----------
+  var STUCK_TEXT = 'Opaska podaje ciągle tę samą wartość mimo kilku godzin pracy. Prawdopodobnie w trybie nadawania tętna WHOOP nie aktualizuje poziomu baterii – to nie musi znaczyć, że bateria jest rozładowana. Sprawdź testem ładowania poniżej.';
+
+  /**
+   * batteryVerdict(log, now, opts) -> {state, title, explanation, lastChange, sinceMs, ratePerHour, etaToEmptyH, confidence, ...}
+   * state: 'charging' | 'draining' | 'stuck' | 'low_real' | 'unknown'; confidence: 'low' | 'medium' | 'high'.
+   * opts.chargingFlag: true when the band itself reports charging (0x2A1A / 0x2BED). opts.hrFlowing: false when no heart-rate data arrives (default true).
+   * lastChange: time the current value first appeared after a different one (null = no change in the log); sinceMs: now minus that
+   * (or minus the first reading when there was no change). Extra fields: level, readings, connectedMs, need {ms, readings}, top, testAt.
+   */
+  function batteryVerdict(log, now, opts) {
+    opts = opts || {};
+    var rs = readings(log).filter(function (r) { return r.t <= now; });
+    var base = { state: 'unknown', title: '', explanation: '', lastChange: null, sinceMs: null, ratePerHour: null, etaToEmptyH: null, confidence: 'low',
+      level: null, readings: rs.length, connectedMs: 0, need: { ms: STUCK_MS, readings: STUCK_READINGS }, testAt: null };
+    function done(o) { return Object.assign(base, o); }
+    if (!rs.length) {
+      if (opts.chargingFlag === true) return done({ state: 'charging', title: 'Opaska się ładuje', explanation: 'Opaska zgłasza ładowanie, ale nie mamy jeszcze odczytu poziomu.', confidence: 'high' });
+      return done({ title: 'Brak danych o baterii', explanation: 'Nie mamy jeszcze żadnego odczytu baterii. Połącz opaskę i zostaw Formę włączoną: potrzeba ok. 3 godzin połączenia i 30 odczytów, żeby ocenić, czy poziom w ogóle się zmienia.' });
+    }
+    var last = rs[rs.length - 1], level = last.level;
+    // run of identical values ending at the newest reading
+    var rs0 = rs.length - 1; while (rs0 > 0 && rs[rs0 - 1].level === level) rs0--;
+    var run = rs.slice(rs0), connectedMs = 0;
+    for (var i = 1; i < run.length; i++) { var dt = run[i].t - run[i - 1].t; if (dt <= GAP_MS) connectedMs += dt; }
+    var lastChange = rs0 > 0 ? rs[rs0].t : null;
+    var sinceMs = now - (lastChange != null ? lastChange : run[0].t);
+    var needMs = Math.max(0, STUCK_MS - connectedMs), needN = Math.max(0, STUCK_READINGS - run.length);
+    base.level = level; base.lastChange = lastChange; base.sinceMs = sinceMs; base.connectedMs = connectedMs; base.need = { ms: needMs, readings: needN };
+
+    // decline: the newest stretch where the level never rose; its start = the last reading at the highest level
+    var i0 = rs.length - 1; while (i0 > 0 && rs[i0 - 1].level >= rs[i0].level) i0--;
+    var top = rs[i0].level, j0 = i0; while (j0 + 1 < rs.length && rs[j0 + 1].level === top) j0++;
+    var drop = top - level, spanH = 0, rate = null;
+    if (drop >= 2 && lastChange != null && lastChange > rs[j0 + 1].t) { // between the first and the last step: (drop - 1) steps in that time
+      spanH = (last.t - rs[j0].t) / H; rate = (drop - 1) / ((lastChange - rs[j0 + 1].t) / H);
+    } else if (drop >= 1 && last.t > rs[i0].t) { // one step (or jump): only a lower bound, measured from the first reading at the top level
+      spanH = (last.t - rs[i0].t) / H; rate = drop / spanH;
+    }
+    var plausible = rate != null && rate >= MIN_RATE && rate <= MAX_RATE;
+    var fallingNow = plausible && lastChange != null && sinceMs <= FALLING_RECENT_MS;
+    var eta = plausible ? level / rate : null;
+    var tlist = tests(log).filter(function (x) { return x.t <= now; }), lastTest = tlist.length ? tlist[tlist.length - 1] : null;
+    var recentRise = 0;
+    var wnd = rs.filter(function (r) { return r.t >= now - CHARGE_WINDOW_MS; });
+    if (wnd.length >= 2) { var mn = Infinity; wnd.forEach(function (r) { if (r.level < mn) mn = r.level; }); recentRise = level - mn; }
+
+    // 1. charging
+    if (opts.chargingFlag === true) {
+      return done({ state: 'charging', title: 'Opaska się ładuje', explanation: 'Opaska sama zgłasza, że jest ładowana (' + level + '%).', confidence: 'high' });
+    }
+    if (recentRise >= 1 && opts.chargingFlag !== false) { // an explicit "not charging" from the band wins over the inference
+      return done({ state: 'charging', title: 'Opaska prawdopodobnie się ładuje',
+        explanation: 'Poziom wzrósł o ' + recentRise + ' pkt w ciągu ostatnich 20 minut (do ' + level + '%). Samo się to nie dzieje, więc to wskazuje na ładowanie. Opaska nie zgłasza tego wprost.',
+        confidence: recentRise >= 2 ? 'medium' : 'low' });
+    }
+    // 2. stuck: confirmed by a charging test that showed no change, or by >= 3 h of connected time with >= 30 identical readings
+    if (lastTest && lastTest.result === 'flat' && lastTest.t0 != null && lastTest.t - now > -30 * 24 * H) {
+      var after = rs.filter(function (r) { return r.t >= lastTest.t0; });
+      if (after.length && after.every(function (r) { return r.level === level; })) {
+        return done({ state: 'stuck', title: 'Odczyt baterii się nie zmienia', testAt: lastTest.t, confidence: 'high',
+          explanation: STUCK_TEXT + ' Test ładowania z ' + fmtWhen(lastTest.t, now) + ' też nie pokazał zmiany.' });
+      }
+    }
+    var enough = connectedMs >= STUCK_MS && run.length >= STUCK_READINGS;
+    if (enough && level < 100) {
+      if (opts.hrFlowing === false) {
+        return done({ state: 'unknown', title: 'Nie da się tego ocenić bez tętna', confidence: 'low',
+          explanation: 'Poziom ' + level + '% nie zmienia się od ' + fmtDur(connectedMs) + ' połączenia, ale teraz z opaski nie płynie tętno, więc nie oceniam tego jako zablokowanego odczytu. Sprawdź połączenie i zostaw Formę włączoną.' });
+      }
+      return done({ state: 'stuck', title: 'Odczyt baterii się nie zmienia', confidence: connectedMs >= 6 * H && run.length >= 60 ? 'high' : 'medium',
+        explanation: STUCK_TEXT });
+    }
+    // 3. low battery with a recent downward trend
+    if (level <= 10 && fallingNow) {
+      return done({ state: 'low_real', title: 'Bateria jest niska i dalej spada', ratePerHour: rate, etaToEmptyH: eta, confidence: drop >= 2 ? 'medium' : 'low',
+        explanation: 'Poziom spadł z ' + top + '% do ' + level + '% w ' + fmtDur(spanH * H) + ' (ok. ' + dec(rate) + ' pkt/h). Odczyt się zmienia, więc wygląda na prawdziwy. Przy tym tempie starczy na ok. ' + fmtDur(eta * H) + '. Naładuj opaskę.' });
+    }
+    // 4. draining at a plausible rate
+    if (fallingNow) {
+      return done({ state: 'draining', title: 'Bateria się rozładowuje', ratePerHour: rate, etaToEmptyH: eta, confidence: drop >= 3 ? 'medium' : 'low',
+        explanation: 'Poziom spadł z ' + top + '% do ' + level + '% w ' + fmtDur(spanH * H) + ' (ok. ' + dec(rate) + ' pkt/h). Przy tym tempie starczy na ok. ' + fmtDur(eta * H) + ' (szacunek orientacyjny).' });
+    }
+    if (drop >= 1 && rate != null && rate > MAX_RATE) {
+      return done({ state: 'unknown', title: 'Odczyt zmienia się podejrzanie szybko', ratePerHour: rate,
+        explanation: 'Poziom spadł z ' + top + '% do ' + level + '% w ' + fmtDur(spanH * H) + ', czyli szybciej niż bateria potrafi się rozładować. Nie traktuj tego odczytu jako pewnego.' });
+    }
+    // 5. not enough data
+    if (level >= 100) return done({ state: 'unknown', title: 'Bateria pełna (100%)', explanation: 'Opaska podaje 100%. Przy pełnej baterii brak zmian jest normalny.' });
+    var parts = [];
+    if (needMs > 0) parts.push('ok. ' + fmtDur(needMs) + ' połączenia');
+    if (needN > 0) parts.push(needN + ' odczytów');
+    return done({ state: 'unknown', title: 'Za mało danych, żeby ocenić',
+      explanation: 'Mamy ' + run.length + ' ' + (run.length === 1 ? 'odczyt' : 'odczytów') + ' z ' + fmtDur(connectedMs) + ' połączenia przy poziomie ' + level + '%. Potrzeba jeszcze ' + (parts.length ? parts.join(' i ') : 'chwili') + ', żeby wiedzieć, czy poziom się zmienia. Możesz też od razu zrobić test ładowania.' });
+  }
+
+  // ---------- charging test ----------
+  var TEST_TEXT = {
+    flat: 'Poziom bez zmian przez 20 min ładowania – odczyt baterii z opaski jest niewiarygodny (zablokowany). Nie traktuj tej wartości jako prawdziwej.',
+    broken: 'Połączenie zerwane podczas testu – powtórz'
+  };
+  /**
+   * evaluateChargeTest(test, log, now): test = {t0, durMs?, broken?}. Returns
+   * {status:'running'|'rose'|'flat'|'fell'|'broken', from, to, elapsedMs, remainingMs, durMs, points, text, hint}.
+   * broken = the app saw a disconnect, or two readings in the window are > 4 min apart (test.gapMs overrides), or < 8 readings were collected.
+   */
+  function evaluateChargeTest(test, log, now) {
+    var dur = test.durMs || TEST_MS, t0 = test.t0, end = t0 + dur, gapMs = test.gapMs || TEST_GAP_MS;
+    var upto = Math.min(now, end + 90000);
+    var pts = readings(log).filter(function (r) { return r.t >= t0 - 2 * MIN && r.t <= upto; });
+    var inWin = pts.filter(function (r) { return r.t >= t0; });
+    var elapsed = Math.max(0, Math.min(now, end) - t0), remaining = Math.max(0, end - now);
+    var from = pts.length ? pts[0].level : null, to = pts.length ? pts[pts.length - 1].level : null;
+    var out = { status: 'running', from: from, to: to, elapsedMs: elapsed, remainingMs: remaining, durMs: dur, points: pts.map(function (r) { return { t: r.t, level: r.level }; }), text: '', hint: '' };
+    var gap = false;
+    for (var i = 1; i < inWin.length; i++) if (inWin[i].t - inWin[i - 1].t > gapMs) gap = true;
+    var tailT = inWin.length ? inWin[inWin.length - 1].t : t0; // no reading for a while (running or until the end): the link was lost
+    if (Math.min(now, end) - tailT > gapMs) gap = true;
+    if (test.broken || gap) { out.status = 'broken'; out.text = TEST_TEXT.broken; out.hint = 'Test wymaga stałego połączenia z opaską. Zostaw Formę otwartą i spróbuj jeszcze raz.'; return out; }
+    if (now < end) {
+      out.text = to != null && from != null && to > from ? 'Poziom już wzrósł z ' + from + '% do ' + to + '%. Test trwa dalej.' : 'Test trwa. Nie rozłączaj Formy.';
+      return out;
+    }
+    if (inWin.length < TEST_MIN_READINGS) { out.status = 'broken'; out.text = TEST_TEXT.broken; out.hint = 'Zebrano za mało odczytów (' + inWin.length + ').'; return out; }
+    if (to > from) { out.status = 'rose'; out.text = 'Poziom wzrósł z ' + from + '% do ' + to + '% – ładowanie działa, odczyt jest prawdziwy'; out.hint = 'Skoro odczyt reaguje na ładowanie, to wcześniejsze „10%” mogło być prawdziwe. Obserwuj dalej, czy poziom spada.'; }
+    else if (to < from) { out.status = 'fell'; out.text = 'Poziom spadł z ' + from + '% do ' + to + '% podczas testu – opaska raczej się nie ładowała.'; out.hint = 'Sprawdź, czy bateria jest dobrze zatrzaśnięta i świeci dioda, potem powtórz test.'; }
+    else { out.status = 'flat'; out.text = TEST_TEXT.flat; out.hint = 'Jeśli bateria nie była pewnie zatrzaśnięta, powtórz test: bez ładowania taki wynik nic nie mówi.'; }
+    return out;
+  }
+  // entry stored in the battery log when a test ends
+  function testEntry(test, ev, now) {
+    return sanitizeEntry({ kind: 'test', t: now, t0: test.t0, result: ev.status, from: ev.from, to: ev.to, device: test.device });
+  }
+
+  var api = {
+    GAP_MS: GAP_MS, STUCK_MS: STUCK_MS, STUCK_READINGS: STUCK_READINGS, TEST_MS: TEST_MS, CAP: CAP, STUCK_TEXT: STUCK_TEXT, TEST_TEXT: TEST_TEXT,
+    isReading: isReading, isTest: isTest, readings: readings, tests: tests, sanitizeEntry: sanitizeEntry, sanitizeLog: sanitizeLog, mergeLogs: mergeLogs, compactLog: compactLog, addEntry: addEntry,
+    batteryVerdict: batteryVerdict, evaluateChargeTest: evaluateChargeTest, testEntry: testEntry, fmtWhen: fmtWhen, fmtDur: fmtDur
+  };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else root.BatteryCore = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
 <script>(function () {
 'use strict';
 /* ===== Forma 0.2 - base: state, storage, battery, Bluetooth, measurement engine, sessions, demo ===== */
-var C = window.HrvCore, FC = window.FormaCore;
+var C = window.HrvCore, FC = window.FormaCore, BC = window.BatteryCore;
 var PMD_SERVICE = 'fb005c80-02e7-f387-1cad-8acd2d8df0c8';
 var PMD_CP = 'fb005c81-02e7-f387-1cad-8acd2d8df0c8';
 var PMD_DATA = 'fb005c82-02e7-f387-1cad-8acd2d8df0c8';
@@ -1846,7 +2088,8 @@ var UI = {}; // hooks filled by the UI part
 
 var S = {
   device: null, server: null, mode: null, connected: false, name: '', connText: 'Niepołączono', connCls: '', error: '', info: '',
-  battery: null, battHist: [], chgSignal: null, battOverride: false, battChar: null, battPoll: null,
+  battery: null, chgSignal: null, battOverride: false, battChar: null, battPoll: null,
+  battLog: [], battVerdict: null, battVerdictAt: 0, battTest: null, battTestErr: '', battDiag: null, battDiagLogged: false, bcRange: '24h', det: {},
   beats: [], recent: [], cumT: 0, hr: null, hrAt: 0, ppiSkinBad: false, rrContactBad: false, ppiPending: false, dupCount: 0,
   measure: null, pending: null, wake: null,
   days: [], workouts: [], profile: null, weights: [], storageBroken: false,
@@ -1943,6 +2186,7 @@ function importAll(j) {
 function wipeAll() {
   S.days = []; S.workouts = []; S.profile = null; S.weights = []; S.pending = null; S.pendingWorkout = null; S.session = null; S.resume = null; S.editDay = null;
   if (!DEMO) try { localStorage.removeItem(SKEY); localStorage.removeItem(SKEY + '.corrupt'); Object.keys(KEYS).forEach(function (k) { localStorage.removeItem(KEYS[k]); localStorage.removeItem(KEYS[k] + '.corrupt'); }); localStorage.removeItem('forma.v1.nightsDone'); } catch (e) { /* ignore */ }
+  if (typeof battOnWipe === 'function') battOnWipe();
   if (typeof whoopOnWipe === 'function') whoopOnWipe();
   log('Usunięto wszystkie dane.');
   if (UI.onData) UI.onData();
@@ -1956,50 +2200,55 @@ function profileCtx() {
 function todayStatus() { return C.dayStatus(S.days, todayStr()); }
 function plannedWake() { return (S.profile && S.profile.plannedWake) || FC.typicalWake(S.days, todayStr()) || '07:00'; }
 
-// ---------- battery ----------
+// ---------- battery (state; the log, verdict, test and diagnostics live in app2-battery.js) ----------
 function chargingState() {
-  if (S.chgSignal != null) return { on: S.chgSignal, src: 'status' };
-  return { on: C.inferCharging(S.battHist, Date.now()), src: 'inferred' };
+  if (S.chgSignal === true) return { on: true, src: 'status' };
+  if (S.chgSignal === false) return { on: false, src: 'status' };
+  return { on: battVerdict().state === 'charging', src: 'inferred' };
 }
-function battBlocks() { return S.connected && S.battery != null && S.battery < 10 && !S.battOverride; }
-function setBattery(level) {
+function battBlocks() { return S.connected && S.battery != null && S.battery < 10 && !S.battOverride && battVerdict().state !== 'stuck'; }
+// via: 'read' | 'notify' = a real reading from the band (logged); null = only update the displayed value
+function setBattery(level, via, t) {
   if (!isFinite(level)) return;
   var prev = S.battery;
-  S.battHist.push({ t: Date.now(), level: level });
-  if (S.battHist.length > 200) S.battHist.splice(0, S.battHist.length - 200);
+  if (via) logBattery(level, via, t);
   if (prev == null) log('Bateria: ' + level + '%'); else if (prev !== level) log('Bateria: ' + prev + '% → ' + level + '%');
   S.battery = level;
   if (level >= 10) S.battOverride = false;
   if (UI.onBattery) UI.onBattery();
 }
 function resetBattery() {
-  S.battery = null; S.battHist = []; S.chgSignal = null; S.battOverride = false; S.battChar = null;
+  S.battery = null; S.chgSignal = null; S.battOverride = false; S.battChar = null; S.battVerdict = null; S.battDiagLogged = false;
   if (S.battPoll) { clearInterval(S.battPoll); S.battPoll = null; }
   if (UI.onBattery) UI.onBattery();
 }
 async function initBattery() {
-  var bs, bc;
+  var bs, bc, dump = await webGattDump(S.server);
+  var diag = { via: 'web', device: S.name, at: Date.now(), present: false, props: [], cpf: { state: 'unknown', hex: '' }, has2BED: false, has2A1A: false, services: dump };
   try { bs = await S.server.getPrimaryService('battery_service'); bc = await bs.getCharacteristic('battery_level'); }
-  catch (e) { log('Bateria niedostępna: ' + e.message); return; }
-  S.battChar = bc;
-  async function readLevel() { var v = await bc.readValue(); setBattery(v.getUint8(0)); }
+  catch (e) { log('Bateria niedostępna: ' + e.message); diag.error = e.message; battDiagSet(diag); return; }
+  S.battChar = bc; diag.present = true; diag.props = webProps(bc.properties);
+  try { var d = await bc.getDescriptor(0x2904); diag.cpf.state = 'present'; try { diag.cpf.hex = hex(await d.readValue()); } catch (e) { diag.cpf.err = e.message; } }
+  catch (e) { diag.cpf.state = e && e.name === 'NotFoundError' ? 'absent' : 'error'; diag.cpf.err = e && e.message; }
+  async function readLevel() { var v = await bc.readValue(); setBattery(v.getUint8(0), 'read'); }
   try { await readLevel(); } catch (e) { log('Odczyt baterii nieudany: ' + e.message); }
-  var notif = false;
   try {
-    bc.addEventListener('characteristicvaluechanged', function (ev) { setBattery(ev.target.value.getUint8(0)); });
-    await bc.startNotifications(); notif = true; log('Bateria: powiadomienia aktywne.');
-  } catch (e) { log('Powiadomienia baterii niedostępne (' + e.message + ') – odczyt co 60 s.'); }
-  if (!notif) S.battPoll = setInterval(function () { if (S.connected) readLevel().catch(function (e) { log('Odczyt baterii nieudany: ' + e.message); }); }, 60000);
-  var opts = [[0x2BED, 'Battery Level Status', C.parseBatteryLevelStatus], [0x2A1A, 'Battery Power State', C.parseBatteryPowerState]];
+    bc.addEventListener('characteristicvaluechanged', function (ev) { setBattery(ev.target.value.getUint8(0), 'notify'); });
+    await bc.startNotifications(); log('Bateria: powiadomienia aktywne.');
+  } catch (e) { log('Powiadomienia baterii niedostępne (' + e.message + ').'); }
+  // always read every 60 s, notifications or not: the read is the ground truth and every one goes to the battery log
+  S.battPoll = setInterval(function () { if (S.connected) readLevel().catch(function (e) { log('Odczyt baterii nieudany: ' + e.message); }); }, 60000);
+  var opts = [[0x2BED, 'Battery Level Status', C.parseBatteryLevelStatus, 'has2BED'], [0x2A1A, 'Battery Power State', C.parseBatteryPowerState, 'has2A1A']];
   for (var i = 0; i < opts.length; i++) {
     try {
       var ch = await bs.getCharacteristic(opts[i][0]), parse = opts[i][2], nm = opts[i][1];
+      diag[opts[i][3]] = true;
       var apply = function (dv) {
         var r = parse(dv);
         if (r && r.known) {
-          var was = S.chgSignal; S.chgSignal = r.charging;
+          var was = S.chgSignal; S.chgSignal = r.charging; S.battVerdict = null;
           if (was !== r.charging) log(nm + ': ' + (r.charging ? 'ładowanie' : 'brak ładowania') + ' [' + hex(dv) + ']');
-          if (r.level != null) setBattery(r.level); else if (UI.onBattery) UI.onBattery();
+          if (r.level != null) setBattery(r.level, 'read'); else if (UI.onBattery) UI.onBattery();
         }
       };
       apply(await ch.readValue());
@@ -2007,6 +2256,7 @@ async function initBattery() {
       log('Znaleziono ' + nm + ' – flaga ładowania z urządzenia.');
     } catch (e) { /* usually missing */ }
   }
+  battDiagSet(diag);
 }
 
 // ---------- data pipeline ----------
@@ -2186,6 +2436,7 @@ function onDisconnected() {
   var was = S.connected, wasMeasuring = !!S.measure;
   S.connected = false; S.server = null; S.ppiPending = false; S.info = '';
   if (was) log('Rozłączono.');
+  if (typeof battOnDisconnect === 'function') battOnDisconnect();
   resetBattery();
   setConn('Rozłączono', 'err');
   if (wasMeasuring) cancelMeasure('Połączenie z opaską przerwane – pomiar anulowany. Połącz ponownie i powtórz.');
@@ -2234,7 +2485,7 @@ async function connect(showAll) {
     hrCh.addEventListener('characteristicvaluechanged', onHrNotify);
     await hrCh.startNotifications();
     log('Subskrypcja tętna (0x2A37) aktywna.');
-    S.connected = true;
+    S.connected = true; S.connSince = Date.now();
     setConn('Połączono: ' + S.name + ' · tryb ' + (S.mode === 'PPI' ? 'PPI' : 'RR'), 'ok');
     await initBattery();
     if (!isBelt) await startPpi();
@@ -2320,10 +2571,12 @@ function nativeApplyState(state, name) {
       resetBattery();
       S.dedupe = /WHOOP/i.test(S.name);
       if (S.dedupe) log('Wykryto WHOOP: włączone pomijanie powtórzonych odstępów.');
+      S.battDiag = null;
     }
+    if (fresh) S.connSince = Date.now();
     S.connected = true; S.mode = 'RR'; S.picker = null; S.error = '';
     setConn('Połączono: ' + S.name + ' · tryb RR', 'ok');
-    if (fresh) log('Połączono (natywnie): ' + S.name);
+    if (fresh) { log('Połączono (natywnie): ' + S.name); battNativeDiag(); }
   } else if (state === 'disconnected') {
     S.picker = null;
     if (S.connected) onDisconnected(); else setConn('Niepołączono', '');
@@ -2333,7 +2586,8 @@ function nativeSync() {
   var g = nat('getState');
   if (g && typeof g === 'object') {
     if (g.state) nativeApplyState(g.state, g.name);
-    if (g.battery != null && g.state === 'connected') setBattery(g.battery);
+    if (g.battery != null && g.state === 'connected') setBattery(g.battery, null);
+    if (typeof g.charging === 'boolean' && g.state === 'connected') S.chgSignal = g.charging;
     if (g.lastDeviceName) S.lastDeviceName = g.lastDeviceName;
   }
 }
@@ -2424,16 +2678,18 @@ if (window.FormaNative) window.__formaNativeEvent = function (ev) {
         if (!S.connected) nativeApplyState('connected', ev.name || S.name);
         handleHrPacket({ hr: ev.hr, contact: ev.contact && typeof ev.contact === 'object' ? ev.contact : { supported: false, detected: false }, rrMs: Array.isArray(ev.rr) ? ev.rr : [] });
         break;
-      case 'battery': if (isFinite(ev.level)) setBattery(+ev.level); break;
+      case 'battery': if (isFinite(ev.level)) setBattery(+ev.level, ev.via === 'notify' ? 'notify' : 'read', isFinite(ev.t) ? +ev.t : undefined); break;
+      case 'charging': S.chgSignal = !!ev.charging; S.battVerdict = null; log('Opaska zgłasza: ' + (ev.charging ? 'ładowanie' : 'brak ładowania') + '.'); if (UI.onBattery) UI.onBattery(); break;
+      case 'gattInfo': battNativeInfo(ev.info); break;
       case 'night':
         nightRefresh();
         if (ev.state === 'stopped') setTimeout(checkNights, 400);
         if (UI.onNight) UI.onNight();
         break;
       case 'warning':
-        if (ev.code === 'lowBattery') { S.night.warn = 'Bateria opaski: ' + ev.level + '%. Może nie wystarczyć do rana – pomiar działa dalej.'; log(S.night.warn); if (UI.onNight) UI.onNight(); }
+        if (ev.code === 'lowBattery') { S.night.warn = 'Bateria opaski: ' + ev.level + '%' + (battVerdict().state === 'stuck' ? ' (odczyt niepewny)' : '') + '. Może nie wystarczyć do rana – pomiar działa dalej.'; log(S.night.warn); if (UI.onNight) UI.onNight(); }
         break;
-      case 'appResumed': nightRefresh(); nativeSync(); checkNights(); if (UI.onNight) UI.onNight(); if (typeof whoopMaybeSync === 'function') whoopMaybeSync(); break;
+      case 'appResumed': nightRefresh(); nativeSync(); mergeNativeBattery(); checkNights(); if (UI.onNight) UI.onNight(); if (typeof whoopMaybeSync === 'function') whoopMaybeSync(); break;
       case 'whoopAuth': case 'whoopSync': if (typeof whoopNativeEvent === 'function') whoopNativeEvent(ev); break;
       case 'error': log('Błąd natywny: ' + ev.message); if (ev.message) showError(String(ev.message)); break;
       default: break;
@@ -2443,7 +2699,7 @@ if (window.FormaNative) window.__formaNativeEvent = function (ev) {
 function nativeInit() {
   if (!NATIVE) return;
   log('Natywna aplikacja Android: Bluetooth i pomiar nocy przez FormaNative.');
-  nativeSync(); nightRefresh(); checkNights();
+  nativeSync(); mergeNativeBattery(); nightRefresh(); checkNights();
 }
 
 // ---------- demo (synthetic WHOOP + history, memory only) ----------
@@ -2474,8 +2730,199 @@ function startDemo() {
   var now = Date.now();
   for (var k = 36; k >= 1; k--) S.hrLog.push({ t: now - k * 5 * 60000, hr: Math.round(60 + 4 * Math.sin(k / 4) + (k > 14 && k < 20 ? 22 : 0)) });
   setInterval(gen, 1000 / F);
-  S.battery = null; setBattery(12);
-  if (!BATT_STATIC) setInterval(function () { if (S.battery < 100) setBattery(S.battery + 1); }, FAST ? 2500 : 60000);
+  demoBattery();
+}
+
+/* ===== Forma 0.2 - battery: persistent log, verdict, charging test, GATT diagnostics, demo scenarios ===== */
+var BKEY = 'forma.v1.battery', BTKEY = 'forma.v1.battery.test';
+var BATT_MODE = DEMO ? ((/[?&]batt=(\w+)/.exec(location.search) || [])[1] || '') : ''; // demo: 'static' | 'stuck' | 'rise'
+// fast demo of the battery scenarios: battery time runs 60x faster (a 20 min test takes 20 s); all timestamps below use bNow()
+var BATT_F = DEMO && FAST && (BATT_MODE === 'stuck' || BATT_MODE === 'rise') ? 60 : 1;
+var BT0 = Date.now();
+function bNow() { return BATT_F === 1 ? Date.now() : BT0 + (Date.now() - BT0) * BATT_F; }
+
+// ---------- persistent log: localStorage 'forma.v1.battery' (+ native file on Android) ----------
+var battDirty = false, battSavedAt = 0;
+function loadBattery() {
+  S.battLog = BC.sanitizeLog(readKey(BKEY));
+  var tr = readKey(BTKEY);
+  if (tr && isFinite(tr.t0) && isFinite(tr.durMs)) { S.battTest = { t0: +tr.t0, durMs: +tr.durMs, device: String(tr.device || ''), broken: !!tr.broken, done: !!tr.done, ev: tr.ev || null, endedAt: tr.endedAt || null }; }
+  mergeNativeBattery();
+  battTestCheck();
+}
+function saveBattery(force) {
+  if (DEMO || S.storageBroken || !battDirty) return;
+  var n = Date.now(); if (!force && n - battSavedAt < 30000) return;
+  battSavedAt = n; battDirty = false;
+  try { localStorage.setItem(BKEY, JSON.stringify(S.battLog)); } catch (e) { log('Zapis logu baterii nieudany: ' + e.message); }
+}
+function persistBattTest() {
+  if (DEMO) return;
+  try {
+    var T = S.battTest;
+    if (!T) { localStorage.removeItem(BTKEY); return; }
+    localStorage.setItem(BTKEY, JSON.stringify({ t0: T.t0, durMs: T.durMs, device: T.device, broken: T.broken, done: T.done, endedAt: T.endedAt || null, ev: T.ev ? { status: T.ev.status, from: T.ev.from, to: T.ev.to, text: T.ev.text, hint: T.ev.hint } : null }));
+  } catch (e) { /* ignore */ }
+}
+function mergeNativeBattery() {
+  if (!NATIVE) return;
+  var arr = nat('getBatteryLog');
+  if (!Array.isArray(arr)) return;
+  S.battLog = BC.compactLog(BC.mergeLogs(S.battLog, arr), Date.now()); S.battVerdict = null;
+  battDirty = true; saveBattery(true);
+  log('Log baterii z aplikacji: ' + arr.length + ' odczytów (razem ' + BC.readings(S.battLog).length + ').');
+  if (UI.onBattery) UI.onBattery();
+}
+function logBattery(level, via, t) {
+  S.battLog = BC.addEntry(S.battLog, { t: t || bNow(), level: level, via: via, device: S.name || '' }, bNow());
+  S.battVerdict = null; battDirty = true; saveBattery(false); battTestCheck();
+}
+function battOnWipe() {
+  S.battLog = []; S.battTest = null; S.battVerdict = null; battDirty = false;
+  if (!DEMO) try { localStorage.removeItem(BKEY); localStorage.removeItem(BKEY + '.corrupt'); localStorage.removeItem(BTKEY); } catch (e) { /* ignore */ }
+  if (NATIVE) nat('clearBatteryLog');
+}
+function battClearLog() { battOnWipe(); log('Wyczyszczono log baterii.'); if (UI.onBattery) UI.onBattery(); if (UI.onBattTest) UI.onBattTest(); }
+window.addEventListener('pagehide', function () { saveBattery(true); });
+document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') saveBattery(true); });
+
+// ---------- verdict ----------
+// false only when connected for > 2 min and no heart-rate packet arrived in the last 2 min
+function battHrFlowing() { return !S.connected || DEMO || Date.now() - Math.max(S.hrAt || 0, S.connSince || 0) < 120000; }
+function battVerdict() {
+  var n = Date.now();
+  if (S.battVerdict && n - S.battVerdictAt < 1000) return S.battVerdict;
+  S.battVerdict = BC.batteryVerdict(S.battLog, bNow(), { chargingFlag: S.chgSignal == null ? undefined : S.chgSignal, hrFlowing: battHrFlowing() });
+  S.battVerdictAt = n; return S.battVerdict;
+}
+function battStuck() { return S.battery != null && battVerdict().state === 'stuck'; }
+
+// ---------- charging test ----------
+function readBatteryNow() {
+  var bc = S.battChar; if (!bc || DEMO) return;
+  bc.readValue().then(function (v) { setBattery(v.getUint8(0), 'read'); }, function (e) { log('Odczyt baterii nieudany: ' + e.message); });
+}
+function battTestStart() {
+  if (!S.connected) { S.battTestErr = 'Najpierw połącz opaskę – test wymaga stałego połączenia.'; if (UI.onBattTest) UI.onBattTest(); return false; }
+  if (S.battery == null) { S.battTestErr = 'Opaska nie podaje jeszcze poziomu baterii. Poczekaj chwilę i spróbuj ponownie.'; if (UI.onBattTest) UI.onBattTest(); return false; }
+  S.battTestErr = '';
+  S.battTest = { t0: bNow(), durMs: BC.TEST_MS, device: S.name || '', broken: false, done: false, ev: null, endedAt: null, gapMs: BATT_F > 1 ? 12 * 60000 : undefined };
+  S.battVerdict = null; persistBattTest(); log('Test ładowania: start (20 min), poziom ' + S.battery + '%.');
+  readBatteryNow(); battTestCheck();
+  if (UI.onBattTest) UI.onBattTest();
+  return true;
+}
+function battTestCancel() { S.battTest = null; persistBattTest(); log('Test ładowania przerwany.'); if (UI.onBattTest) UI.onBattTest(); }
+function battTestCheck() {
+  var T = S.battTest; if (!T || T.done) return;
+  var ev = BC.evaluateChargeTest(T, S.battLog, bNow());
+  T.ev = ev;
+  if (ev.status !== 'running') battTestFinish(ev);
+}
+function battTestFinish(ev) {
+  var T = S.battTest; if (!T || T.done) return;
+  T.done = true; T.ev = ev; T.endedAt = bNow();
+  var entry = BC.testEntry(T, ev, bNow());
+  if (entry) { S.battLog = BC.addEntry(S.battLog, entry, bNow()); battDirty = true; saveBattery(true); }
+  S.battVerdict = null; persistBattTest();
+  log('Test ładowania – wynik: ' + ev.text + '.');
+  buzz(30);
+  if (UI.onBattTest) UI.onBattTest();
+  if (UI.onBattery) UI.onBattery();
+}
+function battOnDisconnect() { var T = S.battTest; if (T && !T.done) { T.broken = true; battTestCheck(); } }
+setInterval(function () { battTestCheck(); saveBattery(false); }, 1000);
+
+// ---------- diagnostics: what the band exposes ----------
+var UUID_NAMES = { '1800': 'Generic Access', '1801': 'Generic Attribute', '180A': 'Device Information', '180D': 'Heart Rate', '180F': 'Battery', '2A19': 'Battery Level', '2A37': 'Heart Rate Measurement', '2A38': 'Body Sensor Location', '2A39': 'Heart Rate Control Point', '2A1A': 'Battery Power State', '2BED': 'Battery Level Status', '2A00': 'Device Name', '2A01': 'Appearance', '2A29': 'Manufacturer Name', '2A24': 'Model Number', '2A25': 'Serial Number', '2A26': 'Firmware Revision', '2A27': 'Hardware Revision', '2A28': 'Software Revision' };
+function shortUuid(u) {
+  var m = /^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/i.exec(String(u || ''));
+  return m ? m[1].toUpperCase() : String(u || '');
+}
+function uuidLabel(u) { var s = shortUuid(u), n = UUID_NAMES[s]; return (s.length === 4 ? '0x' + s : s) + (n ? ' ' + n : ''); }
+function webProps(p) {
+  var o = []; if (!p) return o;
+  [['read', 'read'], ['write', 'write'], ['writeWithoutResponse', 'write_no_response'], ['notify', 'notify'], ['indicate', 'indicate']].forEach(function (k) { if (p[k[0]]) o.push(k[1]); });
+  return o;
+}
+async function webGattDump(server) {
+  var out = [];
+  try {
+    var svcs = await server.getPrimaryServices();
+    for (var i = 0; i < svcs.length; i++) {
+      var so = { uuid: svcs[i].uuid, chars: [] };
+      try { var chs = await svcs[i].getCharacteristics(); chs.forEach(function (c) { so.chars.push({ uuid: c.uuid, props: webProps(c.properties) }); }); }
+      catch (e) { so.err = e && e.message; }
+      out.push(so);
+    }
+  } catch (e) { /* ignore */ }
+  return out;
+}
+function cpfText(c) {
+  if (!c) return 'nie sprawdzono';
+  if (c.state === 'present') return 'jest' + (c.hex ? ', bajty: ' + c.hex : (c.err ? ' (nie udało się odczytać: ' + c.err + ')' : ' (odczyt w toku)'));
+  if (c.state === 'absent') return 'brak';
+  if (c.state === 'error') return 'nie udało się sprawdzić' + (c.err ? ' (' + c.err + ')' : '');
+  return 'nie sprawdzono';
+}
+function servicesText(d) {
+  if (!d || !d.services || !d.services.length) return '';
+  return d.services.map(function (s) {
+    return uuidLabel(s.uuid) + (s.chars && s.chars.length ? '\n' + s.chars.map(function (c) { return '  ' + uuidLabel(c.uuid) + '  [' + (c.props && c.props.length ? c.props.join(', ') : '—') + ']'; }).join('\n') : (s.err ? '\n  (błąd: ' + s.err + ')' : ''));
+  }).join('\n');
+}
+// once per connection: facts into the event log
+function battDiagLog(d) {
+  if (!d || S.battDiagLogged) return;
+  S.battDiagLogged = true;
+  var web = d.via === 'web';
+  log('Diagnostyka baterii (' + (web ? 'Web Bluetooth' : 'Android') + '): 0x2A19 ' + (d.present ? 'właściwości: ' + (d.props.length ? d.props.join(', ') : '—') : 'niedostępne') + '.');
+  log('Deskryptor 0x2904 (Characteristic Presentation Format): ' + cpfText(d.cpf) + '.');
+  log('0x2BED (Battery Level Status): ' + (d.has2BED ? 'jest' : 'brak') + '; 0x2A1A (Battery Power State): ' + (d.has2A1A ? 'jest' : 'brak') + '.');
+  var txt = servicesText(d);
+  if (txt) log((web ? 'Usługi GATT widoczne dla przeglądarki (tylko dozwolone):' : 'Pełna lista usług GATT z Androida:') + '\n' + txt);
+}
+function battDiagSet(d) { S.battDiag = d; battDiagLog(d); if (UI.onBattTest) UI.onBattTest(); }
+// Android: BleManager sends {device, services:[{uuid, characteristics:[{uuid, props, descriptors}]}], battery:{present, props, cpfPresent, cpfHex, has2BED, has2A1A}}
+function battNativeInfo(info) {
+  if (!info || typeof info !== 'object') return;
+  var b = info.battery || {};
+  var d = { via: 'android', device: info.device || S.name, at: Date.now(), present: !!b.present, props: Array.isArray(b.props) ? b.props : [],
+    cpf: { state: b.cpfPresent ? 'present' : 'absent', hex: b.cpfHex && !/^błąd/.test(b.cpfHex) ? b.cpfHex : '', err: b.cpfHex && /^błąd/.test(b.cpfHex) ? b.cpfHex : '' },
+    has2BED: !!b.has2BED, has2A1A: !!b.has2A1A,
+    services: (info.services || []).map(function (s) { return { uuid: s.uuid, chars: (s.characteristics || []).map(function (c) { return { uuid: c.uuid, props: c.props || [] }; }) }; }) };
+  S.battDiag = d;
+  if (!b.cpfPresent || b.cpfHex != null) battDiagLog(d); // log once the descriptor value is known
+  if (UI.onBattTest) UI.onBattTest();
+}
+function battNativeDiag() { if (!NATIVE) return; var gi = nat('getGattInfo'); if (gi && typeof gi === 'object') battNativeInfo(gi); }
+
+// ---------- demo scenarios (memory only) ----------
+// default: starts at 12% and climbs (a band on a charger); batt=static: 12% frozen; batt=stuck: a frozen 10% after hours of data;
+// batt=rise: frozen 10% that starts to climb as soon as the charging test is started. With &fast=1 battery time runs 60x faster.
+function demoBattery() {
+  S.battery = null;
+  battDiagSet({ via: 'web', device: S.name, at: Date.now(), present: true, props: ['read', 'notify'], cpf: { state: 'absent', hex: '' }, has2BED: false, has2A1A: false,
+    services: [{ uuid: '0000180d-0000-1000-8000-00805f9b34fb', chars: [{ uuid: '00002a37-0000-1000-8000-00805f9b34fb', props: ['notify'] }] },
+      { uuid: '0000180f-0000-1000-8000-00805f9b34fb', chars: [{ uuid: '00002a19-0000-1000-8000-00805f9b34fb', props: ['read', 'notify'] }] }] });
+  if (BATT_MODE === 'stuck' || BATT_MODE === 'rise') {
+    var now = bNow(), seed = [], x;
+    for (x = now - 17 * 3600000; x < now - 14 * 3600000; x += 60000) seed.push({ t: x, level: 11, via: 'read', device: S.name });
+    for (x = now - 14 * 3600000; x <= now - 6 * 3600000; x += 60000) seed.push({ t: x, level: 10, via: 'read', device: S.name });
+    for (x = now - 3 * 3600000; x <= now - 60000; x += 60000) seed.push({ t: x, level: 10, via: 'notify', device: S.name }); // 6 h .. 3 h ago: band was off (gap)
+    S.battLog = BC.sanitizeLog(seed);
+    var lvl = 10;
+    var tickB = function () {
+      var T = S.battTest;
+      if (BATT_MODE === 'rise' && T) lvl = Math.max(lvl, 10 + Math.floor((bNow() - T.t0) / (4 * 60000)));
+      setBattery(lvl, 'read');
+    };
+    tickB();
+    setInterval(tickB, 60000 / BATT_F);
+    return;
+  }
+  setBattery(12, 'read');
+  if (BATT_MODE !== 'static') setInterval(function () { if (S.battery < 100) setBattery(S.battery + 1, 'read'); }, FAST ? 2500 : 60000);
 }
 
 /* ===== Forma - WHOOP Developer API (v2): connection state, web transport (fetch), Android transport (FormaNative.whoop*), sync ===== */
@@ -2896,24 +3343,33 @@ function devShort() { var n = String(S.name || S.lastDeviceName || ''); return /
 function renderBattery() {
   if (S.battery == null || S.battery >= 20) S.bannerOff = null;
   var has = S.battery != null && (S.connected || DEMO), l = S.battery, chg = has ? chargingState() : { on: false, src: '' };
+  var stuck = has && !chg.on && battVerdict().state === 'stuck', v = has ? battVerdict() : null;
   var why = chg.src === 'status' ? 'zgłoszone przez opaskę' : 'wykryte po wzroście poziomu';
   $$('.js-batt').forEach(function (el) {
-    if (!has) { el.className = 'bp js-batt none'; el.style.cssText = ''; el.innerHTML = battIcon(0, '#9AA6B0') + '<span>Bateria: —</span>'; el.removeAttribute('title'); el.setAttribute('aria-label', 'Bateria: brak danych'); return; }
-    var c = battColor(l);
+    el.setAttribute('role', 'link'); el.setAttribute('tabindex', '0'); el.dataset.act = 'battGo';
+    if (!has) { el.className = 'bp js-batt none'; el.style.cssText = ''; el.innerHTML = battIcon(0, '#9AA6B0') + '<span>Bateria: —</span>'; el.setAttribute('title', 'Bateria opaski – szczegóły'); el.setAttribute('aria-label', 'Bateria: brak danych. Otwórz ekran baterii opaski'); return; }
+    var c = battColor(l), lab = el.closest('.hd.full') && !chg.on ? devShort() + ' ' : '';
+    if (stuck) {
+      el.className = 'bp js-batt stuck'; el.style.cssText = '';
+      el.innerHTML = battIcon(l, '#9AA6B0') + '<span class="bp-p">' + lab + l + '% ?</span>';
+      el.title = 'Odczyt niepewny – opaska od wielu godzin podaje tę samą wartość. Dotknij, by sprawdzić.';
+      el.setAttribute('aria-label', 'Bateria opaski ' + l + ' procent, odczyt niepewny. Otwórz szczegóły');
+      return;
+    }
     el.className = 'bp js-batt' + (l < 20 && !chg.on ? ' low' : '');
     el.style.cssText = 'border-color:' + c + ';background:' + BG[c] + ';color:' + c;
-    var lab = el.closest('.hd.full') && !chg.on ? devShort() + ' ' : '';
     el.innerHTML = battIcon(l, c) + '<span class="bp-p">' + lab + l + '%</span>' + (chg.on ? '<span class="bp-c">' + ico('bolt', 14, true) + '<span class="bp-ct">Ładowanie</span></span>' : '');
-    el.title = chg.on ? 'Ładowanie – ' + why : 'Bateria opaski ' + l + '%';
-    el.setAttribute('aria-label', 'Bateria opaski ' + l + ' procent' + (chg.on ? ', ładowanie, ' + why : ''));
+    el.title = chg.on ? 'Ładowanie – ' + why : 'Bateria opaski ' + l + '%. Dotknij, by zobaczyć szczegóły.';
+    el.setAttribute('aria-label', 'Bateria opaski ' + l + ' procent' + (chg.on ? ', ładowanie, ' + why : '') + '. Otwórz szczegóły');
   });
   $$('.js-banner').forEach(function (b) {
-    var key = chg.on ? 'chg' : 'low';
+    var key = chg.on ? 'chg' : (stuck ? 'unc' : 'low');
     if (has && l < 20 && S.bannerOff !== key) {
-      b.hidden = false; b.className = 'banner js-banner' + (chg.on ? ' chg' : '');
-      var bc = chg.on ? '#2CE8B5' : '#FF4D5E';
-      b.innerHTML = (chg.on ? ico('bolt', 20, true) : battIcon(l, bc)) + '<span>' + (chg.on ? 'Opaska się ładuje (' + l + '%).' : 'Niski poziom baterii opaski: ' + l + '%. Naładuj ją przed nocą – pomiar może się urwać.') + '</span><button class="bn-ok" data-act="bannerOk" aria-label="Zamknij ostrzeżenie o baterii">OK</button>';
-      b.style.color = chg.on ? '#CFFFF0' : '#FFD6DA';
+      b.hidden = false; b.className = 'banner js-banner' + (chg.on ? ' chg' : (stuck ? ' unc' : ''));
+      var bc = chg.on ? '#2CE8B5' : (stuck ? '#F2A93B' : '#FF4D5E');
+      var txt = chg.on ? 'Opaska się ładuje (' + l + '%).' : (stuck ? 'Opaska pokazuje ' + l + '%, ale odczyt jest niepewny – nie zmienia się od ' + BC.fmtDur(Math.max(v.connectedMs, v.sinceMs || 0)) + '.' : 'Niski poziom baterii opaski: ' + l + '%. Naładuj ją przed nocą – pomiar może się urwać.');
+      b.innerHTML = (chg.on ? ico('bolt', 20, true) : battIcon(l, bc)) + '<span>' + txt + '</span>' + (stuck ? '<a class="bn-link" href="#/bateria">Sprawdź</a>' : '') + '<button class="bn-ok" data-act="bannerOk" aria-label="Zamknij ostrzeżenie o baterii">OK</button>';
+      b.style.color = chg.on ? '#CFFFF0' : (stuck ? '#FFE2B8' : '#FFD6DA');
     } else b.hidden = true;
   });
 }
@@ -2992,7 +3448,7 @@ function nightCardHtml() {
     h += '<p class="sm sub" style="margin:0">Przed snem załóż WHOOP z włączonym „HR Broadcast” (aplikacja WHOOP, ustawienia urządzenia). Telefon zostaw w pobliżu łóżka.</p>' +
       '<label class="xs sub">Pobudka (kończy pomiar)<input class="inp num" type="time" id="nightWake" data-in="nightWake" data-keep="1" value="' + esc(nightWake()) + '" aria-label="Godzina pobudki"></label>';
     if (N.io === false) h += '<div class="note">Aby pomiar nie został przerwany w nocy, pozwól Formie działać w tle (wyłącz oszczędzanie baterii dla tej aplikacji).</div><button class="btn full" data-act="nightIo">Pozwól działać w tle</button>';
-    if (S.connected && S.battery != null && S.battery < 30) h += '<div class="note err">Bateria opaski: ' + S.battery + '%. Naładuj ją przed snem – może nie wystarczyć do rana.</div>';
+    if (S.connected && S.battery != null && S.battery < 30) h += battStuck() ? '<a class="note" href="#/bateria" style="display:block">Opaska podaje ' + S.battery + '%, ale odczyt jest niepewny (nie zmienia się od wielu godzin). Sprawdź baterię →</a>' : '<div class="note err">Bateria opaski: ' + S.battery + '%. Naładuj ją przed snem – może nie wystarczyć do rana.</div>';
     if (!canStart) h += '<p class="xs mut" style="margin:0">Najpierw połącz opaskę (przycisk „Połącz z opaską”).</p>';
     if (N.err) h += '<p class="err">' + esc(N.err) + '</p>';
     h += '<button class="btn pri full" data-act="nightStart"' + (canStart ? '' : ' disabled') + '>Start nocy</button>';
@@ -3345,9 +3801,194 @@ UI.onMeasureDone = function () { S.form = null; var top = stack[stack.length - 1
 UI.onMeasureCancel = function () { var top = stack[stack.length - 1]; if (top && top.path === 'pomiar') { paint(top.el, 'pomiar'); top.el.classList.add('noanim'); } };
 UI.onMeasureTick = function () { };
 UI.onBattery = function () { renderBattery(); var top = stack[stack.length - 1]; if (top && top.path === 'pomiar' && !S.measure) rerender(); };
-UI.onConn = function () { var top = stack[stack.length - 1]; if (top && /^(dzis|pomiar|profil|diagnostyka)$/.test(top.path)) rerender(); };
+UI.onConn = function () { var top = stack[stack.length - 1]; if (top && /^(dzis|pomiar|profil|diagnostyka|bateria)$/.test(top.path)) rerender(); };
 UI.onData = function () { rerender(); };
 UI.onWhoop = function () { var top = stack[stack.length - 1]; if (top && top.path === 'profil') rerender(); };
+
+/* ===== Forma 0.2 - UI: "Bateria opaski" (#/bateria): verdict, charts, charging test, technical details, FAQ ===== */
+var ACT_BAT = {};
+function detOpen(key, def) { return S.det && S.det[key] != null ? S.det[key] : !!def; }
+$('stack').addEventListener('toggle', function (e) { var d = e.target; if (d && d.dataset && d.dataset.openKey) S.det[d.dataset.openKey] = d.open; }, true);
+function setHtml(node, html) { if (node && node.__h !== html) { node.__h = html; node.innerHTML = html; } }
+
+var BAT_META = {
+  charging: { cls: 'tint-g', col: '#2CE8B5', tag: 'Ładowanie' },
+  draining: { cls: '', col: '#2D9CFF', tag: 'Rozładowuje się' },
+  stuck: { cls: 'tint-a', col: '#F2A93B', tag: 'Odczyt niepewny' },
+  low_real: { cls: 'tint-r', col: '#FF4D5E', tag: 'Niski poziom' },
+  unknown: { cls: '', col: '#9AA6B0', tag: 'Za mało danych' }
+};
+var CONF_PL = { low: 'niska', medium: 'średnia', high: 'wysoka' };
+function p2b(n) { return ('0' + n).slice(-2); }
+function clockMs(ms) { var s = Math.max(0, Math.ceil(ms / 1000)); return p2b(Math.floor(s / 60)) + ':' + p2b(s % 60); }
+function hms(t) { var d = new Date(t); return p2b(d.getHours()) + ':' + p2b(d.getMinutes()) + ':' + p2b(d.getSeconds()); }
+
+// ---------- SVG line chart of battery level vs time ----------
+function battChart(pts, o) {
+  var W = 340, Hh = o.h || 150, pl = 38, pr = 8, pt = 8, pb = 20, pw = W - pl - pr, ph = Hh - pt - pb, t0 = o.from, t1 = o.to;
+  pts = pts.filter(function (p) { return p.t >= t0 && p.t <= t1; });
+  var ymin = o.ymin, ymax = o.ymax;
+  if (ymin == null) { ymin = 0; ymax = 100; }
+  function X(t) { return pl + (t - t0) / (t1 - t0) * pw; }
+  function Y(v) { return pt + (1 - (v - ymin) / (ymax - ymin)) * ph; }
+  if (pts.length > 400) { // thin out long ranges: first point per bucket + the newest
+    var bk = (t1 - t0) / 360, seen = {}, th = []; pts.forEach(function (p) { var b = Math.floor((p.t - t0) / bk); if (!seen[b]) { seen[b] = 1; th.push(p); } });
+    if (th[th.length - 1] !== pts[pts.length - 1]) th.push(pts[pts.length - 1]); pts = th;
+  }
+  var g = '';
+  (o.yticks || [0, 25, 50, 75, 100]).forEach(function (v) { g += '<line x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(v).toFixed(1) + '" y2="' + Y(v).toFixed(1) + '" stroke="rgba(255,255,255,.10)"/><text x="' + (pl - 5) + '" y="' + (Y(v) + 4).toFixed(1) + '" text-anchor="end" fill="#9AA6B0" font-size="11">' + v + '%</text>'; });
+  (o.xticks || []).forEach(function (k, i, a) { var x = X(k.t); g += '<text x="' + x.toFixed(1) + '" y="' + (Hh - 5) + '" text-anchor="' + (i === 0 && x < pl + 14 ? 'start' : (i === a.length - 1 && x > W - pr - 14 ? 'end' : 'middle')) + '" fill="#9AA6B0" font-size="11">' + esc(k.label) + '</text>'; });
+  var path = '', gaps = '', prev = null;
+  pts.forEach(function (p) {
+    if (prev && p.t - prev.t <= BC.GAP_MS) path += 'H' + X(p.t).toFixed(1) + 'V' + Y(p.level).toFixed(1);
+    else {
+      if (prev) gaps += '<rect x="' + X(prev.t).toFixed(1) + '" y="' + pt + '" width="' + Math.max(1, X(p.t) - X(prev.t)).toFixed(1) + '" height="' + ph + '" fill="rgba(255,255,255,.05)"/>';
+      path += 'M' + X(p.t).toFixed(1) + ' ' + Y(p.level).toFixed(1);
+    }
+    prev = p;
+  });
+  var lastP = pts.length ? pts[pts.length - 1] : null, endT = Math.min(o.now || t1, t1);
+  if (lastP && endT - lastP.t <= BC.GAP_MS && endT > lastP.t) path += 'H' + X(endT).toFixed(1);
+  var label = o.label + (pts.length ? ': ' + pts.length + ' odczytów, ostatni ' + lastP.level + '%' : ': brak odczytów');
+  var h = '<svg viewBox="0 0 ' + W + ' ' + Hh + '" width="100%" role="img" aria-label="' + esc(label) + '" style="display:block;height:auto">' + g + gaps;
+  if (pts.length) h += '<path d="' + path + '" fill="none" stroke="' + (o.color || '#2D9CFF') + '" stroke-width="2" stroke-linejoin="round"/><circle cx="' + X(lastP.t).toFixed(1) + '" cy="' + Y(lastP.level).toFixed(1) + '" r="3.5" fill="' + (o.color || '#2D9CFF') + '"/>';
+  else h += '<text x="' + (pl + pw / 2) + '" y="' + (pt + ph / 2 + 4) + '" text-anchor="middle" fill="#9AA6B0" font-size="13">Brak odczytów w tym okresie</text>';
+  return h + '</svg>';
+}
+function chartRange(range) {
+  var now = bNow(), span = range === '7d' ? 7 * 86400000 : 86400000, t0 = now - span, ticks = [], d, k;
+  if (range === '7d') { d = new Date(now); d.setHours(0, 0, 0, 0); for (k = 0; k < 8; k++) { var tt = d.getTime() - k * 86400000; if (tt >= t0) ticks.unshift({ t: tt, label: p2b(new Date(tt).getDate()) + '.' + p2b(new Date(tt).getMonth() + 1) }); } }
+  else { d = new Date(now); d.setMinutes(0, 0, 0); d.setHours(d.getHours() - d.getHours() % 6); for (k = 0; k < 5; k++) { var t6 = d.getTime() - k * 6 * 3600000; if (t6 >= t0) ticks.unshift({ t: t6, label: p2b(new Date(t6).getHours()) + ':00' }); } }
+  var pts = BC.readings(S.battLog).map(function (r) { return { t: r.t, level: r.level }; });
+  return battChart(pts, { from: t0, to: now, now: now, xticks: ticks, label: 'Poziom baterii, ostatnie ' + (range === '7d' ? '7 dni' : '24 godziny') });
+}
+function testChart(T) {
+  var ev = T.ev || { points: [] }, pts = (ev.points || []).filter(function (p) { return p.t >= T.t0 - 60000; }), lv = pts.map(function (p) { return p.level; });
+  var lo = lv.length ? Math.min.apply(null, lv) : (S.battery || 0), hi = lv.length ? Math.max.apply(null, lv) : (S.battery || 0);
+  var ymin = Math.max(0, lo - 1), ymax = Math.min(100, Math.max(hi + 1, ymin + 3)), ticks = [], yt = [];
+  for (var v = ymin; v <= ymax; v++) yt.push(v);
+  if (yt.length > 6) { var st = Math.ceil(yt.length / 5); yt = yt.filter(function (x, i) { return i % st === 0; }); }
+  for (var m = 0; m <= 20; m += 5) ticks.push({ t: T.t0 + m * 60000 * (T.durMs / BC.TEST_MS), label: m === 0 ? '0' : m + ' min' });
+  return battChart(pts, { from: T.t0 - 60000, to: T.t0 + T.durMs, now: Math.min(bNow(), T.t0 + T.durMs), xticks: ticks, ymin: ymin, ymax: ymax, yticks: yt, h: 140, color: '#2CE8B5', label: 'Poziom baterii podczas testu ładowania' });
+}
+
+// ---------- cards ----------
+function batSinceHtml(v) {
+  if (v.level == null) return '';
+  var rs = BC.readings(S.battLog);
+  if (v.lastChange != null) return 'Ostatnia zmiana wartości: <b data-bat="since">' + esc(BC.fmtWhen(v.lastChange, bNow())) + '</b> <span class="mut">(' + esc(BC.fmtDur(v.sinceMs)) + ' temu)</span>';
+  return 'Wartość się nie zmieniła od początku zapisanego logu: <b data-bat="since">' + esc(BC.fmtWhen(rs[0].t, bNow())) + '</b> <span class="mut">(' + esc(BC.fmtDur(v.sinceMs)) + ')</span>';
+}
+function batVerdictHtml() {
+  var v = battVerdict(), m = BAT_META[v.state], l = v.level, rs = BC.readings(S.battLog), last = rs.length ? rs[rs.length - 1] : null;
+  var h = '<div class="card ' + m.cls + '" data-bat="verdict" data-state="' + v.state + '" role="status">';
+  h += '<div class="row sp"><span class="n" style="font-size:44px;line-height:1;color:' + m.col + '" data-bat="level">' + (l != null ? l + '%' + (v.state === 'stuck' ? ' ?' : '') : '—') + '</span><span class="xs" style="border:1px solid ' + m.col + ';color:' + m.col + ';border-radius:999px;padding:4px 10px;font-weight:600;white-space:nowrap" data-bat="tag">' + m.tag + '</span></div>';
+  h += '<div class="n" style="font-size:22px;line-height:1.2;color:#fff" data-bat="title">' + esc(v.title) + '</div>';
+  h += '<p class="sm sub" style="margin:0;line-height:1.5" data-bat="explanation">' + esc(v.explanation) + '</p>';
+  var meta = [];
+  if (l != null) meta.push('<div class="sm sub" data-bat="since-line">' + batSinceHtml(v) + '</div>');
+  if (v.ratePerHour != null) meta.push('<div class="sm sub" data-bat="rate">Tempo spadku: <b>' + esc(String(Math.round(v.ratePerHour * 10) / 10).replace('.', ',')) + ' pkt/h</b>' + (v.etaToEmptyH != null ? ' · do 0% zostało ok. <b>' + esc(BC.fmtDur(v.etaToEmptyH * 3600000)) + '</b>' : '') + '</div>');
+  if (last) meta.push('<div class="xs mut">Odczytów w logu: ' + rs.length + ' · ostatni: ' + esc(BC.fmtWhen(last.t, bNow())) + (S.connected ? '' : ' · opaska niepołączona, oceniam z zapisanego logu') + '</div>');
+  if (v.state !== 'unknown' && l != null) meta.push('<div class="xs mut" data-bat="confidence">Pewność oceny: ' + CONF_PL[v.confidence] + (v.confidence !== 'high' ? ' – to wskazówka, nie pewnik.' : '.') + '</div>');
+  if (meta.length) h += '<div class="col" style="gap:6px;border-top:1px solid rgba(255,255,255,.1);padding-top:10px">' + meta.join('') + '</div>';
+  return h + '</div>';
+}
+function batChartCardHtml() {
+  var r = S.bcRange;
+  return '<div class="card" data-bat="chart-card"><div class="row sp"><p class="lbl">Poziom w czasie</p><span class="chips" role="radiogroup" aria-label="Zakres wykresu">' +
+    [['24h', '24 godz.'], ['7d', '7 dni']].map(function (x) { return '<button class="chip s' + (r === x[0] ? ' on' : '') + '" data-act="bcRange" data-v="' + x[0] + '" role="radio" aria-checked="' + (r === x[0]) + '">' + x[1] + '</button>'; }).join('') +
+    '</span></div><div data-bat="chart" data-range="' + r + '">' + chartRange(r) + '</div><p class="xs mut" style="margin:0">Przerwy w połączeniu są zaciemnione. Linia ciągła przez wiele godzin przy tej samej wartości to właśnie objaw „zablokowanego” odczytu.</p></div>';
+}
+var TEST_INSTR = 'Załóż na opaskę baterię WHOOP (battery pack) albo podłącz ładowanie i nie rozłączaj Formy.';
+function batTestDynamic(T) { // the part that changes every second while a test runs
+  var ev = T.ev || { remainingMs: T.durMs, elapsedMs: 0, text: 'Test trwa. Nie rozłączaj Formy.', points: [] };
+  var frac = Math.min(1, (ev.elapsedMs || 0) / T.durMs);
+  return '<div class="row sp"><span class="n" style="font-size:34px;line-height:1" data-bat="countdown">' + clockMs(ev.remainingMs != null ? ev.remainingMs : T.durMs) + '</span><span class="n" style="font-size:22px" data-bat="test-level">' + (S.battery != null ? S.battery + '%' : '—') + '</span></div>' +
+    '<div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(frac * 100) + '" aria-label="Postęp testu"><i style="width:' + (frac * 100).toFixed(1) + '%;background:#2CE8B5"></i></div>' +
+    '<div data-bat="test-chart">' + testChart(T) + '</div><p class="sm sub" style="margin:0" role="status" data-bat="test-live">' + esc(ev.text || '') + '</p>';
+}
+function batTestHtml() {
+  var T = S.battTest, h = '<div class="card" data-bat="test" data-test-state="' + (!T ? 'idle' : (T.done ? 'done' : 'running')) + '"><p class="lbl">Test ładowania</p>';
+  if (T && !T.done) {
+    return h + '<p class="sm sub" style="margin:0">' + TEST_INSTR + '</p><div class="col" style="gap:10px" data-bat="test-dyn">' + batTestDynamic(T) + '</div><button class="btn full" data-act="battTestCancel">Przerwij test</button></div>';
+  }
+  if (T && T.done && T.ev) {
+    var st = T.ev.status, tone = { rose: 'ok', flat: '', fell: '', broken: 'err' }[st] || '';
+    h += '<div class="note ' + tone + '" role="status" data-bat="test-result" data-result="' + st + '"><b style="font-size:15px;color:#fff;display:block;margin-bottom:4px">' + esc(T.ev.text) + '</b>' + (T.ev.hint ? '<span class="xs" style="opacity:.9">' + esc(T.ev.hint) + '</span>' : '') + '</div>' +
+      '<p class="xs mut" style="margin:0">Test z ' + esc(BC.fmtWhen(T.endedAt || T.t0, bNow())) + ' zapisany w logu baterii.</p>' +
+      '<button class="btn pri full" data-act="battTestStart"' + (S.connected ? '' : ' disabled') + '>Powtórz test (20 min)</button>' + (S.connected ? '' : '<p class="xs mut" style="margin:0">Połącz opaskę, żeby powtórzyć test.</p>');
+    return h + '</div>';
+  }
+  var tl = BC.tests(S.battLog), lt = tl.length ? tl[tl.length - 1] : null;
+  h += '<p class="sm sub" style="margin:0">Sprawdza, czy odczyt baterii w ogóle reaguje na ładowanie. Trwa 20 minut. ' + TEST_INSTR + '</p>' +
+    (S.battTestErr ? '<p class="err" role="alert" data-bat="test-err">' + esc(S.battTestErr) + '</p>' : '') +
+    (lt ? '<p class="xs mut" style="margin:0" data-bat="last-test">Ostatni test (' + esc(BC.fmtWhen(lt.t, bNow())) + '): ' + { rose: 'poziom wzrósł z ' + lt.from + '% do ' + lt.to + '%', flat: 'poziom bez zmian', fell: 'poziom spadł', broken: 'przerwany (połączenie zerwane)' }[lt.result] + '.</p>' : '') +
+    '<button class="btn pri full" data-act="battTestStart"' + (S.connected ? '' : ' disabled') + '>Rozpocznij test (20 min)</button>' + (S.connected ? '' : '<p class="xs mut" style="margin:0">Najpierw połącz opaskę – test wymaga stałego połączenia.</p>');
+  return h + '</div>';
+}
+function kv(k, v, attr) { return '<div class="row sp" style="align-items:flex-start;gap:12px"><span class="xs mut" style="flex:none">' + k + '</span><span class="xs" style="text-align:right;overflow-wrap:anywhere;color:#E9EEF2"' + (attr ? ' data-bat="' + attr + '"' : '') + '>' + v + '</span></div>'; }
+function batTechHtml() {
+  var d = S.battDiag, rs = BC.readings(S.battLog), last = rs.length ? rs[rs.length - 1] : null, h = '';
+  var src = DEMO ? 'Demo (symulacja)' : (NATIVE ? 'Android (natywny Bluetooth)' : 'Web Bluetooth');
+  h += kv('Urządzenie', esc(S.connected ? S.name : (S.lastDeviceName || '—')) + (S.connected ? '' : ' (niepołączone)')) + kv('Źródło', src);
+  h += kv('0x2A19 Battery Level', d ? (d.present ? 'właściwości: ' + esc(d.props.length ? d.props.join(', ') : '—') : 'niedostępne') : 'nie sprawdzono – połącz opaskę', 'diag-props');
+  h += kv('Deskryptor 0x2904 (Presentation Format)', d ? esc(cpfText(d.cpf)) : 'nie sprawdzono', 'diag-cpf');
+  h += kv('0x2BED Battery Level Status', d ? (d.has2BED ? 'jest' : 'brak') : '—', 'diag-2bed') + kv('0x2A1A Battery Power State', d ? (d.has2A1A ? 'jest' : 'brak') : '—', 'diag-2a1a');
+  h += kv('Flaga ładowania z opaski', S.chgSignal == null ? 'brak sygnału' : (S.chgSignal ? 'ładuje się' : 'nie ładuje się'));
+  h += kv('Odczytów w logu', String(rs.length)) + kv('Ostatni odczyt', last ? esc(hms(last.t) + ' · ' + last.level + '% · ' + (last.via === 'notify' ? 'powiadomienie' : 'odczyt')) : '—');
+  h += '<div class="col" style="gap:4px;margin-top:4px"><span class="xs mut">' + (d && d.via === 'android' ? 'Pełna lista usług i charakterystyk (Android)' : 'Usługi widoczne dla przeglądarki') + '</span>';
+  var st = servicesText(d);
+  h += '<pre class="mono" data-bat="gatt">' + (st ? esc(st) : 'Brak danych – lista pojawi się po połączeniu z opaską.') + '</pre>';
+  if (d && d.via === 'web') h += '<span class="xs mut">Web Bluetooth widzi tylko usługi, o które prosi Forma (tętno, bateria, PMD i usługa WHOOP). Pełną listę pokazuje aplikacja na Androida.</span>';
+  h += '</div>';
+  var recent = rs.slice(-8).reverse();
+  if (recent.length) h += '<div class="col" style="gap:4px"><span class="xs mut">Ostatnie odczyty</span><pre class="mono" data-bat="recent">' + esc(recent.map(function (r) { return hms(r.t) + '  ' + ('   ' + r.level).slice(-3) + '%  ' + (r.via === 'notify' ? 'powiadomienie' : 'odczyt'); }).join('\n')) + '</pre></div>';
+  h += '<button class="btn sm danger" style="align-self:flex-start" data-act="battClear" data-confirm="Wyczyść">Wyczyść log baterii</button>';
+  return h;
+}
+function batFaqHtml() {
+  function q(key, title, body) { return '<details class="faq" data-open-key="' + key + '"' + (detOpen(key) ? ' open' : '') + '><summary><span class="grow">' + title + '</span><span class="wchev">' + ico('chev', 18) + '</span></summary><div class="sm sub col" style="gap:8px;padding:2px 0 10px;line-height:1.5">' + body + '</div></details>'; }
+  return '<div class="card" data-bat="faq"><p class="lbl">Najczęstsze pytania</p>' +
+    q('faq1', 'Dlaczego odczyt może być zablokowany?', '<p style="margin:0">W trybie nadawania tętna (HR Broadcast) WHOOP wystawia tylko dwie standardowe usługi Bluetooth: tętno (0x180D) i baterię (0x180F). Możliwe, że w tym trybie poziom baterii jest odświeżany rzadko albo wcale, więc widać starą wartość.</p><p style="margin:0">To hipoteza, nie potwierdzona informacja od WHOOP. Dlatego Forma nie rozstrzyga tego sama, tylko pokazuje, czy wartość się zmienia, i proponuje test ładowania.</p>') +
+    q('faq2', 'Czy 10% znaczy, że opaska zaraz padnie?', '<p style="margin:0">Niekoniecznie. Jeśli opaska bez przerwy wysyła tętno od wielu godzin, a odczyt stoi w miejscu, sama liczba nic nie dowodzi. Prawdziwie rozładowana bateria prędzej czy później przerwie transmisję. Jeśli opaska przestanie nadawać, naładuj ją.</p>') +
+    q('faq3', 'Jak naładować WHOOP 4.0 (battery pack)?', '<ol style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px"><li>Weź baterię WHOOP (Battery Pack) i upewnij się, że sama jest naładowana (ładuje się przez USB-C).</li><li>Wsuń ją na czujnik opaski, nie zdejmując opaski z paska, tak by styki przylegały. Szczegóły i znaczenie diody znajdziesz w instrukcji WHOOP.</li><li>Po kilkunastu minutach powinien pojawić się wzrost poziomu. Uruchom wtedy test ładowania powyżej i zostaw Formę połączoną.</li></ol>') +
+    q('faq4', 'A jeśli nie mam baterii WHOOP?', '<p style="margin:0">Bez baterii nie da się sprawdzić ładowania. Możesz obserwować, czy poziom w ogóle spada (log i wykres powyżej). Opaska rozładowana naprawdę przestanie nadawać tętno.</p>') +
+    q('faq5', 'Inne urządzenia: Polar', '<p style="margin:0">Forma działa też z urządzeniami Polar. Pas Polar H10 (daje najdokładniejsze odstępy RR do HRV) i opaski Polar Verity Sense / OH1 zwykle podają poziom baterii normalnie przez ten sam standardowy kanał, więc nie ma wątpliwości, ile zostało.</p>') +
+    '</div>';
+}
+function rBateria() {
+  var h = header('Bateria opaski', { back: 'profil' }) + '<div class="body" data-bat="screen">';
+  h += '<div data-bat="verdict-wrap" class="col" style="gap:0"></div>';
+  h += '<div data-bat="chart-wrap" class="col" style="gap:0"></div>';
+  h += '<div data-bat="test-wrap" class="col" style="gap:0">' + batTestHtml() + '</div>';
+  h += '<details class="card tech" data-bat="tech" data-open-key="tech"' + (detOpen('tech') ? ' open' : '') + '><summary><span class="lbl grow">Szczegóły techniczne</span><span class="wchev">' + ico('chev', 18) + '</span></summary><div class="col" style="gap:8px;padding-top:4px" data-bat="tech-body">' + batTechHtml() + '</div></details>';
+  h += batFaqHtml();
+  return h + '</div>';
+}
+function batFill(el) {
+  setHtml(el.querySelector('[data-bat="verdict-wrap"]'), batVerdictHtml());
+  setHtml(el.querySelector('[data-bat="chart-wrap"]'), batChartCardHtml());
+}
+var batTickAt = 0;
+function batTick(el) {
+  var n = Date.now(); if (n - batTickAt < 1000) return; batTickAt = n;
+  batFill(el);
+  var T = S.battTest, dyn = el.querySelector('[data-bat="test-dyn"]');
+  if (T && !T.done && dyn) setHtml(dyn, batTestDynamic(T));
+  var tb = el.querySelector('[data-bat="tech-body"]'); if (tb && el.querySelector('details.tech[open]')) setHtml(tb, batTechHtml());
+}
+ROUTES.bateria = { tab: null, depth: 2, parent: 'profil', render: rBateria, mount: function (el) { renderBattery(); batFill(el); batTickAt = Date.now(); }, tick: batTick };
+UI.onBattTest = function () { var top = stack[stack.length - 1]; if (top && top.path === 'bateria') rerender(); renderBattery(); };
+
+// ---------- actions ----------
+ACT_BAT.battGo = function () { var t = stack[stack.length - 1]; if (t && t.path === 'bateria') return; go('bateria'); };
+ACT_BAT.bcRange = function (el) { S.bcRange = el.dataset.v === '7d' ? '7d' : '24h'; var t = stack[stack.length - 1]; if (t && t.path === 'bateria') { batTickAt = 0; var w = t.el.querySelector('[data-bat="chart-wrap"]'); if (w) { w.__h = null; } batFill(t.el); } };
+ACT_BAT.battTestStart = function () { battTestStart(); };
+ACT_BAT.battTestCancel = function () { battTestCancel(); };
+ACT_BAT.battClear = function () { battClearLog(); };
+document.addEventListener('keydown', function (e) {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.classList && e.target.classList.contains('js-batt')) { e.preventDefault(); ACT_BAT.battGo(); }
+});
 
 /* ===== Forma 0.2 - UI part B: Regeneracja, Sen, Trening, sesje, Forma, Trendy, Profil, Diagnostyka, events, init ===== */
 function weekdayShort(date) { return WD1[dowIdx(date)]; }
@@ -3770,6 +4411,17 @@ function whoopCardHtml() {
   return h + whoopCsvHtml() + '</div>';
 }
 
+function whoopOptHtml() {
+  var w = S.wh, def = !!(w.cfg.connected || w.err || w.csv.last || w.csv.result || w.csv.busy), open = detOpen('whopt', def);
+  return '<details class="wopt" data-whoop="opt" data-open-key="whopt"' + (open ? ' open' : '') + '><summary class="card"><span class="grow col" style="gap:3px"><b style="font-size:15px;line-height:1.3;color:#fff;font-family:var(--fn)">Opcjonalnie: konto WHOOP (wymaga abonamentu WHOOP)</b><span class="xs mut">Forma działa bez konta WHOOP – HRV liczymy sami z sygnału opaski.</span></span><span class="wchev">' + ico('chev', 18) + '</span></summary><div class="col" style="margin-top:10px">' + whoopCardHtml() + '</div></details>';
+}
+function profilBattHtml(ch) {
+  if (!(S.connected && S.battery != null)) return '';
+  var l = S.battery, stuck = !ch.on && battStuck(), col = stuck ? '#9AA6B0' : battColor(l);
+  return '<a href="#/bateria" class="row" data-bat="profil-batt" style="margin-top:6px;min-height:44px;color:inherit"><div class="bar grow"><i style="width:' + l + '%;background:' + col + (stuck ? ';opacity:.55' : '') + '"></i></div><b style="color:' + col + ';font-size:18px">' + l + '%' + (stuck ? ' ?' : '') + '</b>' +
+    (stuck ? '<span class="xs mut">odczyt niepewny</span>' : '') + (ch.on ? '<span class="xs" style="color:#2CE8B5">⚡ Ładowanie</span>' : '') + '</a>' +
+    (ch.on ? '<div class="xs" style="color:#2CE8B5">' + (ch.src === 'status' ? 'ładowanie zgłoszone przez opaskę' : 'wykryte po wzroście poziomu') + '</div>' : '');
+}
 function rProfil() {
   var p = S.profile || {}, pc = profileCtx(), w = S.weights, hm = FC.hrMaxOf(p), last = S.days[S.days.length - 1];
   if (S.pfSex === undefined) S.pfSex = p.sex || null;
@@ -3786,17 +4438,18 @@ function rProfil() {
   h += '<div class="card"><p class="lbl">Waga</p><div class="row"><input class="inp num grow" id="pfKg" type="text" inputmode="decimal" data-keep="1" placeholder="np. 82,4" aria-label="Waga w kg"><button class="btn sm" data-act="kgAdd">Dodaj ważenie</button></div><p class="err" id="kgErr" hidden></p>' +
     (w.length ? '<div class="col" style="gap:0">' + w.slice(-6).reverse().map(function (x) { return '<div class="row sp sm" style="min-height:44px;border-top:1px solid rgba(255,255,255,.08)"><span class="sub">' + ddmm(x.date) + '.' + x.date.slice(0, 4) + '</span><span><b>' + nf(x.kg, 1) + ' kg</b></span><button class="btn sm" data-act="kgDel" data-d="' + x.date + '" data-confirm="Usuń">Usuń</button></div>'; }).join('') + '</div>' : '<p class="xs mut" style="margin:0">Brak ważeń. Historia wagi zapisuje się przy każdym dodaniu (jedno ważenie na dzień).</p>') + '</div>';
   h += '<div class="card"><p class="lbl">Źródła danych</p><div class="row" style="align-items:flex-start"><span class="dotp" style="background:' + (S.connected ? '#2EE86B' : '#8A96A0') + ';margin-top:7px"></span><div class="grow"><b>' + esc(S.connected ? S.name : (S.device ? S.device.name : 'Opaska')) + '</b><div class="xs mut">' + (S.connected ? 'połączony' : 'niepołączony') + (last ? ' · ostatni pomiar HRV: jakość ' + last.quality + ' (' + last.date + ')' : ' · brak pomiarów HRV') + '</div>' +
-    (S.connected && S.battery != null ? '<div class="row" style="margin-top:6px"><div class="bar grow"><i style="width:' + S.battery + '%;background:' + battColor(S.battery) + '"></i></div><b style="color:' + battColor(S.battery) + ';font-size:18px">' + S.battery + '%</b>' + (ch.on ? '<span class="xs" style="color:#2CE8B5">⚡ Ładowanie</span>' : '') + '</div>' + (ch.on ? '<div class="xs" style="color:#2CE8B5">' + (ch.src === 'status' ? 'ładowanie zgłoszone przez opaskę' : 'wykryte po wzroście poziomu') + '</div>' : '') : '') + '</div></div>' +
+    profilBattHtml(ch) + '</div></div>' +
     '<div class="js-conn">' + connHtml() + '</div>' + (S.connected && !DEMO ? '<button class="btn full" data-act="disconnect">Rozłącz</button>' : '') +
     '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:' + (S.wh.cfg.connected ? '#2EE86B' : '#6E7A84') + ';margin-top:7px;animation:none"></span><div class="grow"><b>WHOOP (chmura)</b><div class="xs mut">' + (S.wh.cfg.connected ? 'połączono · ostatnia synchronizacja ' + esc(whLastSyncText()) : 'konto WHOOP poniżej') + '</div></div></div>' +
     '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:#6E7A84;margin-top:7px;animation:none"></span><div class="grow"><b>Health Connect</b><div class="xs mut">kroki, waga · w przygotowaniu (wersja Android)</div></div></div>' +
     '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:#6E7A84;margin-top:7px;animation:none"></span><div class="grow"><b>intervals.icu</b><div class="xs mut">w przygotowaniu</div></div></div></div>';
-  h += whoopCardHtml();
+  h += '<a href="#/bateria" class="card" data-bat="profil-link"><div class="row sp"><div><p class="lbl">Bateria opaski</p><span class="xs mut" data-bat="profil-verdict">' + esc(battVerdict().title) + '</span></div>' + ico('chev', 20) + '</div></a>';
   h += '<div class="card"><p class="lbl">Asystent AI</p><div class="row sp"><span>Poranna notatka AI</span><span class="tgl" role="switch" aria-checked="false" aria-disabled="true" aria-label="Poranna notatka AI – wkrótce"><i></i></span></div><p class="xs mut" style="margin:0">Asystent AI – wkrótce. Dziś notatka dnia powstaje z szablonu, bez wysyłania danych gdziekolwiek.</p></div>';
   h += '<div class="card"><p class="lbl">Kopia zapasowa</p><p class="xs mut" style="margin:0">Eksport zawiera wszystko: pomiary poranne (z godzinami snu i danymi WHOOP), treningi, profil i wagi. Dane logowania WHOOP nigdy nie trafiają do kopii.</p><div class="row" style="flex-wrap:wrap"><button class="btn grow" data-act="expAll">Eksportuj kopię (JSON)</button><button class="btn grow" data-act="impAll">Wczytaj kopię (JSON)</button></div><input id="fileImport" type="file" accept=".json,application/json" hidden><p class="sm" id="bkMsg" role="status" hidden></p></div>';
   h += '<a href="#/pomiary" class="card"><div class="row sp"><div><p class="lbl">Pomiary poranne</p><span class="xs mut">' + S.days.length + ' zapisanych dni · usuwanie i edycja dzisiejszego zapisu</span></div>' + ico('chev', 20) + '</div></a>';
   h += '<a href="#/diagnostyka" class="card"><div class="row sp"><div><p class="lbl">Diagnostyka</p><span class="xs mut">Tętno na żywo, tachogram, surowe dane CSV, dziennik zdarzeń</span></div>' + ico('chev', 20) + '</div></a>';
   h += '<div class="card tint-r"><p class="lbl">Usuń wszystkie dane</p><p class="xs" style="margin:0;color:#FFD6DA">Kasuje pomiary, treningi, profil i wagi z tej przeglądarki. Tego nie da się cofnąć – najpierw zrób kopię. Aby potwierdzić, wpisz słowo USUŃ.</p><input class="inp" id="wipeWord" type="text" autocomplete="off" data-in="wipe" data-keep="1" placeholder="USUŃ" aria-label="Wpisz USUŃ, aby potwierdzić"><button class="btn danger full" id="wipeBtn" data-act="wipe" disabled>Usuń wszystkie dane</button></div>';
+  h += whoopOptHtml();
   h += '<p class="xs mut" style="text-align:center;margin:0">Forma 0.2 · Narzędzie testowe. Nie jest wyrobem medycznym. Dane zapisują się tylko w tej przeglądarce.</p></div>';
   return h;
 }
@@ -3808,6 +4461,7 @@ function rDiag() {
   h += '<div class="card"><p class="lbl">Sterowanie</p><div class="js-conn">' + connHtml() + '</div><div class="row" style="flex-wrap:wrap">' + (S.connected && !DEMO ? '<button class="btn grow" data-act="disconnect">Rozłącz</button>' : '') + '<button class="btn grow" data-act="csv"' + (S.beats.length ? '' : ' disabled') + '>Pobierz dane (CSV)</button></div><p class="note" id="dgContact" hidden>brak kontaktu ze skórą</p></div>';
   h += '<div class="g2">' + [['Tętno', 'vHr', 'bpm'], ['RMSSD (ostatnie 60 s)', 'vRmssd', 'ms'], ['ln RMSSD', 'vLn', ''], ['Jakość', 'vQ', ''], ['Zakłócenia', 'vArt', '%'], ['Liczba uderzeń', 'vN', '']].map(function (x) { return '<div class="stat"><div class="k">' + x[0] + '</div><div class="v n"><span id="' + x[1] + '">—</span> <span class="xs sub">' + x[2] + '</span></div></div>'; }).join('') + '</div>';
   h += '<div class="card"><p class="lbl">Odstępy między uderzeniami – ostatnie 120 s</p><canvas id="chart" role="img" aria-label="Tachogram"></canvas><div class="row xs mut" style="gap:12px"><span style="color:#2D9CFF">● zaakceptowane</span><span style="color:#FF4D5E">● odrzucone</span></div></div>';
+  h += '<a href="#/bateria" class="card" data-bat="diag-link"><div class="row sp"><div><p class="lbl">Bateria opaski</p><span class="xs mut">Weryfikacja odczytu, test ładowania, log i szczegóły techniczne</span></div>' + ico('chev', 20) + '</div></a>';
   h += '<div class="card"><p class="lbl">Dziennik zdarzeń</p><div id="log"></div></div></div>';
   return h;
 }
@@ -3862,7 +4516,7 @@ function addWeight(kgRaw) {
 }
 function showMsg(id, text, cls) { var e = $(id); if (!e) return; e.textContent = text; e.hidden = !text; e.className = 'sm ' + (cls === 'err' ? 'err' : 'sub'); if (cls === 'ok') e.style.color = '#2CE8B5'; }
 var ACT = {
-  bannerOk: function () { S.bannerOff = chargingState().on ? 'chg' : 'low'; renderBattery(); },
+  bannerOk: function () { S.bannerOff = chargingState().on ? 'chg' : (battStuck() ? 'unc' : 'low'); renderBattery(); },
   back: function (el) { if (stack.length > 1) history.back(); else go(el.dataset.parent || 'dzis', { replace: true }); },
   close: function (el) {
     var t = pageTop();
@@ -3981,7 +4635,7 @@ document.addEventListener('click', function (e) {
     delete el.dataset.armed;
   }
   buzz(10);
-  var fn = ACT[el.dataset.act]; if (fn) fn(el, e);
+  var fn = ACT[el.dataset.act] || ACT_BAT[el.dataset.act]; if (fn) fn(el, e);
 });
 $('stack').addEventListener('input', function (e) {
   var el = e.target, k = el.dataset && el.dataset.in; if (!k) return;
@@ -4023,7 +4677,7 @@ setInterval(function () {
   var t = pageTop(); if (t && ROUTES[t.path].tick) ROUTES[t.path].tick(t.el);
 }, 250);
 setInterval(renderBattery, 3000);
-storageProbe(); loadAll(); whoopInit();
+storageProbe(); loadAll(); loadBattery(); whoopInit();
 log('Gotowe. Forma 0.2.');
 if (DEMO) startDemo();
 else if (window.top !== window.self) { showError(IFRAME_MSG); }

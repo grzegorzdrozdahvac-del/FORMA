@@ -100,9 +100,27 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
             emit(o)
         }
 
-        override fun onBattery(level: Int) {
+        override fun onBatteryEntry(level: Int, via: String, t: Long) {
             val o = ev("battery")
             o.put("level", level)
+            o.put("via", via)
+            o.put("t", t)
+            emit(o)
+        }
+
+        override fun onCharging(charging: Boolean) {
+            val o = ev("charging")
+            o.put("charging", charging)
+            emit(o)
+        }
+
+        override fun onGattInfo(json: String) {
+            val o = ev("gattInfo")
+            try {
+                o.put("info", JSONObject(json))
+            } catch (e: Exception) {
+                return
+            }
             emit(o)
         }
 
@@ -202,10 +220,25 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
         o.put("state", BleManager.state)
         o.put("name", BleManager.deviceName ?: JSONObject.NULL)
         o.put("battery", BleManager.batteryLevel ?: JSONObject.NULL)
+        o.put("charging", BleManager.chargingFlag ?: JSONObject.NULL)
         o.put("lastDeviceName", Prefs.lastDeviceName(ctx) ?: JSONObject.NULL)
         o.put("lastDeviceId", Prefs.lastDeviceId(ctx) ?: JSONObject.NULL)
         return o.toString()
     }
+
+    /** Persistent native battery log [{t, level, via, device, connected:true}], includes readings taken by the night service. */
+    @JavascriptInterface
+    fun getBatteryLog(): String = BatteryLog.toJson(ctx).toString()
+
+    @JavascriptInterface
+    fun clearBatteryLog(): String {
+        BatteryLog.clear(ctx)
+        return ok()
+    }
+
+    /** Last GATT diagnostics (all services / characteristics with properties, battery details) or the string "null". */
+    @JavascriptInterface
+    fun getGattInfo(): String = BleManager.gattInfoJson ?: "null"
 
     @JavascriptInterface
     fun startNight(wakeHHmm: String): String {
