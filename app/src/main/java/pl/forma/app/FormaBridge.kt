@@ -13,6 +13,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * window.FormaNative. Every method returns a JSON string. Events go to JS through
@@ -285,5 +286,101 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
             }
         }
         return ok()
+    }
+
+    // ---------- WHOOP Developer API (all network work happens in WhoopClient, on background threads) ----------
+    private val whoopSyncing = AtomicBoolean(false)
+    private var whoopStatusServed = false
+
+    private fun errCode(code: String, msg: String): String {
+        val o = JSONObject()
+        o.put("ok", false)
+        o.put("code", code)
+        o.put("error", msg)
+        return o.toString()
+    }
+
+    /** Stores Client ID / secret in SharedPreferences. Two empty strings remove everything (credentials and tokens). */
+    @JavascriptInterface
+    fun whoopSetCredentials(id: String, secret: String): String {
+        return try {
+            WhoopClient.setCredentials(ctx, id, secret)
+            ok()
+        } catch (e: Exception) {
+            err(e.message ?: "Nie można zapisać danych logowania.")
+        }
+    }
+
+    /** Opens the WHOOP authorization page in the browser; the redirect comes back as pl.forma.app://whoop-callback. */
+    @JavascriptInterface
+    fun whoopAuthorize(): String {
+        val url: String = try {
+            WhoopClient.beginAuthorize(ctx)
+        } catch (e: WhoopException) {
+            return errCode(e.code, e.message ?: "")
+        } catch (e: Exception) {
+            return errCode("config", e.message ?: "")
+        }
+        activity.runOnUiThread {
+            try {
+                val i = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                i.addCategory(Intent.CATEGORY_BROWSABLE)
+                activity.startActivity(i)
+            } catch (e: Exception) {
+                val o = ev("whoopAuth")
+                o.put("ok", false)
+                o.put("code", "app")
+                o.put("message", "Nie znaleziono przeglądarki do logowania WHOOP.")
+                emit(o)
+            }
+        }
+        return ok()
+    }
+
+    /** {configured, connected, clientId, authResult?}. Never contains the secret or tokens. */
+    @JavascriptInterface
+    fun whoopStatus(): String {
+        val withAuth = !whoopStatusServed
+        whoopStatusServed = true
+        return WhoopClient.status(ctx, withAuth).toString()
+    }
+
+    /** Result arrives as the event {type:"whoopSync", ok, data:{recovery,sleep,workout,cycle}} or {ok:false, code, message}. */
+    @JavascriptInterface
+    fun whoopSync(sinceIso: String): String {
+        if (!WhoopClient.isConnected(ctx)) return errCode("auth", "Konto WHOOP nie jest połączone.")
+        if (!whoopSyncing.compareAndSet(false, true)) return ok()
+        val since = if (sinceIso.isBlank()) java.time.Instant.now().minusSeconds(30L * 86400L).toString() else sinceIso
+        Thread {
+            val o = ev("whoopSync")
+            try {
+                val data = WhoopClient.sync(ctx, since)
+                o.put("ok", true)
+                o.put("data", data)
+            } catch (e: WhoopException) {
+                o.put("ok", false)
+                o.put("code", e.code)
+                o.put("status", e.status)
+                o.put("message", e.message ?: "")
+            } catch (e: Exception) {
+                o.put("ok", false)
+                o.put("code", "http")
+                o.put("message", e.message ?: "")
+            }
+            whoopSyncing.set(false)
+            emit(o)
+        }.start()
+        return ok()
+    }
+
+    @JavascriptInterface
+    fun whoopDisconnect(): String {
+        WhoopClient.disconnect(ctx)
+        return ok()
+    }
+
+    /** Called by MainActivity for pl.forma.app://whoop-callback. */
+    fun handleWhoopCallback(uri: Uri) {
+        WhoopClient.handleCallback(ctx, uri) { o -> emit(o) }
     }
 }

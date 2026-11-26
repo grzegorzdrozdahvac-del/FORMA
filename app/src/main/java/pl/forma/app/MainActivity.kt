@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.webkit.WebResourceRequest
@@ -85,12 +86,23 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                return request.url.host != HOST
+                val u: Uri = request.url
+                if (u.host == HOST) return false
+                // external links (e.g. developer.whoop.com) open in the browser; the WebView itself never leaves the app page
+                if (u.scheme == "https" || u.scheme == "http") {
+                    try {
+                        this@MainActivity.startActivity(Intent(Intent.ACTION_VIEW, u))
+                    } catch (e: Exception) {
+                        // no browser available: ignore
+                    }
+                }
+                return true
             }
         }
         bridge = FormaBridge(this, webView)
         webView.addJavascriptInterface(bridge, "FormaNative")
         setContentView(webView)
+        handleWhoopIntent(intent)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -114,9 +126,18 @@ class MainActivity : AppCompatActivity() {
         webView.animate().alpha(1f).setDuration(200).start()
     }
 
+    /** pl.forma.app://whoop-callback?code=..&state=.. (WHOOP OAuth redirect). The token exchange happens natively. */
+    private fun handleWhoopIntent(i: Intent?) {
+        val data: Uri? = i?.data
+        if (data != null && data.scheme == "pl.forma.app" && data.host == "whoop-callback") {
+            bridge.handleWhoopCallback(data)
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        handleWhoopIntent(intent)
         val route = intent.getStringExtra(EXTRA_ROUTE)
         if (route != null && route.startsWith("#/") && Regex("^#/[a-z/]+$").matches(route)) {
             webView.evaluateJavascript("location.hash='$route'", null)
