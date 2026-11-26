@@ -899,7 +899,7 @@ canvas{display:block;width:100%;height:200px}
   // Minutes actually asleep when WHOOP gave real stages, else the span between the bed and wake times.
   function recSleepMin(rec) {
     if (!rec || !rec.sleep) return NaN;
-    var w = rec.whoop && rec.whoop.sleep;
+    var w = (rec.whoop && rec.whoop.sleep) || (rec.hc && rec.hc.sleep); // WHOOP or Health Connect stages (hc only in the display overlay)
     if (w) {
       var asleep = (w.lightMin || 0) + (w.deepMin || 0) + (w.remMin || 0);
       if (asleep > 0) return asleep;
@@ -1106,11 +1106,11 @@ canvas{display:block;width:100%;height:200px}
     var nights = [];
     for (var j = 6; j >= 0; j--) { var q = H.findDay(days, H.dateFromNum(t - j)); if (q && q.sleep) nights.push(q.sleep); }
     var reg = sleepRegularity(nights), perf = sleepPerformance(durH, need);
-    var ws = rec.whoop && rec.whoop.sleep, eff = ws && ws.efficiency != null ? clamp(ws.efficiency, 0, 100) : 100;
+    var wsW = rec.whoop && rec.whoop.sleep, wsH = rec.hc && rec.hc.sleep, ws = wsW || wsH, eff = ws && ws.efficiency != null ? clamp(ws.efficiency, 0, 100) : 100;
     return {
       date: date, bed: rec.sleep.bed, wake: rec.sleep.wake, durH: durH, needH: need, debt3: debt, strainY: strainY,
       perf: perf, reg: reg.score, regInfo: reg, eff: eff, effReal: !!(ws && ws.efficiency != null), score: sleepScore(perf, reg.score, eff), shortH: Math.max(0, need - durH),
-      whoop: ws || null, inBedH: ws && ws.inBedMin ? ws.inBedMin / 60 : null
+      whoop: ws || null, stagesSrc: wsW ? 'whoop' : (wsH ? 'hc' : null), inBedH: ws && ws.inBedMin ? ws.inBedMin / 60 : null
     };
   }
   function typicalWake(days, refDate) {
@@ -1179,7 +1179,9 @@ canvas{display:block;width:100%;height:200px}
   function sanitizeWeight(o) {
     if (!o || isNaN(H.dayNum(o.date))) return null;
     var kg = num(o.kg); if (kg == null || kg < 20 || kg > 400) return null;
-    return { date: o.date, kg: Math.round(kg * 10) / 10 };
+    var res = { date: o.date, kg: Math.round(kg * 10) / 10 };
+    if (o.source === 'hc') res.source = 'hc'; // imported from Health Connect (manual entries have no source field)
+    return res;
   }
   function sanitizeWorkout(o) {
     if (!o || typeof o !== 'object' || ['gym', 'run', 'walk', 'other', 'sauna'].indexOf(o.type) < 0 || isNaN(H.dayNum(o.date))) return null;
@@ -1199,7 +1201,7 @@ canvas{display:block;width:100%;height:200px}
       rpe: rpe != null && rpe >= 1 && rpe <= 10 ? Math.round(rpe) : null,
       distanceKm: num(o.distanceKm) != null && num(o.distanceKm) >= 0 ? num(o.distanceKm) : null,
       exercises: ex, hasHr: !!o.hasHr,
-      source: o.source === 'whoop' ? 'whoop' : 'forma',
+      source: o.source === 'whoop' ? 'whoop' : (o.source === 'hc' ? 'hc' : 'forma'),
       sport: typeof o.sport === 'string' ? o.sport.slice(0, 40) : null,
       strain: num(o.strain) != null && num(o.strain) >= 0 && num(o.strain) <= 21 ? num(o.strain) : null
     };
@@ -1208,6 +1210,12 @@ canvas{display:block;width:100%;height:200px}
     if (kc != null && kc >= 0 && kc < 20000) res.kcal = Math.round(kc);
     if (kn != null && kn >= 0 && kn < 20000) res.kcalNet = Math.round(kn);
     if (pk != null && pk >= 100 && pk <= 230) res.hrPeak = Math.round(pk);
+    if (res.source === 'hc' && typeof o.pkg === 'string' && o.pkg) res.pkg = o.pkg.slice(0, 80); // Health Connect data origin (app package)
+    // heart rate every 5 s from the start (0 = no sample); kept only until it has been written to Health Connect
+    if (Array.isArray(o.hr5) && res.source === 'forma') {
+      var h5 = o.hr5.slice(0, 2160).map(function (v) { v = num(v); return v != null && v >= 30 && v <= 240 ? Math.round(v) : 0; });
+      if (h5.some(function (v) { return v > 0; })) res.hr5 = h5;
+    }
     return res;
   }
   // ---------------- WHOOP workouts ----------------
@@ -1221,7 +1229,8 @@ canvas{display:block;width:100%;height:200px}
   // existing: all stored workouts; incoming: sanitized WHOOP workouts. WHOOP ones replace earlier imports with the same id and never
   // duplicate a Forma-logged workout overlapping by more than 50 %. Returns { items, added, updated, skipped, dropped }.
   function mergeWhoopWorkouts(existing, incoming) {
-    var own = existing.filter(function (w) { return w.source !== 'whoop'; });
+    var own = existing.filter(function (w) { return w.source !== 'whoop' && w.source !== 'hc'; });
+    var hcKeep = existing.filter(function (w) { return w.source === 'hc'; }); // Health Connect imports stay, unless a WHOOP workout covers the same session
     var byId = {}, added = 0, updated = 0, skipped = 0, dropped = 0;
     existing.forEach(function (w) { if (w.source === 'whoop') byId[w.id] = w; });
     var seen = {};
@@ -1232,7 +1241,9 @@ canvas{display:block;width:100%;height:200px}
     });
     // an earlier import may overlap a workout the user logged since
     Object.keys(byId).forEach(function (id) { if (own.some(function (o) { return workoutOverlap(o, byId[id]) > 0.5; })) { delete byId[id]; dropped++; } });
-    return { items: sortWorkouts(own.concat(Object.keys(byId).map(function (k) { return byId[k]; }))), added: added, updated: updated, skipped: skipped, dropped: dropped };
+    var wh = Object.keys(byId).map(function (k) { return byId[k]; });
+    hcKeep = hcKeep.filter(function (h) { if (wh.some(function (x) { return workoutOverlap(x, h) > 0.5; })) { dropped++; return false; } return true; });
+    return { items: sortWorkouts(own.concat(wh, hcKeep)), added: added, updated: updated, skipped: skipped, dropped: dropped };
   }
   function mergeById(a, b, key) {
     var m = {}, added = 0, replaced = 0;
@@ -2924,6 +2935,411 @@ canvas{display:block;width:100%;height:200px}
   else root.StepsCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
+<script>/* Forma - Health Connect (Android) merge logic. Pure, no DOM, no native calls. ES5 (UMD).
+   Browser: window.HcCore. Node: require('./hc-core.js').
+   Raw data comes from the Kotlin HealthConnectManager as the `data` object of the hcSyncResult event (all times are epoch ms,
+   dates are device-local YYYY-MM-DD). Rules:
+   - steps: Health Connect (already deduplicated across apps by the aggregate calls) beats the phone counter for every day it has steps for;
+   - weight: history entries source 'hc', a manual entry of the same day always wins; height only as a one-time suggestion for the profile;
+   - workouts: source 'hc' + app package; skipped when they overlap a Forma / WHOOP workout by more than 50 % of the shorter one,
+     and when Forma itself wrote them (data origin pl.forma.app);
+   - sleep: used (view only) for days without an own night record (own = source 'noc' band night or WHOOP sleep);
+   - calories, HRV and resting HR of other apps: comparison only, never mixed into our norms;
+   - writes: only our own records, stable clientRecordId per record, a ledger (cid -> {ver, sig}) makes re-sync update instead of duplicate. */
+(function (root) {
+  'use strict';
+  var isNode = typeof module !== 'undefined' && module.exports;
+  var H = isNode ? require('./hrv-core.js') : root.HrvCore;
+  var F = isNode ? require('./forma-core.js') : root.FormaCore;
+  var SC = isNode ? require('./steps-core.js') : root.StepsCore;
+
+  var PKG_SELF = 'pl.forma.app', PKG_HC = 'com.google.android.apps.healthdata';
+  var MIN = 60000, DAY = 86400000, KEEP_DAYS = 45, FIRST_SYNC_DAYS = 30, OVERLAP_DAYS = 2, WRITE_DAYS = 30;
+  function fin(v) { return typeof v === 'number' && isFinite(v); }
+  function p2(n) { return (n < 10 ? '0' : '') + n; }
+  function dateOfMs(ms) { var d = new Date(ms); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); }
+  function timeOfMs(ms) { var d = new Date(ms); return p2(d.getHours()) + ':' + p2(d.getMinutes()); }
+  function localMs(date, hhmm) { var a = String(date).split('-'), b = String(hhmm || '00:00').split(':'); return new Date(+a[0], +a[1] - 1, +a[2], +b[0] || 0, +b[1] || 0, 0, 0).getTime(); }
+  function offsetSecAt(ms) { return -new Date(ms).getTimezoneOffset() * 60; }
+  function validDate(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(H.dayNum(s)); }
+  function str(v, n) { return typeof v === 'string' ? v.slice(0, n) : ''; }
+  function arr(a) { return Array.isArray(a) ? a : []; }
+
+  // ---------------- permissions ----------------
+  var PFX = 'android.permission.health.';
+  // id, label (Polish), read permission, write permission (null = we do not write it)
+  var GROUPS = [
+    { id: 'steps', label: 'Kroki', read: 'READ_STEPS', write: null },
+    { id: 'weight', label: 'Waga', read: 'READ_WEIGHT', write: null },
+    { id: 'height', label: 'Wzrost', read: 'READ_HEIGHT', write: null },
+    { id: 'exercise', label: 'Treningi', read: 'READ_EXERCISE', write: 'WRITE_EXERCISE' },
+    { id: 'sleep', label: 'Sen', read: 'READ_SLEEP', write: 'WRITE_SLEEP' },
+    { id: 'hr', label: 'Tętno', read: 'READ_HEART_RATE', write: 'WRITE_HEART_RATE' },
+    { id: 'rhr', label: 'Tętno spoczynkowe', read: 'READ_RESTING_HEART_RATE', write: 'WRITE_RESTING_HEART_RATE' },
+    { id: 'hrv', label: 'HRV (RMSSD)', read: 'READ_HEART_RATE_VARIABILITY', write: 'WRITE_HEART_RATE_VARIABILITY' },
+    { id: 'kcalActive', label: 'Kalorie aktywne', read: 'READ_ACTIVE_CALORIES_BURNED', write: null },
+    { id: 'kcalTotal', label: 'Kalorie całkowite', read: 'READ_TOTAL_CALORIES_BURNED', write: null }
+  ];
+  function allReadPerms() { return GROUPS.map(function (g) { return PFX + g.read; }); }
+  function allWritePerms() { return GROUPS.filter(function (g) { return g.write; }).map(function (g) { return PFX + g.write; }); }
+  function allPerms() { return allReadPerms().concat(allWritePerms()); }
+  // granted: array of full permission strings (or short names). Returns the per-group state and the lists of what is missing.
+  function permissionReport(granted) {
+    var set = {};
+    arr(granted).forEach(function (p) { if (typeof p === 'string') set[p.indexOf(PFX) === 0 ? p : PFX + p] = 1; });
+    var groups = GROUPS.map(function (g) {
+      return { id: g.id, label: g.label, canWrite: !!g.write, readOk: !!set[PFX + g.read], writeOk: g.write ? !!set[PFX + g.write] : null };
+    });
+    var missingRead = groups.filter(function (g) { return !g.readOk; }), missingWrite = groups.filter(function (g) { return g.canWrite && !g.writeOk; });
+    var anyRead = groups.some(function (g) { return g.readOk; }), anyWrite = groups.some(function (g) { return g.writeOk; });
+    return {
+      groups: groups, anyRead: anyRead, anyWrite: anyWrite, connected: anyRead || anyWrite,
+      complete: !missingRead.length && !missingWrite.length, partial: (anyRead || anyWrite) && (missingRead.length + missingWrite.length > 0),
+      missingRead: missingRead.map(function (g) { return g.label; }), missingWrite: missingWrite.map(function (g) { return g.label; }),
+      has: function (id, mode) { var g = groups.filter(function (x) { return x.id === id; })[0]; return !!g && (mode === 'write' ? g.writeOk === true : g.readOk); }
+    };
+  }
+
+  // ---------------- sync window ----------------
+  // 30 days on the first sync, afterwards exactly the last sync minus 2 days (late-arriving data from other apps), never further back than 30 days.
+  function sinceFor(lastSyncMs, nowMs) {
+    var floor = nowMs - FIRST_SYNC_DAYS * DAY;
+    return new Date(lastSyncMs ? Math.max(floor, lastSyncMs - OVERLAP_DAYS * DAY) : floor).toISOString();
+  }
+  function needsSync(lastSyncMs, nowMs) { return !lastSyncMs || nowMs - lastSyncMs > 30 * MIN; }
+
+  // ---------------- data origins ----------------
+  var ORIGINS = {
+    'com.google.android.apps.fitness': 'Google Fit', 'com.samsung.android.shealth': 'Samsung Health', 'com.fitbit.FitbitMobile': 'Fitbit',
+    'com.garmin.android.apps.connectmobile': 'Garmin Connect', 'com.whoop.android': 'WHOOP', 'com.ouraring.oura': 'Oura', 'com.polar.polarflow': 'Polar Flow',
+    'com.huawei.health': 'Huawei Health', 'com.mi.health': 'Mi Fitness', 'com.xiaomi.wearable': 'Mi Fitness', 'com.strava': 'Strava',
+    'com.google.android.apps.healthdata': 'Health Connect', 'pl.forma.app': 'Forma'
+  };
+  function originLabel(pkg) { return ORIGINS[pkg] || (pkg ? String(pkg) : 'nieznana aplikacja'); }
+  function isSelf(pkg) { return pkg === PKG_SELF; }
+
+  // ---------------- raw -> clean ----------------
+  // Drops malformed rows. Nothing is dropped for being "ours" here: the importers decide (comparison lists must not contain our own records).
+  function normalizeRaw(raw) {
+    raw = raw && typeof raw === 'object' ? raw : {};
+    var out = { stepsDaily: [], stepsHourly: [], weight: [], height: [], exercise: [], sleep: [], rhr: [], hrv: [], calDaily: [] };
+    arr(raw.stepsDaily).forEach(function (x) { if (x && validDate(x.date) && fin(+x.steps) && +x.steps >= 0) out.stepsDaily.push({ date: x.date, steps: Math.round(+x.steps) }); });
+    arr(raw.stepsHourly).forEach(function (x) { if (x && fin(+x.t) && fin(+x.steps) && +x.steps >= 0) out.stepsHourly.push({ t: +x.t, steps: Math.round(+x.steps) }); });
+    arr(raw.weight).forEach(function (x) { var kg = x && +x.kg; if (x && fin(+x.t) && fin(kg) && kg >= 20 && kg <= 400) out.weight.push({ t: +x.t, kg: Math.round(kg * 10) / 10, origin: str(x.origin, 80) }); });
+    arr(raw.height).forEach(function (x) { var cm = x && +x.cm; if (x && fin(+x.t) && fin(cm) && cm >= 100 && cm <= 230) out.height.push({ t: +x.t, cm: Math.round(cm * 10) / 10, origin: str(x.origin, 80) }); });
+    arr(raw.exercise).forEach(function (x) {
+      if (!x || !fin(+x.start) || !fin(+x.end) || +x.end <= +x.start || (typeof x.id !== 'string' && !fin(+x.id)) || !fin(+x.type)) return;
+      out.exercise.push({ id: String(x.id).slice(0, 60), type: Math.round(+x.type), start: +x.start, end: +x.end, title: str(x.title, 60), origin: str(x.origin, 80), hrAvg: fin(+x.hrAvg) && +x.hrAvg > 0 ? +x.hrAvg : null, hrMax: fin(+x.hrMax) && +x.hrMax > 0 ? +x.hrMax : null });
+    });
+    arr(raw.sleep).forEach(function (x) {
+      if (!x || !fin(+x.start) || !fin(+x.end) || +x.end <= +x.start || (typeof x.id !== 'string' && !fin(+x.id))) return;
+      var st = arr(x.stages).map(function (g) { return g && fin(+g.s) && fin(+g.e) && +g.e > +g.s && fin(+g.st) ? { s: +g.s, e: +g.e, st: Math.round(+g.st) } : null; }).filter(Boolean);
+      out.sleep.push({ id: String(x.id).slice(0, 60), start: +x.start, end: +x.end, origin: str(x.origin, 80), title: str(x.title, 60), stages: st });
+    });
+    arr(raw.rhr).forEach(function (x) { if (x && fin(+x.t) && fin(+x.bpm) && +x.bpm >= 20 && +x.bpm <= 220) out.rhr.push({ t: +x.t, bpm: Math.round(+x.bpm), origin: str(x.origin, 80) }); });
+    arr(raw.hrv).forEach(function (x) { if (x && fin(+x.t) && fin(+x.rmssd) && +x.rmssd > 0 && +x.rmssd < 1000) out.hrv.push({ t: +x.t, rmssd: Math.round(+x.rmssd * 10) / 10, origin: str(x.origin, 80) }); });
+    arr(raw.calDaily).forEach(function (x) {
+      if (!x || !validDate(x.date)) return;
+      var a = fin(+x.active) && +x.active >= 0 ? Math.round(+x.active) : null, t = fin(+x.total) && +x.total >= 0 ? Math.round(+x.total) : null;
+      if (a != null || t != null) out.calDaily.push({ date: x.date, active: a, total: t });
+    });
+    return out;
+  }
+
+  // ---------------- local store (what we keep between syncs) ----------------
+  function emptyStore() { return { v: 1, lastSync: null, steps: { daily: {}, hourly: {} }, sleeps: {}, cal: {}, hrv: [], rhr: [], heightOffered: null, heightSug: null, written: {}, stats: null }; }
+  function cleanStore(o) {
+    var s = emptyStore(); if (!o || typeof o !== 'object') return s;
+    if (fin(o.lastSync)) s.lastSync = o.lastSync;
+    if (o.steps && typeof o.steps === 'object') {
+      Object.keys(o.steps.daily || {}).forEach(function (k) { if (validDate(k) && fin(o.steps.daily[k]) && o.steps.daily[k] >= 0) s.steps.daily[k] = o.steps.daily[k]; });
+      Object.keys(o.steps.hourly || {}).forEach(function (k) { if (fin(+k) && fin(o.steps.hourly[k]) && o.steps.hourly[k] >= 0) s.steps.hourly[k] = o.steps.hourly[k]; });
+    }
+    if (o.sleeps && typeof o.sleeps === 'object') Object.keys(o.sleeps).forEach(function (k) { var n = o.sleeps[k]; if (n && validDate(n.date) && fin(n.start) && fin(n.end) && fin(n.inBedMin)) s.sleeps[k] = n; });
+    if (o.cal && typeof o.cal === 'object') Object.keys(o.cal).forEach(function (k) { var c = o.cal[k]; if (validDate(k) && c && typeof c === 'object') s.cal[k] = { active: fin(c.active) ? c.active : null, total: fin(c.total) ? c.total : null }; });
+    s.hrv = arr(o.hrv).filter(function (x) { return x && fin(x.t) && fin(x.rmssd); });
+    s.rhr = arr(o.rhr).filter(function (x) { return x && fin(x.t) && fin(x.bpm); });
+    if (fin(o.heightOffered)) s.heightOffered = o.heightOffered;
+    if (o.heightSug && fin(o.heightSug.cm)) s.heightSug = { cm: o.heightSug.cm, date: str(o.heightSug.date, 10), origin: str(o.heightSug.origin, 80) };
+    if (o.written && typeof o.written === 'object') Object.keys(o.written).forEach(function (k) { var w = o.written[k]; if (w && fin(w.ver) && typeof w.sig === 'string') s.written[k] = { ver: w.ver, sig: w.sig }; });
+    if (o.stats && typeof o.stats === 'object') s.stats = o.stats;
+    return s;
+  }
+
+  // ---------------- steps ----------------
+  // Health Connect steps -> normalized like StepsCore.normalize (daily + byDate hours)
+  function stepsNorm(store) {
+    var hourly = Object.keys(store.steps.hourly).map(function (t) { return { t: +t, steps: store.steps.hourly[t] }; });
+    var daily = Object.keys(store.steps.daily).map(function (d) { return { date: d, steps: store.steps.daily[d] }; });
+    return SC.normalize({ available: true, permission: true, hourly: hourly, daily: daily });
+  }
+  // phone: StepsCore.normalize() of the phone counter; hc: stepsNorm(). Health Connect wins for every day where it has steps (> 0).
+  // Result carries src[date] = 'hc' | 'telefon'.
+  function mergeSteps(phone, hc) {
+    phone = phone || SC.normalize(null);
+    var out = { has: false, available: phone.available, permission: phone.permission, daily: {}, byDate: {}, src: {} };
+    Object.keys(phone.daily).forEach(function (d) { out.daily[d] = phone.daily[d]; out.src[d] = 'telefon'; if (phone.byDate[d]) out.byDate[d] = phone.byDate[d].slice(); });
+    if (hc && hc.has) {
+      Object.keys(hc.daily).forEach(function (d) {
+        if (!(hc.daily[d] > 0)) return;
+        out.daily[d] = hc.daily[d]; out.src[d] = 'hc';
+        var h = hc.byDate[d], sum = h ? h.reduce(function (a, b) { return a + b; }, 0) : 0;
+        if (sum > 0) out.byDate[d] = h.slice(); else delete out.byDate[d];
+      });
+      out.available = true;
+    }
+    out.has = Object.keys(out.daily).length > 0;
+    return out;
+  }
+
+  // ---------------- weight and height ----------------
+  // Last measurement of every day. A manual entry of the same date (no source) always wins; earlier imports are refreshed.
+  function mergeWeights(weights, hcWeights) {
+    var byDay = {};
+    hcWeights.forEach(function (x) { if (isSelf(x.origin)) return; var d = dateOfMs(x.t); if (!byDay[d] || x.t > byDay[d].t) byDay[d] = x; });
+    var map = {}, added = 0, updated = 0, skipped = 0;
+    weights.forEach(function (w) { map[w.date] = w; });
+    Object.keys(byDay).forEach(function (d) {
+      var cur = map[d], kg = byDay[d].kg;
+      if (cur && cur.source !== 'hc') { skipped++; return; }
+      if (cur) { if (cur.kg !== kg) { map[d] = { date: d, kg: kg, source: 'hc' }; updated++; } return; }
+      map[d] = { date: d, kg: kg, source: 'hc' }; added++;
+    });
+    var items = Object.keys(map).map(function (k) { return map[k]; }).sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+    return { items: items, added: added, updated: updated, skipped: skipped };
+  }
+  // Newest height from another app. Offered when the profile has none or differs by >= 1 cm, and only once per value (offered = last value offered).
+  function heightSuggestion(profile, hcHeights, offered) {
+    var best = null;
+    hcHeights.forEach(function (x) { if (!isSelf(x.origin) && (!best || x.t > best.t)) best = x; });
+    if (!best) return null;
+    var cm = Math.round(best.cm);
+    if (cm < 100 || cm > 230 || offered === cm) return null;
+    var cur = profile && fin(profile.heightCm) ? profile.heightCm : null;
+    if (cur != null && Math.abs(cur - cm) < 1) return null;
+    return { cm: cm, date: dateOfMs(best.t), origin: best.origin, current: cur };
+  }
+
+  // ---------------- workouts ----------------
+  var TYPE_GYM = [70, 81], TYPE_RUN = [56, 57], TYPE_WALK = [79];
+  var SPORT = { 0: 'Trening', 5: 'Koszykówka', 8: 'Rower', 9: 'Rower stacjonarny', 10: 'Boot camp', 11: 'Boks', 16: 'Taniec', 25: 'Orbitrek', 26: 'Zajęcia fitness', 36: 'HIIT', 37: 'Wędrówka', 44: 'Sztuki walki', 48: 'Pilates', 51: 'Wspinaczka', 53: 'Wioślarstwo', 54: 'Ergometr wioślarski', 61: 'Narty', 64: 'Piłka nożna', 66: 'Squash', 68: 'Wchodzenie po schodach', 73: 'Pływanie (otwarta woda)', 74: 'Pływanie (basen)', 75: 'Tenis stołowy', 76: 'Tenis', 78: 'Siatkówka', 83: 'Joga' };
+  function typeInfo(t) {
+    if (TYPE_GYM.indexOf(t) >= 0) return { type: 'gym', sport: t === 81 ? 'Podnoszenie ciężarów' : 'Trening siłowy' };
+    if (TYPE_RUN.indexOf(t) >= 0) return { type: 'run', sport: t === 57 ? 'Bieg na bieżni' : 'Bieg' };
+    if (TYPE_WALK.indexOf(t) >= 0) return { type: 'walk', sport: 'Spacer' };
+    return { type: 'other', sport: SPORT[t] || 'Trening' };
+  }
+  function workoutFromExercise(x) {
+    var info = typeInfo(x.type), durMin = (x.end - x.start) / MIN;
+    if (!(durMin >= 1)) return null;
+    return F.sanitizeWorkout({
+      id: 'hc-' + x.id, type: info.type, date: dateOfMs(x.start), time: timeOfMs(x.start), start: x.start, durMin: durMin,
+      hrAvg: x.hrAvg, hrMax: x.hrMax, trimp: null, zonesSec: null, rpe: null, distanceKm: null, exercises: [], hasHr: false,
+      source: 'hc', sport: x.title || info.sport, pkg: x.origin || ''
+    });
+  }
+  // existing: all stored workouts; incoming: normalized exercise rows. Returns { items, added, updated, skipped, skippedSelf, dropped, dupHc }.
+  function mergeWorkouts(existing, incoming) {
+    var own = existing.filter(function (w) { return w.source !== 'hc'; });   // Forma and WHOOP workouts always win
+    var oldHc = {}; existing.forEach(function (w) { if (w.source === 'hc') oldHc[w.id] = w; });
+    var res = { items: null, added: 0, updated: 0, skipped: 0, skippedSelf: 0, dropped: 0, dupHc: 0 };
+    var cand = {}, ordered = incoming.slice().sort(function (a, b) { return a.start - b.start || (a.id < b.id ? -1 : 1); });
+    ordered.forEach(function (x) {
+      if (isSelf(x.origin)) { res.skippedSelf++; return; }          // written by Forma itself: never imported back
+      var w = workoutFromExercise(x); if (!w) return;
+      if (own.some(function (o) { return F.workoutOverlap(o, w) > 0.5; })) { res.skipped++; return; }
+      var clash = Object.keys(cand).some(function (k) { return k !== w.id && F.workoutOverlap(cand[k], w) > 0.5; });
+      if (clash) { res.dupHc++; return; }                            // the same session recorded by two apps
+      cand[w.id] = w;
+    });
+    var kept = {};
+    Object.keys(oldHc).forEach(function (id) { if (!cand[id]) kept[id] = oldHc[id]; });
+    // an old import covering the same session as a new candidate with another id (apps change ids) is replaced by the candidate
+    Object.keys(kept).forEach(function (id) { if (Object.keys(cand).some(function (k) { return F.workoutOverlap(cand[k], kept[id]) > 0.5; })) { delete kept[id]; res.dropped++; } });
+    // an earlier import may overlap a workout the user logged since
+    Object.keys(kept).forEach(function (id) { if (own.some(function (o) { return F.workoutOverlap(o, kept[id]) > 0.5; })) { delete kept[id]; res.dropped++; } });
+    Object.keys(cand).forEach(function (id) { if (oldHc[id]) res.updated++; else res.added++; });
+    res.items = F.sortWorkouts(own.concat(Object.keys(kept).map(function (k) { return kept[k]; }), Object.keys(cand).map(function (k) { return cand[k]; })));
+    return res;
+  }
+
+  // ---------------- sleep ----------------
+  // stage codes (Health Connect): 0 unknown, 1 awake, 2 sleeping, 3 out of bed, 4 light, 5 deep, 6 rem, 7 awake in bed
+  function nightFromSleep(x) {
+    var span = (x.end - x.start) / MIN, t = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0 };
+    x.stages.forEach(function (g) { var a = Math.max(g.s, x.start), b = Math.min(g.e, x.end); if (b > a && t[g.st] != null) t[g.st] += (b - a) / MIN; });
+    var r1 = function (v) { return Math.round(v * 10) / 10; };
+    var staged = t[4] + t[5] + t[6] > 0, asleep = staged ? t[4] + t[5] + t[6] : (t[2] > 0 ? t[2] : span);
+    var eff = staged || t[2] > 0 ? Math.min(100, Math.round(asleep / span * 1000) / 10) : null;
+    return {
+      id: x.id, date: dateOfMs(x.end), bed: timeOfMs(x.start), wake: timeOfMs(x.end), start: x.start, end: x.end, origin: x.origin, title: x.title,
+      inBedMin: r1(span), asleepMin: r1(asleep), lightMin: staged ? r1(t[4]) : null, deepMin: staged ? r1(t[5]) : null, remMin: staged ? r1(t[6]) : null,
+      awakeMin: staged || t[2] > 0 ? r1(t[1] + t[7]) : null, efficiency: eff, hasStages: staged
+    };
+  }
+  function betterNight(n, cur) { return !cur || n.inBedMin > cur.inBedMin || (n.inBedMin === cur.inBedMin && n.hasStages && !cur.hasStages); }
+  // Main night per wake date: the longest session of at least 90 min (shorter = nap), never one written by Forma.
+  function nightsFromSleeps(sleeps) {
+    var best = {};
+    sleeps.forEach(function (x) {
+      if (isSelf(x.origin) || (x.end - x.start) / MIN < 90) return;
+      var n = nightFromSleep(x); if (betterNight(n, best[n.date])) best[n.date] = n;
+    });
+    return best;
+  }
+  function nightsOf(store) {
+    var best = {};
+    Object.keys(store.sleeps).forEach(function (k) { var n = store.sleeps[k]; if (betterNight(n, best[n.date])) best[n.date] = n; });
+    return best;
+  }
+  // block shaped like WHOOP's rec.whoop.sleep so the existing sleep code (duration, efficiency, stages card) can read it
+  function sleepBlock(n) {
+    return { start: new Date(n.start).toISOString(), end: new Date(n.end).toISOString(), inBedMin: n.inBedMin, awakeMin: n.awakeMin, lightMin: n.lightMin, deepMin: n.deepMin, remMin: n.remMin, efficiency: n.efficiency, origin: n.origin };
+  }
+  // Own night record = source 'noc' (band night) or WHOOP sleep. A day without one (no record at all, or only a morning measurement)
+  // gets the Health Connect night as a VIEW overlay: the stored records are never touched, so nothing HC-made can be written back.
+  function sleepView(days, nights) {
+    var dates = Object.keys(nights);
+    if (!dates.length) return days;
+    var seen = {}, out = days.map(function (d) {
+      seen[d.date] = 1;
+      var n = nights[d.date];
+      if (!n || d.source === 'noc' || d.source === 'whoop' || (d.whoop && d.whoop.sleep)) return d;
+      return Object.assign({}, d, { sleep: { bed: n.bed, wake: n.wake }, sleepEstimated: false, hc: { sleep: sleepBlock(n) } });
+    });
+    dates.forEach(function (date) {
+      if (seen[date]) return;
+      var n = nights[date];
+      out.push({ date: date, time: n.wake, rmssd: null, lnRmssd: null, hr: null, source: 'hc', tags: [], sleep: { bed: n.bed, wake: n.wake }, sleepEstimated: false, whoop: null, nightSeries: null, hc: { sleep: sleepBlock(n) } });
+    });
+    return out.sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+  }
+
+  // ---------------- comparison data (never used for our norms) ----------------
+  function dayCompare(store, date) {
+    var hrv = {}, rhr = {};
+    store.hrv.forEach(function (x) { if (isSelf(x.origin) || dateOfMs(x.t) !== date) return; if (!hrv[x.origin] || x.t > hrv[x.origin].t) hrv[x.origin] = x; });
+    store.rhr.forEach(function (x) { if (isSelf(x.origin) || dateOfMs(x.t) !== date) return; if (!rhr[x.origin] || x.t > rhr[x.origin].t) rhr[x.origin] = x; });
+    var origins = {}; Object.keys(hrv).concat(Object.keys(rhr)).forEach(function (o) { origins[o] = 1; });
+    return Object.keys(origins).sort().map(function (o) { return { origin: o, label: originLabel(o), rmssd: hrv[o] ? hrv[o].rmssd : null, rhr: rhr[o] ? rhr[o].bpm : null }; });
+  }
+  function kcalCompare(store, date) { var c = store.cal[date]; return c && (c.active != null || c.total != null) ? { active: c.active, total: c.total } : null; }
+
+  // ---------------- apply one sync ----------------
+  function prune(store, nowMs) {
+    var cut = H.addDays(dateOfMs(nowMs), -KEEP_DAYS), cutMs = localMs(cut, '00:00');
+    Object.keys(store.steps.daily).forEach(function (d) { if (d < cut) delete store.steps.daily[d]; });
+    Object.keys(store.steps.hourly).forEach(function (t) { if (+t < cutMs) delete store.steps.hourly[t]; });
+    Object.keys(store.sleeps).forEach(function (k) { if (store.sleeps[k].date < cut) delete store.sleeps[k]; });
+    Object.keys(store.cal).forEach(function (d) { if (d < cut) delete store.cal[d]; });
+    store.hrv = store.hrv.filter(function (x) { return x.t >= cutMs; });
+    store.rhr = store.rhr.filter(function (x) { return x.t >= cutMs; });
+  }
+  // st: { workouts, weights, profile, store }. raw: the data of hcSyncResult. Pure: returns new objects.
+  function applySync(st, raw, nowMs) {
+    var data = normalizeRaw(raw), store = cleanStore(JSON.parse(JSON.stringify(st.store || emptyStore())));
+    var stats = { stepsDays: 0, weightsAdded: 0, weightsUpdated: 0, workoutsAdded: 0, workoutsUpdated: 0, workoutsSkipped: 0, workoutsSelf: 0, workoutsDropped: 0, workoutsDup: 0, nights: 0, hrv: 0, rhr: 0, calDays: 0 };
+    data.stepsDaily.forEach(function (x) { store.steps.daily[x.date] = x.steps; stats.stepsDays++; });
+    data.stepsHourly.forEach(function (x) { store.steps.hourly[x.t] = x.steps; });
+    var nights = nightsFromSleeps(data.sleep); // keyed by date: the main night of each date
+    Object.keys(store.sleeps).forEach(function (k) { if (nights[store.sleeps[k].date]) delete store.sleeps[k]; });
+    Object.keys(nights).forEach(function (d) { store.sleeps[nights[d].id] = nights[d]; stats.nights++; });
+    data.calDaily.forEach(function (x) { store.cal[x.date] = { active: x.active, total: x.total }; stats.calDays++; });
+    var known = {}, knownR = {};
+    store.hrv.forEach(function (x) { known[x.origin + '|' + x.t] = 1; });
+    data.hrv.forEach(function (x) { if (isSelf(x.origin)) return; var k = x.origin + '|' + x.t; if (!known[k]) { known[k] = 1; store.hrv.push(x); stats.hrv++; } });
+    store.rhr.forEach(function (x) { knownR[x.origin + '|' + x.t] = 1; });
+    data.rhr.forEach(function (x) { if (isSelf(x.origin)) return; var k = x.origin + '|' + x.t; if (!knownR[k]) { knownR[k] = 1; store.rhr.push(x); stats.rhr++; } });
+    var wm = mergeWeights(st.weights || [], data.weight); stats.weightsAdded = wm.added; stats.weightsUpdated = wm.updated;
+    var mw = mergeWorkouts(st.workouts || [], data.exercise);
+    stats.workoutsAdded = mw.added; stats.workoutsUpdated = mw.updated; stats.workoutsSkipped = mw.skipped; stats.workoutsSelf = mw.skippedSelf; stats.workoutsDropped = mw.dropped; stats.workoutsDup = mw.dupHc;
+    var hs = heightSuggestion(st.profile, data.height, store.heightOffered);
+    store.heightSug = hs ? { cm: hs.cm, date: hs.date, origin: hs.origin } : null;
+    store.lastSync = nowMs; prune(store, nowMs); store.stats = Object.assign({ at: nowMs }, stats);
+    return { store: store, weights: wm.items, workouts: mw.items, stats: stats, heightSuggestion: hs };
+  }
+  function summaryText(s) {
+    if (!s) return '';
+    var parts = [];
+    if (s.stepsDays) parts.push('kroki: ' + s.stepsDays + ' ' + (s.stepsDays === 1 ? 'dzień' : 'dni'));
+    var w = s.workoutsAdded + s.workoutsUpdated; if (w) parts.push('treningi: ' + w);
+    var k = s.weightsAdded + s.weightsUpdated; if (k) parts.push('ważenia: ' + k);
+    if (s.nights) parts.push('sen: ' + s.nights + ' ' + (s.nights === 1 ? 'noc' : 'nocy'));
+    return parts.length ? 'Pobrano: ' + parts.join(', ') + '.' : 'Brak nowych danych w Health Connect.';
+  }
+
+  // ---------------- writes ----------------
+  var ETYPE = { gym: 'STRENGTH_TRAINING', run: 'RUNNING', walk: 'WALKING', other: 'OTHER_WORKOUT' }; // sauna: not written
+  var WK_TITLE = { gym: 'Siłownia', run: 'Bieg', walk: 'Spacer', other: 'Trening' };
+  // A record that came from Health Connect (or WHOOP) is never ours to write. The planner checks this for every kind.
+  function foreign(x) { return !!x && (x.source === 'hc' || x.source === 'whoop' || !!x.hc || (typeof x.pkg === 'string' && x.pkg !== '' && !isSelf(x.pkg))); }
+  // Records to write now. ledger: store.written. opts: { nowMs, today, nights }. Returns { records, same, foreign }.
+  // opts.nights (HcCore.nightsOf): for a date where another app already has the night in Health Connect we do not add a second sleep session.
+  // Every record has a stable cid (our id) and a ver that grows with each rewrite (Health Connect only updates when the version is higher).
+  function planWrites(days, workouts, ledger, opts) {
+    opts = opts || {}; ledger = ledger || {};
+    var now = opts.nowMs || Date.now(), today = opts.today || dateOfMs(now), from = H.addDays(today, -WRITE_DAYS);
+    var out = [], same = 0, skippedForeign = 0;
+    function add(rec, sig) {
+      var prev = ledger[rec.cid];
+      if (prev && prev.sig === sig) { same++; return; }
+      rec.ver = Math.max(now, prev ? prev.ver + 1 : 0); rec.sig = sig; out.push(rec);
+    }
+    arr(days).forEach(function (d) {
+      if (!d || d.date < from || d.date > today) return;
+      if (foreign(d)) { skippedForeign++; return; }
+      if (d.sleep && !(opts.nights && opts.nights[d.date]) && /^\d{1,2}:\d{2}$/.test(d.sleep.bed || '') && /^\d{1,2}:\d{2}$/.test(d.sleep.wake || '')) {
+        var b = F.parseHM(d.sleep.bed), w = F.parseHM(d.sleep.wake), span = ((w - b) % 1440 + 1440) % 1440;
+        if (span >= 60 && span <= 960) {
+          var wakeMs = localMs(d.date, d.sleep.wake), startMs = wakeMs - span * MIN;
+          add({ kind: 'sleep', cid: 'forma-sleep-' + d.date, start: startMs, end: wakeMs, off: offsetSecAt(wakeMs) }, startMs + '|' + wakeMs);
+        }
+      }
+      var t = localMs(d.date, d.time);
+      if (fin(d.rmssd) && d.rmssd > 0 && d.rmssd < 1000) { var rm = Math.round(d.rmssd * 10) / 10; add({ kind: 'hrv', cid: 'forma-hrv-' + d.date, t: t, off: offsetSecAt(t), rmssd: rm }, rm + '|' + t); }
+      if (fin(d.hr) && d.hr >= 25 && d.hr <= 220) { var bpm = Math.round(d.hr); add({ kind: 'rhr', cid: 'forma-rhr-' + d.date, t: t, off: offsetSecAt(t), bpm: bpm }, bpm + '|' + t); }
+    });
+    arr(workouts).forEach(function (w) {
+      if (!w || w.date < from || w.date > today) return;
+      if (foreign(w)) { skippedForeign++; return; }
+      if (w.type === 'sauna' || !ETYPE[w.type] || !fin(w.start) || w.start <= 0 || !(w.durMin >= 1)) return;
+      var end = w.start + Math.round(w.durMin * MIN);
+      add({ kind: 'exercise', cid: 'forma-w-' + w.id, start: w.start, end: end, off: offsetSecAt(w.start), etype: ETYPE[w.type], title: WK_TITLE[w.type] }, w.start + '|' + end + '|' + ETYPE[w.type]);
+      if (Array.isArray(w.hr5)) {
+        var samples = [], sum = 0;
+        w.hr5.forEach(function (v, k) { if (v > 0) { samples.push({ t: w.start + k * 5000, bpm: v }); sum += v; } });
+        if (samples.length) add({ kind: 'hr', cid: 'forma-hr-' + w.id, start: samples[0].t, end: samples[samples.length - 1].t + 1000, off: offsetSecAt(w.start), samples: samples }, samples.length + '|' + samples[0].t + '|' + sum);
+      }
+    });
+    return { records: out, same: same, foreign: skippedForeign };
+  }
+  // result: { written: [cid...] } from hcWriteResult; planned: the records that were sent. Returns the new ledger.
+  function applyWriteResult(ledger, planned, result) {
+    var out = Object.assign({}, ledger || {}), done = {};
+    arr(result && result.written).forEach(function (c) { done[c] = 1; });
+    arr(planned).forEach(function (r) { if (done[r.cid]) out[r.cid] = { ver: r.ver, sig: r.sig }; });
+    return out;
+  }
+  // The heart-rate series of a workout is no longer needed locally once its 'hr' record has been written.
+  function stripWrittenHr(workouts, written) {
+    var changed = 0, items = workouts.map(function (w) {
+      if (w.hr5 && written['forma-hr-' + w.id]) { changed++; var c = Object.assign({}, w); delete c.hr5; return c; }
+      return w;
+    });
+    return { items: items, changed: changed };
+  }
+
+  var api = {
+    PKG_SELF: PKG_SELF, PKG_HC: PKG_HC, GROUPS: GROUPS, allReadPerms: allReadPerms, allWritePerms: allWritePerms, allPerms: allPerms, permissionReport: permissionReport,
+    sinceFor: sinceFor, needsSync: needsSync, originLabel: originLabel, normalizeRaw: normalizeRaw, emptyStore: emptyStore, cleanStore: cleanStore,
+    stepsNorm: stepsNorm, mergeSteps: mergeSteps, mergeWeights: mergeWeights, heightSuggestion: heightSuggestion, typeInfo: typeInfo, workoutFromExercise: workoutFromExercise,
+    mergeWorkouts: mergeWorkouts, nightFromSleep: nightFromSleep, nightsFromSleeps: nightsFromSleeps, nightsOf: nightsOf, sleepView: sleepView,
+    dayCompare: dayCompare, kcalCompare: kcalCompare, applySync: applySync, summaryText: summaryText,
+    planWrites: planWrites, applyWriteResult: applyWriteResult, stripWrittenHr: stripWrittenHr, foreign: foreign, dateOfMs: dateOfMs, timeOfMs: timeOfMs, localMs: localMs
+  };
+  if (isNode) module.exports = api; else root.HcCore = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
 <script>(function () {
 'use strict';
 /* ===== Forma 0.2 - base: state, storage, battery, Bluetooth, measurement engine, sessions, demo ===== */
@@ -3055,6 +3471,7 @@ function wipeAll() {
   if (!DEMO) try { localStorage.removeItem(SKEY); localStorage.removeItem(SKEY + '.corrupt'); Object.keys(KEYS).forEach(function (k) { localStorage.removeItem(KEYS[k]); localStorage.removeItem(KEYS[k] + '.corrupt'); }); localStorage.removeItem('forma.v1.nightsDone'); } catch (e) { /* ignore */ }
   if (typeof battOnWipe === 'function') battOnWipe();
   if (typeof whoopOnWipe === 'function') whoopOnWipe();
+  if (typeof hcOnWipe === 'function') hcOnWipe();
   log('Usunięto wszystkie dane.');
   if (UI.onData) UI.onData();
 }
@@ -3066,7 +3483,7 @@ function profileCtx() {
   return { complete: FC.profileComplete(p), hrMax: FC.hrMaxOf(p), hrRest: rest, sex: p && p.sex, ok: FC.profileComplete(p) && rest != null };
 }
 function todayStatus() { return C.dayStatus(S.days, todayStr()); }
-function plannedWake() { return (S.profile && S.profile.plannedWake) || FC.typicalWake(S.days, todayStr()) || '07:00'; }
+function plannedWake() { return (S.profile && S.profile.plannedWake) || FC.typicalWake(sleepDays(), todayStr()) || '07:00'; }
 
 // ---------- battery (state; the log, verdict, test and diagnostics live in app2-battery.js) ----------
 function chargingState() {
@@ -3203,6 +3620,7 @@ function commitDay(rec) {
   var saved = persist('days'); S.pending = null;
   log('Zapisano dzień ' + rec.date + (u.replaced ? ' (zastąpiono)' : '') + '.');
   if (typeof e4AfterRecord === 'function') e4AfterRecord(rec.date);
+  if (typeof hcAfterSave === 'function') hcAfterSave(); // write the record to Health Connect
   if (UI.onData) UI.onData();
   return { replaced: u.replaced, saved: saved };
 }
@@ -3250,11 +3668,18 @@ function finishSession() {
     trimp: hasHr && pc.ok ? FC.trimpFromSamples(s.samples, pc.hrRest, pc.hrMax, pc.sex) : null,
     zonesSec: hasHr && pc.hrMax && pc.hrRest != null ? FC.zoneSeconds(s.samples, pc.hrMax, pc.hrRest) : null,
     rpe: null, distanceKm: km >= 0 ? km : null, exercises: ex, hasHr: hasHr,
-    kcal: kc ? kc.gross : null, kcalNet: kc ? kc.net : null, hrPeak: peak
+    kcal: kc ? kc.gross : null, kcalNet: kc ? kc.net : null, hrPeak: peak,
+    hr5: hasHr && typeof hcSupported === 'function' && hcSupported() ? hr5Series(s.samples) : null // heart rate every 5 s, kept only until it has been written to Health Connect
   });
   S.pendingWorkout = w; S.session = null; clearSessionStore();
   log('Koniec treningu ' + s.type + ': ' + (w ? w.durMin + ' min' + (w.trimp != null ? ', TRIMP ' + nf(w.trimp, 1) : '') + (w.kcalNet != null ? ', ok. ' + w.kcalNet + ' kcal ponad spoczynek' : '') + (w.hrPeak ? ', szczyt tętna ' + w.hrPeak : '') : 'za krótki'));
   return w;
+}
+// 1 Hz samples -> one value per 5 s (mean of the non-zero samples in the window, 0 = none)
+function hr5Series(samples) {
+  var out = [];
+  for (var i = 0; i < samples.length; i += 5) { var sum = 0, n = 0; for (var k = i; k < Math.min(i + 5, samples.length); k++) if (samples[k] > 0) { sum += samples[k]; n++; } out.push(n ? Math.round(sum / n) : 0); }
+  return out;
 }
 function commitWorkout(rpe) {
   var w = S.pendingWorkout; if (!w) return false;
@@ -3262,6 +3687,7 @@ function commitWorkout(rpe) {
   var m = FC.mergeById(S.workouts, [w], 'id'); S.workouts = FC.sortWorkouts(m.items);
   var ok = persist('workouts'); var saved = w; S.pendingWorkout = null;
   if (typeof e4AfterWorkout === 'function') e4AfterWorkout(saved);
+  if (typeof hcAfterSave === 'function') hcAfterSave(); // write the workout (with its heart rate) to Health Connect
   if (UI.onData) UI.onData();
   return ok;
 }
@@ -3530,6 +3956,7 @@ function saveNightResult(r) {
   var u = C.upsertDay(S.days, rec); S.days = u.days; persist('days');
   r.state = 'saved'; markNightDone(r.id);
   if (typeof e4AfterRecord === 'function') e4AfterRecord(rec.date);
+  if (typeof hcAfterSave === 'function') hcAfterSave(); // write the night to Health Connect
   log('Zapisano noc ' + r.id + ' jako dzień ' + rec.date + ': RMSSD ' + nf(rec.rmssd, 1) + ' ms, tętno spocz. ' + nf(rec.hr, 0) + ', okna ' + rec.validWindows + '/' + rec.totalWindows + ', jakość ' + rec.quality + (u.replaced ? ' (zastąpiono)' : '') + '.');
   return true;
 }
@@ -3608,9 +4035,10 @@ if (window.FormaNative) window.__formaNativeEvent = function (ev) {
       case 'warning':
         if (ev.code === 'lowBattery') { S.night.warn = 'Bateria opaski: ' + ev.level + '%' + (battVerdict().state === 'stuck' ? ' (odczyt niepewny)' : '') + '. Może nie wystarczyć do rana – pomiar działa dalej.'; log(S.night.warn); if (UI.onNight) UI.onNight(); }
         break;
-      case 'appResumed': nightRefresh(); nativeSync(); mergeNativeBattery(); checkNights(); if (!S.connected) ensureBand('powrót'); if (typeof e4Resume === 'function') e4Resume(); if (UI.onNight) UI.onNight(); if (typeof whoopMaybeSync === 'function') whoopMaybeSync(); break;
+      case 'appResumed': nightRefresh(); nativeSync(); mergeNativeBattery(); checkNights(); if (!S.connected) ensureBand('powrót'); if (typeof e4Resume === 'function') e4Resume(); if (UI.onNight) UI.onNight(); if (typeof whoopMaybeSync === 'function') whoopMaybeSync(); if (typeof hcResume === 'function') hcResume(); break;
       case 'stepsPermission': if (typeof e4StepsPermission === 'function') e4StepsPermission(ev); break;
       case 'whoopAuth': case 'whoopSync': if (typeof whoopNativeEvent === 'function') whoopNativeEvent(ev); break;
+      case 'hcStatus': case 'hcPermissions': case 'hcSyncResult': case 'hcWriteResult': case 'hcError': if (typeof hcNativeEvent === 'function') hcNativeEvent(ev); break;
       case 'error': log('Błąd natywny: ' + ev.message); if (ev.message) showError(String(ev.message)); break;
       default: break;
     }
@@ -4421,7 +4849,7 @@ function e4MergeTips(t) { var c = e4Clean({ tips: t }).tips; Object.keys(c).forE
 function e4OnWipe() { S.e4 = e4Clean(null); S.steps = SC.normalize(null); if (DEMO) e4DemoSteps(); }
 
 // ---------- alarm ----------
-function bedSuggestion() { var tp = FC.tonightPlan(S.days, S.workouts, todayStr(), plannedWake()); return tp && tp.bed ? tp.bed : null; }
+function bedSuggestion() { var tp = FC.tonightPlan(sleepDays(), S.workouts, todayStr(), plannedWake()); return tp && tp.bed ? tp.bed : null; }
 function alarmFor(date) { return AC.alarmStatus(S.days, date, { bed: bedSuggestion() }); }
 function alarmToday() { return alarmFor(todayStr()); }
 // latest status for the Alarm screen: today's, else the most recent record within 3 days (labelled with its date)
@@ -4461,7 +4889,8 @@ function refreshSteps() {
   if (DEMO) return;
   if (!NATIVE || typeof window.FormaNative.getSteps !== 'function') return;
   var raw = nat('getSteps', stepsFromIso());
-  S.steps = SC.normalize(raw && typeof raw === 'object' ? raw : null); S.stepsAt = Date.now();
+  S.steps = SC.normalize(raw && typeof raw === 'object' ? raw : null); S.stepsPhone = S.steps; S.stepsAt = Date.now();
+  if (typeof hcRemergeSteps === 'function') hcRemergeSteps(); // Health Connect steps win for the days they cover
   if (raw && typeof raw === 'object' && raw.permission === false) S.stepsPerm = false; else if (raw && raw.permission === true) S.stepsPerm = true;
 }
 function e4DemoSteps() { // synthetic 14 days, yesterday = 3 120 steps (demo only)
@@ -4519,7 +4948,7 @@ function hrmaxDecline() { var p = hrmaxPrompt(); if (!p) return; S.e4.hrmaxDismi
 // ---------- daily tip ----------
 function tipState() {
   var today = todayStr(), yday = C.addDays(today, -1), rec = dayRec(today), st = todayStatus();
-  var sl = FC.sleepNight(S.days, S.workouts, today), tp = FC.tonightPlan(S.days, S.workouts, today, plannedWake());
+  var sl = FC.sleepNight(sleepDays(), S.workouts, today), tp = FC.tonightPlan(sleepDays(), S.workouts, today, plannedWake());
   var al = rec ? alarmFor(today) : null, gym = TC.gymStats(S.workouts, today), walk = TC.walkMinutes(S.workouts, yday);
   var ys = SC.stepsOn(S.steps, yday);
   return {
@@ -4559,7 +4988,7 @@ function kcalCtx(date) {
   return KC.makeCtx(S.profile, KC.weightOn(S.weights, date), rest, FC.hrMaxOf(S.profile));
 }
 function sleepOf(date) {
-  var r = dayRec(date); if (!r || !r.sleep) return null;
+  var r = C.findDay(sleepDays(), date); if (!r || !r.sleep) return null;
   var dur = FC.recSleepMin(r);
   return { bed: r.sleep.bed, wake: r.sleep.wake, durH: dur / 60, series: r.nightSeries ? { hr: r.nightSeries.hr, step: r.nightSeries.step } : null };
 }
@@ -4586,6 +5015,217 @@ function e4Init() {
 function e4Start() {
   if (!NATIVE) return;
   pushNudgeSettings(); refreshSteps();
+}
+
+/* ===== Forma - Health Connect (Android only): state, native transport (FormaNative.hc*), sync, writes =====
+   Pure rules live in hc-core.js. The web build has no Health Connect: the card then only says so. */
+var HCC = window.HcCore;
+var HKEY = 'forma.v1.hc'; // derived data (steps, nights, other apps' HRV, write ledger). NOT part of KEYS: not in the JSON backup, re-fetchable.
+var HC_ERR = {
+  unavailable: 'Health Connect nie jest zainstalowany albo nie jest dostępny na tym telefonie.',
+  update: 'Health Connect wymaga aktualizacji.',
+  permission: 'Brak uprawnień Health Connect. Przyznaj je ponownie lub zarządzaj nimi w ustawieniach.',
+  sync: 'Nie udało się pobrać danych z Health Connect. Spróbuj ponownie za chwilę.',
+  write: 'Nie udało się zapisać danych w Health Connect. Spróbuję ponownie przy następnym zapisie.',
+  app: 'Nie udało się otworzyć Health Connect.',
+  timeout: 'Health Connect nie odpowiedział. Spróbuj ponownie.'
+};
+S.hc = { avail: null, rep: null, store: HCC.emptyStore(), syncing: false, requesting: false, writing: false, writeAgain: false, inflight: null, err: null, msg: '', msgAt: 0, failed: [], autoPending: false, lastWrite: null, writeFail: 0, syncTimer: null, writeTimer: null };
+S.stepsPhone = null; // StepsCore.normalize() of the phone counter, before the Health Connect merge
+
+function hcSupported() { return NATIVE && !!window.FormaNative && typeof window.FormaNative.hcStatus === 'function'; }
+function hcLoadStore() {
+  if (DEMO) return;
+  try { var raw = localStorage.getItem(HKEY); if (raw) S.hc.store = HCC.cleanStore(JSON.parse(raw)); } catch (e) { log('Health Connect: uszkodzony zapis lokalny, zaczynam od nowa.'); }
+}
+function hcSaveStore() { if (DEMO) return true; try { localStorage.setItem(HKEY, JSON.stringify(S.hc.store)); return true; } catch (e) { return false; } }
+function hcUi() { if (UI.onHc) UI.onHc(); }
+function hcSetErr(code, detail, soft) {
+  S.hc.err = { code: code, text: HC_ERR[code] || HC_ERR.sync, detail: detail || '', soft: !!soft };
+  S.hc.syncing = false; S.hc.requesting = false; S.hc.writing = false;
+  log('Health Connect: błąd ' + code + (detail ? ' – ' + detail : ''));
+  hcUi();
+}
+function hcConnected() { return !!(S.hc.avail === 'available' && S.hc.rep && S.hc.rep.anyRead); }
+function hcCanWrite() { return !!(S.hc.avail === 'available' && S.hc.rep && S.hc.rep.anyWrite); }
+// 'web' | 'checking' | 'na' | 'off' | 'partial' | 'on' | 'error'
+function hcState() {
+  if (!hcSupported()) return 'web';
+  if (S.hc.err && !S.hc.err.soft) return 'error';
+  if (S.hc.avail == null) return 'checking';
+  if (S.hc.avail !== 'available') return 'na';
+  if (!S.hc.rep || !S.hc.rep.connected) return 'off';
+  return S.hc.rep.partial ? 'partial' : 'on';
+}
+
+// ---------- steps: Health Connect first, phone counter as fallback; the source per day is kept in S.steps.src ----------
+function hcRemergeSteps() {
+  if (DEMO) return;
+  var hcN = HCC.stepsNorm(S.hc.store), phone = S.stepsPhone || SC.normalize(null);
+  S.steps = hcN.has ? HCC.mergeSteps(phone, hcN) : phone;
+}
+function stepsSrcOn(date) { return S.steps && S.steps.src ? S.steps.src[date] || null : null; }
+function stepsSrcLabel(date) {
+  var s = stepsSrcOn(date);
+  if (!s) s = hcConnected() && S.hc.store.lastSync ? 'hc' : 'telefon';
+  return s === 'hc' ? 'Health Connect' : 'telefon';
+}
+
+// ---------- sleep view: Health Connect night for days without an own night record (never stored in S.days) ----------
+var hcSleepMemo = { days: null, store: null, out: null };
+function sleepDays() {
+  if (hcSleepMemo.days === S.days && hcSleepMemo.store === S.hc.store) return hcSleepMemo.out;
+  var n = HCC.nightsOf(S.hc.store), out = Object.keys(n).length ? HCC.sleepView(S.days, n) : S.days;
+  hcSleepMemo = { days: S.days, store: S.hc.store, out: out };
+  return out;
+}
+
+// ---------- status / permissions ----------
+function hcApplyStatus(st) {
+  if (!st || typeof st !== 'object') return;
+  if (st.status) S.hc.avail = st.status;
+  if (Array.isArray(st.granted)) S.hc.rep = HCC.permissionReport(st.granted);
+  else if (st.status && st.status !== 'available') S.hc.rep = null;
+  if (S.hc.avail === 'available' && S.hc.err && S.hc.err.soft) S.hc.err = null;
+  if (S.hc.autoPending && S.hc.avail && (S.hc.avail !== 'available' || S.hc.rep)) { S.hc.autoPending = false; hcMaybeSync(); }
+  hcUi();
+}
+function hcRefreshStatus() {
+  if (!hcSupported()) return;
+  var r = nat('hcStatus');
+  if (r && typeof r === 'object' && r.status) { if (!S.hc.avail || r.status !== 'available') S.hc.avail = r.status; if (r.status !== 'available') S.hc.rep = null; }
+  hcUi();
+}
+function hcConnect() {
+  if (!hcSupported()) return false;
+  S.hc.err = null; S.hc.requesting = true; S.hc.msgAt = Date.now(); S.hc.msg = '';
+  var r = nat('hcRequestPermissions');
+  if (r && r.ok === false) { S.hc.requesting = false; if (r.code === 'unavailable' || r.code === 'update') { S.hc.avail = r.code; S.hc.rep = null; S.hc.msg = 'Zainstaluj lub zaktualizuj Health Connect, a potem wróć do Formy.'; } else hcSetErr(r.code || 'app', r.error); }
+  hcUi();
+  return true;
+}
+function hcOpenSettings() { if (hcSupported()) nat('hcOpenSettings'); }
+
+// ---------- sync ----------
+function hcSync(manual) {
+  if (!hcSupported() || S.hc.syncing || !hcConnected()) return false;
+  S.hc.syncing = true; S.hc.err = null; if (manual) { S.hc.msg = ''; S.hc.msgAt = Date.now(); }
+  var since = HCC.sinceFor(S.hc.store.lastSync, Date.now());
+  log('Health Connect: synchronizacja od ' + since.slice(0, 10) + '.');
+  clearTimeout(S.hc.syncTimer); S.hc.syncTimer = setTimeout(function () { if (S.hc.syncing) { S.hc.syncing = false; hcSetErr('timeout'); } }, 120000);
+  var r = nat('hcSync', since);
+  if (!r || r.ok === false) { clearTimeout(S.hc.syncTimer); hcSetErr(r && r.code === 'unavailable' ? 'unavailable' : 'sync', r && r.error); return true; }
+  hcUi();
+  return true;
+}
+// imported workouts have no heart-rate series: a TRIMP from the average heart rate keeps them in the load (own estimate)
+function hcFillTrimp(list) {
+  var pc = profileCtx();
+  if (!pc.ok) return list;
+  return list.map(function (w) {
+    if (w.source !== 'hc' || w.trimp != null || !(w.hrAvg > 0) || !(w.durMin >= 5) || w.type === 'sauna') return w;
+    try { var tr = FC.trimpFromSamples(new Array(Math.round(w.durMin * 60)).fill(Math.round(w.hrAvg)), pc.hrRest, pc.hrMax, pc.sex); return tr > 0 ? Object.assign({}, w, { trimp: tr }) : w; } catch (e) { return w; }
+  });
+}
+function hcApplyData(ev) {
+  clearTimeout(S.hc.syncTimer); S.hc.syncing = false;
+  if (!ev.ok) { if (ev.code === 'unavailable' || ev.code === 'update') { S.hc.avail = ev.code; S.hc.rep = null; } hcSetErr(ev.code === 'permission' ? 'permission' : (HC_ERR[ev.code] ? ev.code : 'sync'), ev.message); return; }
+  if (Array.isArray(ev.granted)) S.hc.rep = HCC.permissionReport(ev.granted);
+  var res;
+  try { res = HCC.applySync({ workouts: S.workouts, weights: S.weights, profile: S.profile, store: S.hc.store }, ev.data || {}, Date.now()); }
+  catch (e) { hcSetErr('sync', 'Błąd przetwarzania: ' + (e && e.message)); return; }
+  S.workouts = hcFillTrimp(res.workouts); S.weights = res.weights; persist('workouts'); persist('weights');
+  S.hc.store = res.store; hcSaveStore(); hcRemergeSteps();
+  S.hc.failed = Array.isArray(ev.failed) ? ev.failed : []; S.hc.err = null;
+  S.hc.msgAt = Date.now(); S.hc.msg = HCC.summaryText(res.stats) + (S.hc.failed.length ? ' Nie udało się odczytać: ' + S.hc.failed.length + ' kategorii.' : '');
+  log('Health Connect: ' + S.hc.msg + ' Pominięte treningi (nakładają się na własne): ' + res.stats.workoutsSkipped + ', zapisane przez Formę: ' + res.stats.workoutsSelf + '.');
+  if (UI.onData) UI.onData();
+  hcWriteNow();
+}
+function hcMaybeSync() { // app open / resume: sync when connected and the last sync is older than 30 min
+  if (!hcSupported() || S.hc.syncing || S.hc.requesting || !hcConnected()) return false;
+  if (S.hc.err && S.hc.err.code === 'permission') return false;
+  if (!HCC.needsSync(S.hc.store.lastSync, Date.now())) return false;
+  return hcSync(false);
+}
+
+// ---------- writes (our own records only; see HcCore.planWrites) ----------
+var HC_WRITE_GROUP = { hrv: 'hrv', rhr: 'rhr', exercise: 'exercise', hr: 'hr', sleep: 'sleep' };
+function hcWriteNow() {
+  if (!hcSupported() || !hcCanWrite()) return false;
+  if (S.hc.writing) { S.hc.writeAgain = true; return false; }
+  var plan = HCC.planWrites(S.days, S.workouts, S.hc.store.written, { nowMs: Date.now(), today: todayStr(), nights: HCC.nightsOf(S.hc.store) });
+  var recs = plan.records.filter(function (r) { return S.hc.rep.has(HC_WRITE_GROUP[r.kind], 'write'); });
+  if (!recs.length) return false;
+  S.hc.writing = true; S.hc.inflight = recs;
+  log('Health Connect: zapis ' + recs.length + ' rekordów (' + recs.map(function (r) { return r.kind; }).filter(function (k, i, a) { return a.indexOf(k) === i; }).join(', ') + ').');
+  clearTimeout(S.hc.writeTimer); S.hc.writeTimer = setTimeout(function () { if (S.hc.writing) { S.hc.writing = false; S.hc.inflight = null; hcSetErr('timeout', 'zapis', true); } }, 60000);
+  var r = nat('hcWrite', JSON.stringify({ records: recs }));
+  if (!r || r.ok === false) { clearTimeout(S.hc.writeTimer); S.hc.writing = false; S.hc.inflight = null; hcSetErr(r && r.code === 'unavailable' ? 'unavailable' : 'write', r && r.error, true); }
+  return true;
+}
+function hcOnWriteResult(ev) {
+  clearTimeout(S.hc.writeTimer); S.hc.writing = false;
+  var planned = S.hc.inflight || []; S.hc.inflight = null;
+  S.hc.store.written = HCC.applyWriteResult(S.hc.store.written, planned, ev);
+  var st = HCC.stripWrittenHr(S.workouts, S.hc.store.written);
+  if (st.changed) { S.workouts = st.items; persist('workouts'); }
+  hcSaveStore();
+  var n = Array.isArray(ev.written) ? ev.written.length : 0, bad = Array.isArray(ev.failed) ? ev.failed.length : 0;
+  if (n) S.hc.lastWrite = Date.now();
+  S.hc.writeFail = bad;
+  log('Health Connect: zapisano ' + n + (bad ? ', nieudane ' + bad : '') + (Array.isArray(ev.denied) && ev.denied.length ? ', bez uprawnień: ' + ev.denied.join(', ') : '') + '.');
+  if (ev.ok === false) hcSetErr(ev.code === 'permission' ? 'permission' : 'write', ev.message, true);
+  else hcUi();
+  if (S.hc.writeAgain) { S.hc.writeAgain = false; hcWriteNow(); }
+}
+function hcAfterSave() { if (hcSupported() && hcCanWrite()) setTimeout(hcWriteNow, 0); } // morning record, night, workout saved
+
+// ---------- height suggestion (once per value) ----------
+function hcHeightSug() {
+  var g = S.hc.store.heightSug; if (!g) return null;
+  var cur = S.profile && S.profile.heightCm;
+  if (cur != null && Math.abs(cur - g.cm) < 1) return null;
+  return g;
+}
+function hcHeightAnswer(accept) {
+  var g = S.hc.store.heightSug; if (!g) return;
+  if (accept) applyProfile({ heightCm: g.cm });
+  S.hc.store.heightOffered = g.cm; S.hc.store.heightSug = null; hcSaveStore();
+  log('Health Connect: wzrost ' + g.cm + ' cm ' + (accept ? 'zapisano w profilu' : 'odrzucono') + '.');
+  hcUi();
+}
+
+// ---------- events ----------
+function hcNativeEvent(ev) {
+  if (ev.type === 'hcStatus') hcApplyStatus(ev);
+  else if (ev.type === 'hcPermissions') {
+    S.hc.requesting = false; if (!S.hc.avail) S.hc.avail = 'available';
+    hcApplyStatus({ status: 'available', granted: ev.granted });
+    if (hcConnected()) { S.hc.msgAt = Date.now(); S.hc.msg = ''; log('Health Connect: uprawnienia przyznane (' + (ev.granted || []).length + ').'); hcSync(true); }
+    else { S.hc.msgAt = Date.now(); S.hc.msg = 'Nie przyznano żadnych uprawnień Health Connect.'; hcUi(); }
+  }
+  else if (ev.type === 'hcSyncResult') hcApplyData(ev);
+  else if (ev.type === 'hcWriteResult') hcOnWriteResult(ev);
+  else if (ev.type === 'hcError') hcSetErr(HC_ERR[ev.code] ? ev.code : 'sync', ev.message);
+}
+function hcResume() { // app back in front: permissions may have changed in the Health Connect settings
+  if (!hcSupported()) return;
+  S.hc.autoPending = true; hcRefreshStatus();
+}
+function hcOnWipe() {
+  S.hc.store = HCC.emptyStore(); S.hc.msg = ''; S.hc.err = null; S.hc.failed = []; S.stepsPhone = null; hcSleepMemo = { days: null, store: null, out: null };
+  if (!DEMO) try { localStorage.removeItem(HKEY); } catch (e) { /* ignore */ }
+}
+function hcLastSyncText() {
+  var t = S.hc.store.lastSync; if (!t) return 'jeszcze nie synchronizowano';
+  var d = new Date(t), hm = C.localTimeStr(d), ds = C.localDateStr(d);
+  return ds === todayStr() ? hm : (ds === C.addDays(todayStr(), -1) ? 'wczoraj ' + hm : ds.slice(8) + '.' + ds.slice(5, 7) + ' ' + hm);
+}
+function hcInit() { hcLoadStore(); }
+function hcStart() { // after nativeInit: ask for the status; the permission list arrives as an event and then triggers the auto sync
+  if (!hcSupported()) return;
+  S.hc.autoPending = true; hcRefreshStatus();
 }
 
 /* ===== Forma 0.2 - UI part A: helpers, charts, shell/router, Dziś, Pomiar, Poranek ===== */
@@ -5008,7 +5648,7 @@ function weekDayBars(today) {
 }
 function rDzis() {
   var today = todayStr(), st = todayStatus(), yday = C.addDays(today, -1);
-  var sl = FC.sleepNight(S.days, S.workouts, today), strain = FC.dailyStrain(S.workouts, today, S.days), pc = profileCtx();
+  var sl = FC.sleepNight(sleepDays(), S.workouts, today), strain = FC.dailyStrain(S.workouts, today, S.days), pc = profileCtx();
   var line = dzisStatusLine(st), now = new Date(), i = 1;
   var h = header('Dziś', { gear: true, full: true });
   h += '<div class="body">';
@@ -5066,7 +5706,7 @@ function rDzis() {
   h += '</div>';
   // tiles
   h += '<div class="card tile fu" ' + dl(i++) + '><p class="lbl">Tętno dziś</p><div data-live="hr" class="col">' + hrTileHtml() + '</div></div>';
-  var tp = FC.tonightPlan(S.days, S.workouts, today, plannedWake());
+  var tp = FC.tonightPlan(sleepDays(), S.workouts, today, plannedWake());
   h += '<div class="g2 fu" ' + dl(i++) + '>';
   h += '<a href="#/sen" class="card tile"><p class="row sp lbl">Sen' + ico('chev', 14) + '</p>' + (sl ? '<span class="n big" style="font-size:28px;white-space:nowrap">' + FC.fmtDur(sl.durH) + '</span><span class="sm sub">z ' + FC.fmtDur(sl.needH) + ' potrzeby' + (sl.shortH > 0.05 ? ',<br><b style="color:#fff">brakuje ' + FC.fmtDur(sl.shortH) + '</b>' : '') + '</span><div class="bar"><i class="gx" style="width:' + clamp(sl.durH / sl.needH * 100, 0, 100) + '%;background:#E07BF0"></i></div>' : '<span class="mut sm">Brak danych o śnie. Wpisz godziny snu w porannym pomiarze.</span>') + '</a>';
   h += '<div class="card tile"><p class="row lbl" style="gap:6px">' + ico('moon', 16) + 'Dziś wieczorem</p><span class="xs sub">Do łóżka do</span><span class="n big">' + esc(tp.bed || '—') + '</span><span class="xs mut">potrzeba ok. ' + FC.fmtDur(tp.needH) + ' snu</span>' +
@@ -5570,6 +6210,7 @@ function rKalorie() {
   var cal = kcalCalibration(), factor = cal.ok ? cal.factor : 1, up = isToday ? KC.upToMinute(day, new Date().getHours() * 60 + new Date().getMinutes()) : null;
   h += '<div class="card fu" ' + dl(i++) + ' data-e4="kcal-total"><p class="lbl">Spalone kalorie ' + (isToday ? 'dziś' : ddmm(sel)) + '</p><div class="row" style="align-items:baseline;gap:8px"><span class="n" style="font-size:44px;line-height:1.05" data-e4="kcal-big">' + nfi(day.total * factor) + '</span><span style="font-size:20px" class="sub">kcal</span></div>' +
     '<div class="row" style="gap:8px;flex-wrap:wrap"><span class="chip-est" style="display:inline-flex;align-items:center;gap:6px;min-height:28px;padding:0 12px;border-radius:999px;border:1px solid rgba(242,169,59,.7);background:rgba(242,169,59,.10);color:#F2A93B;font-size:13px;font-weight:600"><span style="width:6px;height:6px;border-radius:3px;background:currentColor"></span>szacunek ±20%</span><span class="xs mut">' + (cal.ok ? 'skalibrowane (×' + nf(cal.factor, 2) + ')' : 'wg wzorów') + (up != null ? ' · do teraz ok. ' + nfi(up * factor) : '') + '</span></div></div>';
+  h += hcKcalCardHtml(sel, day.total * factor, i++);
   h += '<div class="card fu" ' + dl(i++) + ' data-e4="kcal-donut"><div class="row" style="gap:18px">' + donutHtml(day) + '<div class="grow col" style="gap:10px">' + ['rest', 'sleep', 'move', 'train'].map(function (k) {
     return '<div class="row sp" style="gap:6px"><span class="row sm" style="gap:8px"><span style="width:10px;height:10px;border-radius:5px;background:' + KC_COL[k] + ';flex:none"></span><span class="sub">' + KC_NAME[k] + '</span></span><b class="n" style="font-size:16px">' + nfi(day[k]) + '</b></div>';
   }).join('') + '</div></div>' + (day.notes.indexOf('brak kroków') >= 0 ? '<p class="xs mut" style="margin:0" data-e4="no-steps">Ruch: brak danych o krokach. ' + (NATIVE ? 'Włącz zliczanie kroków w Profilu.' : 'Kroki są dostępne w aplikacji na Androida.') + '</p>' : '') + '</div>';
@@ -5604,10 +6245,11 @@ function kcalTileHtml(i) {
 function stepsTileHtml(i) {
   var st = S.steps, today = todayStr(), head = '<p class="lbl">Kroki</p>';
   if (!NATIVE && !DEMO) return '<div class="card tile fu" ' + dl(i) + ' data-e4="steps-tile">' + head + '<span class="mut sm" data-e4="steps-web">Kroki dostępne w aplikacji na Androida</span></div>';
-  if (NATIVE && !S.e4.nudge.track) return '<a href="#/profil" class="card tile fu" ' + dl(i) + ' data-e4="steps-tile">' + head + '<span class="mut sm">Włącz zliczanie kroków w Profilu.</span></a>';
-  if (NATIVE && S.stepsPerm === false) return '<a href="#/profil" class="card tile fu" ' + dl(i) + ' data-e4="steps-tile">' + head + '<span class="mut sm">Brak zgody na rozpoznawanie aktywności. Dotknij, by to zmienić.</span></a>';
+  var hcDay = hcConnected() && !!S.hc.store.lastSync; // Health Connect has delivered data: the tile shows its source even when the phone counter is off
+  if (NATIVE && !S.e4.nudge.track && !hcDay) return '<a href="#/profil" class="card tile fu" ' + dl(i) + ' data-e4="steps-tile">' + head + '<span class="mut sm">Włącz zliczanie kroków w Profilu.</span></a>';
+  if (NATIVE && S.stepsPerm === false && !hcDay) return '<a href="#/profil" class="card tile fu" ' + dl(i) + ' data-e4="steps-tile">' + head + '<span class="mut sm">Brak zgody na rozpoznawanie aktywności. Dotknij, by to zmienić.</span></a>';
   var v = SC.stepsOn(st, today), days = lastDays(7), vals = days.map(function (d) { var x = SC.stepsOn(st, d); return x == null ? 0 : x; }), mx = Math.max.apply(null, vals.concat([1]));
-  return '<div class="card tile fu" ' + dl(i) + ' data-e4="steps-tile">' + head + '<span class="n big" style="font-size:30px;white-space:nowrap" data-e4="steps-today">' + (v != null ? nfi(v) : '0') + '</span><span class="xs mut">dziś' + (DEMO ? ' (demo)' : '') + '</span>' +
+  return '<div class="card tile fu" ' + dl(i) + ' data-e4="steps-tile">' + head + '<span class="n big" style="font-size:30px;white-space:nowrap" data-e4="steps-today">' + (v != null ? nfi(v) : '0') + '</span><span class="xs mut" data-e4="steps-source">dziś · ' + (DEMO ? 'demo' : stepsSrcLabel(today)) + '</span>' +
     '<div class="row" style="align-items:flex-end;gap:4px;height:34px" aria-hidden="true">' + vals.map(function (x, k) { return '<i class="gy" style="flex:1;border-radius:2px;height:' + Math.max(3, x / mx * 30) + 'px;background:' + (k === 6 ? '#2CE8B5' : '#4C6A87') + '"></i>'; }).join('') + '</div></div>';
 }
 
@@ -5688,6 +6330,106 @@ function alarmTrendLink(i) {
   return '<a href="#/alarm" class="card fu" ' + dl(i) + ' data-e4="alarm-link"><div class="row sp"><div><p class="lbl">Alarm przemęczenia</p><span class="sm sub">' + (st.calibrating || !st.hasRecord ? esc(st.calLabel || st.message) : esc(st.label)) + '</span></div>' + ico('chev', 20) + '</div></a>';
 }
 
+/* ===== Forma - UI of the Health Connect integration: Profil card, comparison cards, actions ===== */
+var ACT_HC = {};
+var HC_READ_TXT = 'kroki, waga, wzrost, treningi, sen, tętno, tętno spoczynkowe, HRV, kalorie (aktywne i całkowite)';
+var HC_WRITE_TXT = 'HRV (RMSSD), tętno spoczynkowe, treningi (z tętnem), sen. Sauny nie zapisujemy.';
+function hcPill(state) {
+  var m = { web: ['Tylko Android', '#9AA6B0'], checking: ['Sprawdzam…', '#9AA6B0'], na: ['Wymaga instalacji', '#F2A93B'], off: ['Niepołączono', '#9AA6B0'], on: ['Połączono', '#2EE86B'], partial: ['Część uprawnień', '#F2A93B'], error: ['Błąd', '#FF8A96'] }[state];
+  return '<span class="row xs" style="gap:6px;color:' + m[1] + ';font-weight:600" data-hc="pill"><span class="dotp" style="background:' + m[1] + ';animation:none"></span>' + m[0] + '</span>';
+}
+function hcListsHtml() {
+  return '<div class="col" style="gap:6px" data-hc="lists"><p class="sm sub" style="margin:0"><b style="color:#fff">Czytamy:</b> ' + HC_READ_TXT + '.</p>' +
+    '<p class="sm sub" style="margin:0"><b style="color:#fff">Zapisujemy:</b> ' + HC_WRITE_TXT + '</p></div>';
+}
+function hcCountsHtml() {
+  var st = S.hc.store.stats, written = Object.keys(S.hc.store.written).length, h = '';
+  if (st) h += '<p class="sm sub" style="margin:0" data-hc="counts">Ostatnio ' + esc(HCC.summaryText(st).replace(/^Pobrano: /, 'pobrano: ').replace(/^Brak nowych danych.*$/, 'brak nowych danych.')) + '</p>';
+  if (written) h += '<p class="sm sub" style="margin:0" data-hc="written">Zapisane przez Formę w Health Connect: <b style="color:#fff">' + written + '</b> ' + (written === 1 ? 'rekord' : 'rekordów') + '.' + (S.hc.writeFail ? ' Nieudane: ' + S.hc.writeFail + ' (spróbuję ponownie).' : '') + '</p>';
+  return h;
+}
+function hcHeightHtml() {
+  var g = hcHeightSug(); if (!g) return '';
+  var cur = S.profile && S.profile.heightCm;
+  return '<div class="note ok" data-hc="height" role="status">Health Connect podaje Twój wzrost: <b>' + g.cm + ' cm</b> (' + esc(HCC.originLabel(g.origin)) + ')' + (cur ? ', w profilu masz ' + cur + ' cm' : ', w profilu go nie ma') + '. Zaktualizować profil?' +
+    '<div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="btn sm pri grow" data-act="hcHeightYes">Zaktualizuj profil</button><button class="btn sm grow" data-act="hcHeightNo">Nie, dziękuję</button></div></div>';
+}
+function hcCardHtml() {
+  var st = hcState(), msg = Date.now() - (S.hc.msgAt || 0) < 30000 ? S.hc.msg : '', r = S.hc.rep;
+  var h = '<div class="card js-hc" data-hc="card" data-hc-state="' + st + '"><div class="row sp"><p class="lbl">Health Connect</p>' + hcPill(st) + '</div>';
+  if (st === 'web') {
+    return h + '<p class="sm sub" style="margin:0" data-hc="web">Health Connect dostępny w aplikacji na Androida.</p>' +
+      '<p class="xs mut" style="margin:0">W aplikacji Forma pobierze z niego kroki, wagę, treningi i sen z innych aplikacji i zegarków oraz zapisze tam Twoje pomiary.</p></div>';
+  }
+  if (st === 'checking') return h + '<p class="sm sub" style="margin:0">Sprawdzam, czy Health Connect jest dostępny…</p></div>';
+  if (st === 'na') {
+    return h + '<p class="sm" style="margin:0;color:#FFE2B8" data-hc="na">Zainstaluj lub zaktualizuj Health Connect</p>' +
+      '<p class="xs mut" style="margin:0">Health Connect to systemowy magazyn danych zdrowotnych Androida. Bez niego Forma nie ma skąd pobrać kroków, wagi, snu i treningów.</p>' +
+      (msg ? '<div class="note ok" role="status">' + esc(msg) + '</div>' : '') +
+      '<button class="btn pri full" data-act="hcStore">Zainstaluj lub zaktualizuj Health Connect</button></div>';
+  }
+  if (st === 'off') {
+    return h + hcListsHtml() + (msg ? '<div class="note" role="status" data-hc="msg">' + esc(msg) + '</div>' : '') +
+      '<p class="xs mut" style="margin:0">Dane zostają na telefonie. Każde uprawnienie możesz później zmienić w ustawieniach Health Connect.</p>' +
+      '<button class="btn pri full" data-act="hcConnect"' + (S.hc.requesting ? ' disabled' : '') + '>' + (S.hc.requesting ? 'Czekam na zgodę…' : 'Połącz') + '</button></div>';
+  }
+  // on | partial | error
+  if (st === 'error') h += '<div class="note err" role="alert" data-hc="err">' + esc(S.hc.err.text) + (S.hc.err.detail ? '<div class="xs" style="opacity:.8;margin-top:2px">' + esc(S.hc.err.detail) + '</div>' : '') + '</div>';
+  else if (msg) h += '<div class="note ok" role="status" data-hc="msg">' + esc(msg) + '</div>';
+  if (st === 'partial' || (st === 'error' && r && r.partial)) {
+    var miss = [];
+    if (r.missingRead.length) miss.push('odczyt: ' + r.missingRead.join(', '));
+    if (r.missingWrite.length) miss.push('zapis: ' + r.missingWrite.join(', '));
+    h += '<div class="note" role="status" data-hc="missing">Brakuje uprawnień (' + esc(miss.join('; ')) + '). Reszta działa. <button class="btn sm" data-act="hcConnect" style="margin-top:8px" ' + (S.hc.requesting ? 'disabled' : '') + '>Przyznaj brakujące</button></div>';
+  }
+  if (st === 'error' && !(r && r.connected)) h += hcListsHtml();
+  h += hcHeightHtml();
+  if (r && r.connected) {
+    h += '<p class="sm" style="margin:0" data-hc="last">Ostatnia synchronizacja: <b>' + esc(hcLastSyncText()) + '</b></p>' + hcCountsHtml() +
+      '<p class="xs mut" style="margin:0">Dane innych aplikacji (HRV, tętno spoczynkowe, kalorie) pokazujemy tylko do porównania. Nie wchodzą do Twojej normy ani wyniku.</p>' +
+      '<div class="row" style="flex-wrap:wrap"><button class="btn pri grow" data-act="hcSyncNow"' + (S.hc.syncing ? ' disabled' : '') + '>' + (S.hc.syncing ? 'Synchronizuję…' : 'Synchronizuj') + '</button><button class="btn grow" data-act="hcManage">Zarządzaj uprawnieniami</button></div>';
+  } else if (st === 'error') {
+    h += '<div class="row" style="flex-wrap:wrap"><button class="btn pri grow" data-act="hcConnect">Spróbuj ponownie</button><button class="btn grow" data-act="hcManage">Zarządzaj uprawnieniami</button></div>';
+  }
+  return h + '</div>';
+}
+// row in "Źródła danych"
+function hcSourceRowHtml() {
+  var st = hcState(), on = st === 'on' || st === 'partial', col = on ? '#2EE86B' : (st === 'error' ? '#FF8A96' : '#6E7A84');
+  var txt = { web: 'dostępny w aplikacji na Androida', checking: 'sprawdzam…', na: 'zainstaluj lub zaktualizuj Health Connect', off: 'nie połączono · kroki, waga, sen, treningi', on: 'połączono · ostatnia synchronizacja ' + hcLastSyncText(), partial: 'część uprawnień · ostatnia synchronizacja ' + hcLastSyncText(), error: 'błąd · szczegóły w karcie poniżej' }[st];
+  return '<div class="row" style="align-items:flex-start" data-hc="source-row"><span class="dotp" style="background:' + col + ';margin-top:7px;animation:none"></span><div class="grow"><b>Health Connect</b><div class="xs mut">' + esc(txt) + '</div></div></div>';
+}
+// Regeneracja: HRV and resting HR written by other apps (comparison only)
+function hcCompareHtml(date) {
+  if (!hcSupported() || !hcConnected()) return '';
+  var rows = HCC.dayCompare(S.hc.store, date); if (!rows.length) return '';
+  var cell = function (v, u) { return v == null ? '<span class="mut">—</span>' : '<span class="n" style="font-size:20px">' + nf(v, 0) + '</span><span class="xs mut"> ' + u + '</span>'; };
+  return '<div class="card fu js-hccmp" ' + dl(2) + ' data-hc="compare"><p class="lbl">Inne aplikacje (Health Connect)</p>' +
+    '<div style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr);gap:8px 6px;align-items:baseline"><span></span><span class="xs mut" style="text-align:right">HRV</span><span class="xs mut" style="text-align:right">Tętno spocz.</span>' +
+    rows.map(function (x) { return '<span class="sm sub">' + esc(x.label) + '</span><span style="text-align:right">' + cell(x.rmssd, 'ms') + '</span><span style="text-align:right">' + cell(x.rhr, 'ud/min') + '</span>'; }).join('') + '</div>' +
+    '<p class="xs mut" style="margin:0">Tylko do porównania: inna metoda i pora pomiaru. Te liczby nie trafiają do Twojej normy ani wyniku regeneracji.</p></div>';
+}
+// Kalorie: Health Connect next to our estimate
+function hcKcalCardHtml(date, ours, i) {
+  if (!hcSupported() || !hcConnected()) return '';
+  var k = HCC.kcalCompare(S.hc.store, date); if (!k) return '';
+  var cell = function (v) { return v == null ? '<span class="mut">—</span>' : '<span class="n" style="font-size:22px">' + nfi(v) + '</span><span class="xs mut"> kcal</span>'; };
+  return '<div class="card fu" ' + dl(i) + ' data-hc="kcal"><p class="lbl">Porównanie z Health Connect</p>' +
+    '<div style="display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:8px 6px;align-items:baseline">' +
+    '<span class="sm sub">Nasz szacunek</span><span style="text-align:right" data-hc="kcal-ours">' + cell(ours) + '</span>' +
+    '<span class="sm sub">Health Connect: razem</span><span style="text-align:right" data-hc="kcal-total">' + cell(k.total) + '</span>' +
+    '<span class="sm sub">Health Connect: aktywne</span><span style="text-align:right" data-hc="kcal-active">' + cell(k.active) + '</span></div>' +
+    '<p class="xs mut" style="margin:0">Dane z innych aplikacji i zegarków, tylko dla porównania. Nie zastępują naszego szacunku i nie zmieniają kalibracji.</p></div>';
+}
+
+ACT_HC.hcConnect = function () { hcConnect(); };
+ACT_HC.hcStore = function () { S.hc.msgAt = Date.now(); S.hc.msg = 'Zainstaluj lub zaktualizuj Health Connect, a potem wróć do Formy.'; hcOpenSettings(); hcUi(); };
+ACT_HC.hcSyncNow = function () { hcSync(true); };
+ACT_HC.hcManage = function () { hcOpenSettings(); };
+ACT_HC.hcHeightYes = function () { hcHeightAnswer(true); };
+ACT_HC.hcHeightNo = function () { hcHeightAnswer(false); };
+UI.onHc = function () { var top = stack[stack.length - 1]; if (top && /^(profil|dzis|kalorie|regeneracja|sen|trendy)$/.test(top.path)) rerender(); };
+
 /* ===== Forma 0.2 - UI part B: Regeneracja, Sen, Trening, sesje, Forma, Trendy, Profil, Diagnostyka, events, init ===== */
 function weekdayShort(date) { return WD1[dowIdx(date)]; }
 
@@ -5730,6 +6472,7 @@ function rRegen() {
     (rec.whoopHrv != null ? '<p class="sm" style="margin:0;color:#C5CED6">WHOOP tej nocy: ' + nf(rec.whoopHrv, 0) + ' ms (inna metoda – porównuj trend, nie liczby)</p>' : '') +
     '<button class="btn sm" data-act="measure"' + (S.connected ? '' : ' disabled') + ' style="align-self:flex-start">' + (rec.source === 'noc' ? 'Dodaj pomiar poranny (2 min)' : (rec.source === 'whoop' ? 'Dodaj własny pomiar (2 min)' : 'Zmierz ponownie')) + '</button></div>';
   h += compareCardHtml(st, rec);
+  h += hcCompareHtml(rec.date);
   if (st.scored) {
     h += '<div class="card fu" ' + dl(3) + '><p class="lbl">Co złożyło się na wynik</p><div class="g2" style="gap:12px 18px"><div><div class="row sp"><span class="sm sub">HRV · 75%</span><span class="n" style="font-size:22px">' + Math.round(st.cHrv) + '</span></div>' + factorBar(st.cHrv) + '</div>' +
       '<div><div class="row sp"><span class="sm sub">Tętno spocz. · 25%</span><span class="n" style="font-size:22px">' + Math.round(st.cRhr) + '</span></div>' + factorBar(st.cRhr) + '</div></div>' +
@@ -5780,7 +6523,7 @@ function sleepStagesCard(sl, idx) {
   var tot = seg.reduce(function (a, x) { return a + x[2]; }, 0); if (!(tot > 0)) return '';
   var dur = function (m) { return FC.fmtDur(m / 60); };
   var aria = 'Fazy snu: ' + seg.map(function (x) { return x[1] + ' ' + dur(x[2]); }).join(', ');
-  var h = '<div class="card fu js-stages" ' + dl(idx) + '><div class="row sp"><p class="lbl">Fazy snu</p><span class="xs" style="color:#2D9CFF;font-weight:600">WHOOP</span></div>' +
+  var h = '<div class="card fu js-stages" ' + dl(idx) + '><div class="row sp"><p class="lbl">Fazy snu</p><span class="xs" style="color:#2D9CFF;font-weight:600" data-hc="stages-src">' + (sl.stagesSrc === 'hc' ? 'Health Connect' + (w.origin ? ' · ' + esc(HCC.originLabel(w.origin)) : '') : 'WHOOP') + '</span></div>' +
     '<div role="img" aria-label="' + esc(aria) + '" style="display:flex;gap:2px;height:16px">' + seg.map(function (x) { return x[2] > 0 ? '<i class="gx" style="flex:' + x[2].toFixed(1) + ';min-width:4px;border-radius:4px;background:' + STAGE_COL[x[0]] + '"></i>' : ''; }).join('') + '</div>' +
     '<div class="g2" style="gap:8px 12px">' + seg.map(function (x) { return '<div><div class="row" style="gap:6px"><span class="dotp" style="background:' + STAGE_COL[x[0]] + ';animation:none"></span><span class="sm sub">' + x[1] + '</span></div><span class="n" style="font-size:20px">' + dur(x[2]) + '</span> <span class="xs mut">' + nf(x[2] / tot * 100, 0) + '%</span></div>'; }).join('') + '</div>';
   var facts = [];
@@ -5791,11 +6534,11 @@ function sleepStagesCard(sl, idx) {
   if (w.performance != null) facts.push(['Wydajność (WHOOP)', nf(w.performance, 0) + '%']);
   if (w.consistency != null) facts.push(['Regularność (WHOOP)', nf(w.consistency, 0) + '%']);
   if (facts.length) h += '<div class="g2" style="gap:6px 12px;border-top:1px solid rgba(255,255,255,.08);padding-top:8px">' + facts.map(function (f) { return '<div class="row sp xs"><span class="mut">' + f[0] + '</span><b>' + f[1] + '</b></div>'; }).join('') + '</div>';
-  return h + '<p class="xs mut" style="margin:0">Czas snu w Formie to czas faktycznie przespany (bez przebudzeń). Godziny snu pochodzą z pomiaru WHOOP.</p></div>';
+  return h + '<p class="xs mut" style="margin:0">Czas snu w Formie to czas faktycznie przespany (bez przebudzeń). Godziny snu pochodzą z pomiaru ' + (sl.stagesSrc === 'hc' ? 'z Health Connect (nie masz własnej nocy z opaski).' : 'WHOOP.') + '</p></div>';
 }
 function rSen() {
-  var today = todayStr(), sl = FC.sleepNight(S.days, S.workouts, today), h = header('Sen', { back: 'dzis' }) + '<div class="body">';
-  var tp = FC.tonightPlan(S.days, S.workouts, today, plannedWake());
+  var today = todayStr(), sl = FC.sleepNight(sleepDays(), S.workouts, today), h = header('Sen', { back: 'dzis' }) + '<div class="body">';
+  var tp = FC.tonightPlan(sleepDays(), S.workouts, today, plannedWake());
   if (!sl) h += emptyCard('Brak danych o śnie', 'Godziny snu wpisujesz w porannym formularzu: „Zasnąłem o” i „Obudziłem się o”.', '<button class="btn pri full" data-act="measure"' + (S.connected ? '' : ' disabled') + '>Poranny pomiar (2 min)</button>');
   else {
     h += '<div class="card fu"><div class="row sp"><div><p class="lbl">Godziny snu</p><div class="n" style="font-size:36px;line-height:1.15;white-space:nowrap">' + FC.fmtDur(sl.durH) + '</div><div class="sub">z ' + FC.fmtDur(sl.needH) + ' potrzeby</div></div>' +
@@ -5804,14 +6547,14 @@ function rSen() {
     h += sleepStagesCard(sl, 1);
     h += sleepKcalCard(today, 1);
     var dates = lastDays(7), bars = [], need = [];
-    dates.forEach(function (d, i) { var n = FC.sleepNight(S.days, S.workouts, d); if (n) { bars.push({ i: i, v: n.durH, color: '#E07BF0', op: d === today ? 1 : 0.5 }); need.push({ i: i, v: n.needH }); } });
+    dates.forEach(function (d, i) { var n = FC.sleepNight(sleepDays(), S.workouts, d); if (n) { bars.push({ i: i, v: n.durH, color: '#E07BF0', op: d === today ? 1 : 0.5 }); need.push({ i: i, v: n.needH }); } });
     h += '<div class="card fu" ' + dl(1) + '><div class="row sp xs mut"><span>Czas snu, 7 ostatnich nocy</span><span>--- potrzeba</span></div>' + chart({ n: 7, ymax: 10, ticks: [0, 4, 8], label: 'Czas snu z 7 ostatnich nocy', bars: bars, lines: [{ pts: need, color: '#C5CED6', w: 1.5, dash: true }], tickFmt: function (t) { return t + ' h'; }, xl: dates.map(function (d, i) { return { i: i, t: weekdayShort(d), b: i === 6, c: i === 6 ? '#fff' : '#9AA6B0' }; }) }) +
-      '<p class="xs mut" style="margin:0">Poszedłeś spać ' + esc(sl.bed) + ', wstałeś ' + esc(sl.wake) + (sl.whoop ? ' (pomiar WHOOP)' : '') + '.</p></div>';
+      '<p class="xs mut" style="margin:0">Poszedłeś spać ' + esc(sl.bed) + ', wstałeś ' + esc(sl.wake) + (sl.whoop ? (sl.stagesSrc === 'hc' ? ' (Health Connect)' : ' (pomiar WHOOP)') : '') + '.</p></div>';
     var r = sl.regInfo;
     h += '<div class="card fu" ' + dl(1) + '><p class="lbl">Składniki wyniku snu</p>' +
       '<div class="row sp"><span class="sm sub">Wydajność · 60%</span><span class="n" style="font-size:22px">' + Math.round(sl.perf) + '</span></div>' + factorBar(sl.perf) +
       '<div class="row sp"><span class="sm sub">Regularność · 20%</span><span class="n" style="font-size:22px">' + (sl.reg == null ? '—' : Math.round(sl.reg)) + '</span></div>' + (sl.reg == null ? '<p class="xs mut" style="margin:0 0 6px">Potrzeba co najmniej 3 nocy z godzinami snu (masz ' + r.n + '). Do czasu zebrania danych wynik liczymy bez tego składnika.</p>' : factorBar(sl.reg) + '<p class="xs mut" style="margin:0">Odchylenie godzin: zasypianie ±' + nf(r.sdBed, 0) + ' min, pobudka ±' + nf(r.sdWake, 0) + ' min (−10 pkt za każde 30 min).</p>') +
-      '<div class="row sp"><span class="sm sub">Efektywność · 20%</span><span class="n" style="font-size:22px">' + Math.round(sl.eff) + '</span></div>' + factorBar(sl.eff) + '<p class="xs mut" style="margin:0">' + (sl.effReal ? 'Efektywność snu z pomiaru WHOOP.' : 'Brak danych o czasie w łóżku – przyjęto 100.') + '</p></div>';
+      '<div class="row sp"><span class="sm sub">Efektywność · 20%</span><span class="n" style="font-size:22px">' + Math.round(sl.eff) + '</span></div>' + factorBar(sl.eff) + '<p class="xs mut" style="margin:0">' + (sl.effReal ? 'Efektywność snu z pomiaru ' + (sl.stagesSrc === 'hc' ? 'z Health Connect.' : 'WHOOP.') : 'Brak danych o czasie w łóżku – przyjęto 100.') + '</p></div>';
     h += '<div class="card fu" ' + dl(2) + '><p class="lbl">Skąd ta potrzeba snu</p><p class="sm sub" style="margin:0">8,0 h podstawy + 0,05 h × (wczorajsze obciążenie ' + nf(sl.strainY, 1) + ' − 10, minimum 0) + 0,5 × dług z ostatnich nocy (' + nf(sl.debt3, 2) + ' h) = <b style="color:#fff">' + nf(sl.needH, 2) + ' h</b>.</p></div>';
   }
   h += '<div class="card tint-p fu" ' + dl(3) + '><span class="n" style="font-size:20px">Dziś połóż się o ' + esc(tp.bed || '—') + '</span><span class="sm sub">Tak, by przespać ok. ' + FC.fmtDur(tp.needH) + ' i wstać o ' + esc(tp.wake) + (S.profile && S.profile.plannedWake ? '' : ' (przyjęta pobudka – zmienisz ją na ekranie Dziś)') + '. Godzina = pobudka − potrzeba snu − 15 min na zaśnięcie.</span></div>';
@@ -5830,15 +6573,15 @@ function zonesHtml(z) {
 }
 function workoutRow(w, open) {
   var sl = FC.sessionLoad(w), strain = FC.strainFromLoad(sl.load), vol = FC.workoutVolumeKg(w);
-  var meta = wkWhen(w.date) + ', ' + w.time + ' · ' + nf(w.durMin, 0) + ' min' + (w.hrAvg ? ' · śr. ' + Math.round(w.hrAvg) + ' ud/min' : '') + (w.source === 'whoop' ? ' · WHOOP' : '');
-  var sum = w.source === 'whoop' ? [sportPretty(w.sport) || WK_NAME[w.type], w.distanceKm ? nf(w.distanceKm, 1) + ' km' : ''].filter(Boolean).join(' · ') : (w.type === 'gym' ? w.exercises.length + ' ćw. · ' + nfi(vol) + ' kg' : (w.distanceKm ? nf(w.distanceKm, 1) + ' km' : 'dystans nie podany'));
+  var meta = wkWhen(w.date) + ', ' + w.time + ' · ' + nf(w.durMin, 0) + ' min' + (w.hrAvg ? ' · śr. ' + Math.round(w.hrAvg) + ' ud/min' : '') + (w.source === 'whoop' ? ' · WHOOP' : '') + (w.source === 'hc' ? ' · ' + esc(HCC.originLabel(w.pkg)) + ' (Health Connect)' : '');
+  var sum = (w.source === 'whoop' || w.source === 'hc') ? [sportPretty(w.sport) || WK_NAME[w.type], w.distanceKm ? nf(w.distanceKm, 1) + ' km' : ''].filter(Boolean).join(' · ') : (w.type === 'gym' ? w.exercises.length + ' ćw. · ' + nfi(vol) + ' kg' : (w.distanceKm ? nf(w.distanceKm, 1) + ' km' : 'dystans nie podany'));
   var saunaW = w.type === 'sauna', kc = w.kcalNet != null ? w.kcalNet : (w.kcal != null ? w.kcal : null);
   if (saunaW) sum = nf(w.durMin, 0) + ' min';
   return '<details class="card wk fu"' + (open ? ' open' : '') + '><summary><span style="color:#2D9CFF">' + ico(w.type, 26) + '</span><span class="grow"><span class="n" style="font-size:17px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + WK_NAME[w.type] + ' · ' + sum + '</span><span class="xs mut">' + meta + '</span></span><span class="n" style="font-size:' + (saunaW ? 14 : 24) + 'px;color:' + (saunaW ? '#9AA6B0' : '#2D9CFF') + '">' + (saunaW ? 'poza<br>obciążeniem' : nf(strain, 1)) + '</span></summary>' +
     '<div class="col" style="margin-top:8px">' + (kc != null ? '<p class="sm" style="margin:0" data-e4="wk-kcal"><b class="n" style="font-size:18px">' + nfi(kc) + ' kcal</b> <span class="xs mut">ponad spoczynek, szacunek ±20%</span></p>' : '') + (saunaW ? '<p class="xs mut" style="margin:0">Sauna nie wlicza się do obciążenia, regeneracji ani wykrywania tętna maksymalnego. Dodamy tag Sauna do następnego pomiaru.</p>' : '') + (saunaW ? '' : w.zonesSec ? '<p class="lbl" style="font-size:12px">Czas w strefach tętna</p>' + zonesHtml(w.zonesSec) : '<p class="xs mut" style="margin:0">' + (w.hasHr ? 'Strefy tętna wymagają profilu i tętna spoczynkowego.' : 'Bez tętna z opaski – obciążenie z oceny wysiłku.') + '</p>') +
-    (saunaW ? '' : w.source === 'whoop' ? '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ' = strain z WHOOP' + (w.hrMax ? ' · maks. tętno ' + Math.round(w.hrMax) : '') + '. Trening zaimportowany z WHOOP.</p>' : '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ': z tętna ' + (sl.fromHr ? nf(FC.strainFromLoad(sl.fromHr), 1) : 'brak') + ' · z oceny wysiłku ' + (sl.fromRpe ? nf(FC.strainFromLoad(sl.fromRpe), 1) + ' (RPE ' + w.rpe + ')' : 'brak') + '</p>') +
+    (saunaW ? '' : w.source === 'hc' ? '<p class="xs mut" style="margin:0" data-hc="wk-note">Trening zaimportowany z Health Connect (aplikacja: ' + esc(HCC.originLabel(w.pkg)) + ', pakiet ' + esc(w.pkg || '?') + ').' + (w.trimp != null ? ' Obciążenie ' + nf(strain, 1) + ' policzone ze średniego tętna ' + Math.round(w.hrAvg) + '.' : ' Bez tętna z opaski i bez oceny wysiłku nie wlicza się do obciążenia.') + '</p>' : w.source === 'whoop' ? '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ' = strain z WHOOP' + (w.hrMax ? ' · maks. tętno ' + Math.round(w.hrMax) : '') + '. Trening zaimportowany z WHOOP.</p>' : '<p class="xs mut" style="margin:0">Obciążenie ' + nf(strain, 1) + ': z tętna ' + (sl.fromHr ? nf(FC.strainFromLoad(sl.fromHr), 1) : 'brak') + ' · z oceny wysiłku ' + (sl.fromRpe ? nf(FC.strainFromLoad(sl.fromRpe), 1) + ' (RPE ' + w.rpe + ')' : 'brak') + '</p>') +
     (w.exercises.length ? '<p class="xs sub" style="margin:0">' + w.exercises.map(function (e) { return esc(e.name) + ' ' + e.sets.map(function (s) { return nf(s.kg, 1).replace(',0', '') + '×' + s.reps; }).join(', '); }).join('<br>') + '</p>' : '') +
-    (w.source === 'whoop' ? '' : '<button class="btn sm danger" style="align-self:flex-start" data-act="delWorkout" data-id="' + esc(w.id) + '" data-confirm="Usuń">Usuń</button>') + '</div></details>';
+    (w.source === 'whoop' || w.source === 'hc' ? '' : '<button class="btn sm danger" style="align-self:flex-start" data-act="delWorkout" data-id="' + esc(w.id) + '" data-confirm="Usuń">Usuń</button>') + '</div></details>';
 }
 function balanceCard(today) {
   var r = FC.acwr(S.workouts, today, S.days);
@@ -5980,12 +6723,12 @@ function driverCard(label, valHtml, scaleHtml) {
 function rTrendy() {
   var td = todayStr(), n = S.days.length, h = header('Trendy', { gear: true }) + '<div class="body">';
   h += ageBlob(n);
-  var rest = FC.restingHr(S.days, td), slN = FC.sleepNight(S.days, S.workouts, td), none = '<span class="n" style="font-size:22px;color:#6E7A84">—</span>';
+  var rest = FC.restingHr(S.days, td), slN = FC.sleepNight(sleepDays(), S.workouts, td), none = '<span class="n" style="font-size:22px;color:#6E7A84">—</span>';
   h += '<p class="lbl fu" style="margin-top:4px">Co złoży się na wiek kondycyjny</p><div class="g2">' +
     driverCard('Tętno spoczynkowe', rest != null ? '<span class="n" style="font-size:26px">' + Math.round(rest) + ' <span class="xs mut">ud/min</span></span>' : none, rest != null ? segScale((80 - rest) / 40, SC_STD, { lo: '80', hi: '40', h: 5 }) : '<span class="xs mut">po pierwszych pomiarach</span>') +
     driverCard('Regularność snu', slN && slN.reg != null ? '<span class="n" style="font-size:26px">' + Math.round(slN.reg) + '<span class="xs mut">%</span></span>' : none, slN && slN.reg != null ? segScale(slN.reg / 100, SC_STD, { lo: '0%', hi: '100%', h: 5 }) : '<span class="xs mut">po 3 nocach z godzinami snu</span>') +
     driverCard('VO2max', none, '<span class="xs mut">brak źródła (zegarek lub test)</span>') +
-    driverCard('Kroki', (function () { var v = SC.stepsOn(S.steps, td); return v != null && (NATIVE || DEMO) ? '<span class="n" style="font-size:26px">' + nfi(v) + '</span>' : none; })(), '<span class="xs mut">' + (NATIVE || DEMO ? 'dziś, z licznika telefonu' : 'dostępne w aplikacji na Androida') + '</span>') + '</div>';
+    driverCard('Kroki', (function () { var v = SC.stepsOn(S.steps, td); return v != null && (NATIVE || DEMO) ? '<span class="n" style="font-size:26px">' + nfi(v) + '</span>' : none; })(), '<span class="xs mut">' + (NATIVE || DEMO ? 'dziś · ' + stepsSrcLabel(td) : 'dostępne w aplikacji na Androida') + '</span>') + '</div>';
   h += '<a href="#/forma" class="card fu" ' + dl(1) + '><div class="row sp"><div><p class="lbl">Forma i HRV</p><span class="sm sub">Kondycja, zmęczenie, forma i ćwiartka HRV × tętno</span></div>' + ico('chev', 20) + '</div></a>';
   h += alarmTrendLink(2);
   h += trendCardsHtml(3);
@@ -6135,14 +6878,15 @@ function rProfil() {
     '<div class="row sp sm sub"><span>Tętno spoczynkowe</span><span><b style="color:#fff">' + (pc.hrRest != null ? Math.round(pc.hrRest) : '—') + '</b> <span class="xs">' + (pc.hrRest != null ? 'norma z 60 dni' : 'brak pomiarów') + '</span></span></div>' +
     '<p class="err" id="pfErr" hidden></p><div class="row"><button class="btn pri grow" data-act="pfSave">Zapisz dane</button>' + (p.hrMax ? '<button class="btn grow" data-act="pfResetHr">Przywróć wyliczone tętno maks.</button>' : '') + '</div></div>';
   h += '<div class="card"><p class="lbl">Waga</p><div class="row"><input class="inp num grow" id="pfKg" type="text" inputmode="decimal" data-keep="1" placeholder="np. 82,4" aria-label="Waga w kg"><button class="btn sm" data-act="kgAdd">Dodaj ważenie</button></div><p class="err" id="kgErr" hidden></p>' +
-    (w.length ? '<div class="col" style="gap:0">' + w.slice(-6).reverse().map(function (x) { return '<div class="row sp sm" style="min-height:44px;border-top:1px solid rgba(255,255,255,.08)"><span class="sub">' + ddmm(x.date) + '.' + x.date.slice(0, 4) + '</span><span><b>' + nf(x.kg, 1) + ' kg</b></span><button class="btn sm" data-act="kgDel" data-d="' + x.date + '" data-confirm="Usuń">Usuń</button></div>'; }).join('') + '</div>' : '<p class="xs mut" style="margin:0">Brak ważeń. Historia wagi zapisuje się przy każdym dodaniu (jedno ważenie na dzień).</p>') + '</div>';
+    (w.length ? '<div class="col" style="gap:0">' + w.slice(-6).reverse().map(function (x) { return '<div class="row sp sm" style="min-height:44px;border-top:1px solid rgba(255,255,255,.08)"><span class="sub">' + ddmm(x.date) + '.' + x.date.slice(0, 4) + (x.source === 'hc' ? ' <span class="xs" style="color:#2CE8B5" data-hc="wsrc">Health Connect</span>' : '') + '</span><span><b>' + nf(x.kg, 1) + ' kg</b></span><button class="btn sm" data-act="kgDel" data-d="' + x.date + '" data-confirm="Usuń">Usuń</button></div>'; }).join('') + '</div>' : '<p class="xs mut" style="margin:0">Brak ważeń. Historia wagi zapisuje się przy każdym dodaniu (jedno ważenie na dzień).</p>') + '</div>';
   h += '<div class="card"><p class="lbl">Źródła danych</p><div class="row" style="align-items:flex-start"><span class="dotp" style="background:' + (S.connected ? '#2EE86B' : '#8A96A0') + ';margin-top:7px"></span><div class="grow"><b>' + esc(S.connected ? S.name : (S.device ? S.device.name : 'Opaska')) + '</b><div class="xs mut">' + (S.connected ? 'połączony' : 'niepołączony') + (last ? ' · ostatni pomiar HRV: jakość ' + last.quality + ' (' + last.date + ')' : ' · brak pomiarów HRV') + '</div>' +
     profilBattHtml(ch) + '</div></div>' +
     '<div class="js-conn">' + connHtml() + '</div>' + (S.connected && !DEMO ? '<div class="row" style="flex-wrap:wrap"><button class="btn grow" data-act="disconnect">Rozłącz</button><button class="btn grow" data-act="changeBand">Zmień opaskę</button></div>' : '') +
     '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:' + (S.wh.cfg.connected ? '#2EE86B' : '#6E7A84') + ';margin-top:7px;animation:none"></span><div class="grow"><b>WHOOP (chmura)</b><div class="xs mut">' + (S.wh.cfg.connected ? 'połączono · ostatnia synchronizacja ' + esc(whLastSyncText()) : 'konto WHOOP poniżej') + '</div></div></div>' +
-    '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:#6E7A84;margin-top:7px;animation:none"></span><div class="grow"><b>Health Connect</b><div class="xs mut">kroki, waga · w przygotowaniu (wersja Android)</div></div></div>' +
+    hcSourceRowHtml() +
     '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:#6E7A84;margin-top:7px;animation:none"></span><div class="grow"><b>intervals.icu</b><div class="xs mut">w przygotowaniu</div></div></div></div>';
   h += '<a href="#/bateria" class="card" data-bat="profil-link"><div class="row sp"><div><p class="lbl">Bateria opaski</p><span class="xs mut" data-bat="profil-verdict">' + esc(battVerdict().title) + '</span></div>' + ico('chev', 20) + '</div></a>';
+  h += hcCardHtml();
   h += stepsSettingsHtml();
   h += '<div class="card"><p class="lbl">Asystent AI</p><div class="row sp"><span>Poranna notatka AI</span><span class="tgl" role="switch" aria-checked="false" aria-disabled="true" aria-label="Poranna notatka AI – wkrótce"><i></i></span></div><p class="xs mut" style="margin:0">Asystent AI – wkrótce. Dziś notatka dnia powstaje z szablonu, bez wysyłania danych gdziekolwiek.</p></div>';
   h += '<div class="card"><p class="lbl">Kopia zapasowa</p><p class="xs mut" style="margin:0">Eksport zawiera wszystko: pomiary poranne (z godzinami snu i danymi WHOOP), treningi, profil i wagi. Dane logowania WHOOP nigdy nie trafiają do kopii.</p><div class="row" style="flex-wrap:wrap"><button class="btn grow" data-act="expAll">Eksportuj kopię (JSON)</button><button class="btn grow" data-act="impAll">Wczytaj kopię (JSON)</button></div><input id="fileImport" type="file" accept=".json,application/json" hidden><p class="sm" id="bkMsg" role="status" hidden></p></div>';
@@ -6345,7 +7089,7 @@ document.addEventListener('click', function (e) {
     delete el.dataset.armed;
   }
   buzz(10);
-  var fn = ACT[el.dataset.act] || ACT_BAT[el.dataset.act] || ACT_E4[el.dataset.act]; if (fn) fn(el, e);
+  var fn = ACT[el.dataset.act] || ACT_BAT[el.dataset.act] || ACT_E4[el.dataset.act] || ACT_HC[el.dataset.act]; if (fn) fn(el, e);
 });
 $('stack').addEventListener('input', function (e) {
   var el = e.target, k = el.dataset && el.dataset.in; if (!k) return;
@@ -6387,7 +7131,7 @@ setInterval(function () {
   var t = pageTop(); if (t && ROUTES[t.path].tick) ROUTES[t.path].tick(t.el);
 }, 250);
 setInterval(renderBattery, 3000);
-storageProbe(); loadAll(); e4Init(); loadBattery(); whoopInit();
+storageProbe(); loadAll(); e4Init(); loadBattery(); whoopInit(); hcInit();
 log('Gotowe. Forma 0.2.');
 if (DEMO) startDemo();
 else if (window.top !== window.self) { showError(IFRAME_MSG); }
@@ -6400,6 +7144,7 @@ nativeInit();
 if (!NATIVE && !DEMO) ensureBand('start');
 whoopMaybeSync();
 e4Start();
+hcStart();
 
 })();</script>
 </body>
