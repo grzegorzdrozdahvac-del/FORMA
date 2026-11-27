@@ -138,3 +138,8 @@ Not compiled locally (no SDK, no Google Maven). The version choice below could n
 - Bridge: gpsStatus, gpsRequestPermission (event gpsPermission {granted, coarse}), gpsStart(sessionId), gpsPoints(from), gpsStop. MainActivity.gpsLauncher asks FINE+COARSE only when the user turns the switch on.
 - Health Connect ExerciseRoute: NOT written (alpha07 API / WRITE_EXERCISE_ROUTE availability uncertain, so skipped on purpose).
 - Compile-risk spots: LocationListener overrides (onStatusChanged deprecated, `provider: String` nullability), `return` inside `synchronized` in GpsTrack.begin, `Math.round(Double)/10.0` in GpsTrack.since, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION (API 29+, guarded).
+
+## Etap 7: strength training (web only, no Kotlin changes)
+- Web: gym-core.js (exercise library ~63 items, Epley, PRs, progression hint, plate calculator, muscle fatigue), app2-gym.js (logger state, rest timer, custom exercises), app2-ui-gym.js (logger rows, #/cwiczenia, #/talerze, muscle map). assets/www/index.html re-copied from forma-app.html.
+- Rest timer end: navigator.vibrate on the web; in the app FormaNative.vibrate (3 x 200 ms) and, when the WebView is hidden, FormaNative.notify("Przerwa skończona", ..., "#/trening/sila"). The WebView keeps running while a workout is on (setWorkoutRunning -> LiveService), so the timer still fires with the screen off; without that service Android may pause the page.
+- New localStorage key forma.v1.gym (own exercises, rest times, plate settings); included in the JSON backup as "gym".
