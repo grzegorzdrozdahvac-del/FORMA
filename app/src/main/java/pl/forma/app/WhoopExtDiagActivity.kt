@@ -14,6 +14,7 @@ import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -51,7 +52,8 @@ import java.util.concurrent.Executors
 
 /**
  * "Diagnostyka WHOOP - tryb rozszerzony": isolated test screen for WHOOP's proprietary BLE service.
- * READ-ONLY by design: it can only build the commands whitelisted in WhoopExtProtocol.SafeCommand.
+ * Commands are limited to the whitelist in WhoopExtProtocol.SafeCommand plus ONE gated command, the batch ACK (0x17), which is built
+ * only after the raw packets of that batch were written and fsynced (memory sync flow). No erase / reset / settings commands exist.
  * It owns its own BluetoothGatt and never touches BleManager / NightService / LiveService (it only READS their state to warn).
  * Everything GATT-related runs on the main thread (callbacks hop to it first), file writes on one background thread.
  */
@@ -64,8 +66,17 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         const val CONNECT_TIMEOUT_MS = 25_000L
         const val OP_TIMEOUT_MS = 8_000L
         const val MTU_WANTED = 247
-        const val NO_DATA_CHECK_MS = 7_000L
-        const val CSV_MAX_BYTES = 30L * 1024L * 1024L
+        const val CMD_TIMEOUT_MS = 5_000L
+        const val CSV_MAX_BYTES = 400L * 1024L * 1024L
+        const val JSONL_MAX_BYTES = 800L * 1024L * 1024L
+        const val MIN_FREE_BYTES = 40L * 1024L * 1024L
+        const val MAX_BATCHES = 500
+        const val S_IDLE = 0
+        const val S_WAIT_RESP = 1
+        const val S_RECEIVING = 2
+        const val S_WAIT_FLUSH = 3
+        const val S_WAIT_ACK = 4
+        const val S_WAIT_NEXT = 5
         const val LOG_LINES = 40
         const val NAME_PREFIX = "WHOOP"
 
@@ -101,31 +112,87 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     private var packetCount = 0
     private var frameCount = 0
     private var otherFrames = 0
-    private var histCount = 0
     private var hr: Int? = null
     private var hrSource = ""
     private var rr: List<Int> = emptyList()
     private var tempC: Double? = null
     private var tempRaw: Int? = null
+    private var tempSrc = ""
     private var spo2: Int? = null
     private var ax: Double? = null
     private var ay: Double? = null
     private var az: Double? = null
     private var battery: Double? = null
     private var lastBatch: Long? = null
+    private var lastEventText = ""
+    private var lastLogText = ""
     private var seenKinds = HashSet<String>()
+    private val timeMap = WhoopExtProtocol.TimeMap()
 
-    // ---------- CSV ----------
-    private var csv: CsvLog? = null
+    // ---------- per-type counters and band-time ranges (this connection) ----------
+    private class Counts {
+        var d = 0L      // 0x2F sensor records
+        var log = 0L    // 0x32 text log records
+        var other = 0L
+        fun add(o: Counts) { d += o.d; log += o.log; other += o.other }
+    }
+
+    private class Range {
+        var min = Long.MAX_VALUE
+        var max = Long.MIN_VALUE
+        fun add(v: Long) { if (v < min) min = v; if (v > max) max = v }
+        fun has(): Boolean = min <= max
+        fun reset() { min = Long.MAX_VALUE; max = Long.MIN_VALUE }
+    }
+
+    private var cur = Counts()          // batch being received
+    private var endCounts = Counts()    // batch that just ended and waits for its ACK
+    private val tot = Counts()          // acknowledged in this connection
+    private val dataUnix = Range()
+    private val dataUp = Range()
+    private val logUnix = Range()
+    private val logUp = Range()
+    private val lcSeen = HashSet<Long>()
+    private var lcCount = 0
+    private var liveD = 0L
+    private var liveLog = 0L
+
+    // ---------- command feedback ----------
+    private class PendingCmd(val label: String, val cmdId: Int, val seq: Int)
+    private val pendingCmds = HashMap<Int, PendingCmd>()
+
+    // ---------- memory sync state ----------
+    private var syncActive = false
+    private var syncState = S_IDLE
+    private var syncStartedStream = false
+    private var batchesSession = 0
+    private var nextRequests = 0
+    private var ackEcho = false
+    private var replays = 0
+    private var pendingEnd: WhoopExtProtocol.BatchEnd? = null
+    private var ackGateTrim = -1L
+    private var lastAckedTrim = -1L
+    private var syncSummary = ""
+
+    // ---------- files ----------
+    private var csv: FileLog? = null
     private var csvFile: File? = null
-    private var savedUri: Uri? = null
+    private var jsonl: FileLog? = null
     private val isoFmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.US)
+    private var savedRaw: Uri? = null
+    private var savedJsonl: Uri? = null
+    private var savedDaily: Uri? = null
+    private var archiveText = ""
+    private val sp by lazy { getSharedPreferences("forma_whoop_ext", Context.MODE_PRIVATE) }
 
     // ---------- views ----------
     private lateinit var statusView: TextView
     private lateinit var ownWarnView: TextView
     private lateinit var servicesView: TextView
     private lateinit var valuesView: TextView
+    private lateinit var cmdStatusView: TextView
+    private lateinit var syncView: TextView
+    private lateinit var archiveView: TextView
     private lateinit var logView: TextView
     private lateinit var saveInfoView: TextView
     private lateinit var btnConnect: Button
@@ -133,10 +200,16 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     private lateinit var btnDisconnect: Button
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
-    private lateinit var btnBattery: Button
+    private lateinit var btnHello: Button
     private lateinit var btnHistory: Button
+    private lateinit var btnSync: Button
+    private lateinit var btnSyncStop: Button
     private lateinit var btnSave: Button
     private lateinit var btnShare: Button
+    private lateinit var btnArchiveRebuild: Button
+    private lateinit var btnArchiveSave: Button
+    private lateinit var btnShareDaily: Button
+    private lateinit var btnShareJsonl: Button
     private val logLines = ArrayDeque<String>()
     private var refreshPending = false
 
@@ -162,6 +235,7 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         updateButtons()
         renderValues()
         log(if (WhoopExtProtocol.selfTest()) "Test sumy kontrolnej: OK" else "Test sumy kontrolnej: BŁĄD (nie wysyłaj poleceń)")
+        archiveRefresh(false)
     }
 
     override fun onResume() {
@@ -191,6 +265,9 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         val c = csv
         csv = null
         if (c != null) c.closeLater()
+        val j = jsonl
+        jsonl = null
+        if (j != null) j.closeLater()
         io.shutdown()
         super.onDestroy()
     }
@@ -248,17 +325,21 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         col.addView(text("Diagnostyka WHOOP – tryb rozszerzony", 20f, TXT, bold = true))
         col.addView(
             card(
-                text("Tryb testowy, tylko odczyt.", 15f, WARN, bold = true),
+                text("Tryb testowy.", 15f, WARN, bold = true),
                 text(
-                    "Ten ekran sprawdza, czy opaska WHOOP 4.0 udostępnia dodatkowe dane (temperatura skóry, ruch, SpO2, bateria, " +
-                        "dane zapisane w pamięci opaski) przez swoją własną usługę Bluetooth. Nic nie jest zmieniane ani kasowane w opasce " +
-                        "– wysyłamy tylko kilka poleceń odczytu.",
+                    "Ten ekran sprawdza, co opaska WHOOP 4.0 udostępnia przez swoją własną usługę Bluetooth (dane czujników z pamięci, " +
+                        "dziennik opaski, tętno na żywo). Odczyty i podgląd niczego nie zmieniają w opasce.",
                     13f, TXT
                 ),
                 text(
-                    "Zanim zaczniesz: zatrzymaj pomiar nocny i pomiar na żywo w Formie oraz zamknij aplikację WHOOP. " +
-                        "Opaska zwykle łączy się tylko z jednym telefonem lub aplikacją naraz.",
+                    "Wyjątek: „Synchronizuj pamięć opaski”. Forma najpierw zapisuje każdą paczkę danych w plikach na telefonie " +
+                        "(i sprawdza zapis), dopiero potem potwierdza jej odbiór, a opaska zwalnia to miejsce. Potwierdzonych danych nie da się " +
+                        "już pobrać z opaski drugi raz, więc zachowaj pliki z archiwum.",
                     13f, WARN
+                ),
+                text(
+                    "Zanim zaczniesz: zatrzymaj pomiar nocny w Formie i zamknij aplikację WHOOP. Pomiar na żywo Forma odłączy sama.",
+                    13f, TXT
                 )
             )
         )
@@ -274,31 +355,55 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         servicesView = text("Usługi opaski: (brak połączenia)", 11f, DIM, mono = true)
         col.addView(card(text("Usługi i charakterystyki", 14f, TXT, bold = true), servicesView))
 
-        valuesView = text("", 14f, TXT, mono = true)
+        valuesView = text("", 13f, TXT, mono = true)
+        cmdStatusView = text("Polecenia: brak.", 13f, DIM)
         btnStart = button("Start odczytu na żywo") { sendSafe(WhoopExtProtocol.SafeCommand.START_REALTIME) }
         btnStop = button("Stop") { sendSafe(WhoopExtProtocol.SafeCommand.STOP_REALTIME) }
-        btnBattery = button("Odczytaj baterię") { sendSafe(WhoopExtProtocol.SafeCommand.GET_BATTERY) }
-        btnHistory = button("Pobierz dane z pamięci (próba)") { confirmHistory() }
-        val liveCard = card(text("Odczyty", 14f, TXT, bold = true), valuesView, btnStart, btnStop, btnBattery)
+        btnHello = button("Informacje o opasce (HELLO)") { sendSafe(WhoopExtProtocol.SafeCommand.GET_HELLO) }
+        btnHistory = button("Podgląd pamięci (bez potwierdzania)") { confirmPeek() }
+        val liveCard = card(text("Odczyty", 14f, TXT, bold = true), valuesView, cmdStatusView, btnStart, btnStop, btnHello)
         if (WhoopExtProtocol.HISTORY_PULL_ENABLED) {
             liveCard.addView(btnHistory)
-            liveCard.addView(
-                text(
-                    "Pobieranie z pamięci prosi opaskę o wysłanie zapisanych rekordów (tu są temperatura, SpO2 i ruch). " +
-                        "Niczego nie potwierdzamy i nie kasujemy. Aby przerwać, naciśnij „Rozłącz”.",
-                    12f, DIM
-                )
-            )
+            liveCard.addView(text("Podgląd: jedna prośba o dane z pamięci, bez potwierdzenia. Nic nie jest zwalniane w opasce.", 12f, DIM))
         } else {
             btnHistory.visibility = View.GONE
-            liveCard.addView(text("Pobieranie danych z pamięci jest wyłączone w tej wersji (brak bezpiecznego, udokumentowanego polecenia).", 12f, DIM))
         }
+        liveCard.addView(
+            text(
+                "Bateria: opaska nie odpowiada na zapytanie o baterię (polecenie 0x1A, 9 prób), więc przycisk jest ukryty. " +
+                    "Jej układ pomiaru baterii zgłasza błędy (LC709203), a procent z usługi standardowej bywa nieprawdziwy. " +
+                    "Zamiast tego pokazujemy wartości przypuszczalne ze zdarzeń i z HELLO, jeśli opaska je przyśle.",
+                12f, DIM
+            )
+        )
         col.addView(liveCard)
 
+        syncView = text("", 13f, TXT, mono = true)
+        btnSync = button("Synchronizuj pamięć opaski") { confirmSync() }
+        btnSyncStop = button("Stop synchronizacji") { stopSync() }
+        if (WhoopExtProtocol.HISTORY_PULL_ENABLED) {
+            col.addView(card(text("Synchronizacja pamięci opaski", 14f, TXT, bold = true), syncView, btnSync, btnSyncStop))
+        } else {
+            btnSync.visibility = View.GONE
+            btnSyncStop.visibility = View.GONE
+        }
+
+        archiveView = text("", 12f, TXT, mono = true)
+        btnArchiveRebuild = button("Przelicz archiwum dzienne") { archiveRefresh(false) }
+        btnArchiveSave = button("Zapisz archiwum w Pobranych/Forma") { archiveRefresh(true) }
+        btnShareDaily = button("Udostępnij: dzienne (whoop_archive_daily.csv)") { shareUri(savedDaily, "text/csv") }
+        btnShareJsonl = button("Udostępnij: rekordy (whoop_archive_records.jsonl)") { shareUri(savedJsonl, "application/json") }
+        col.addView(
+            card(
+                text("Archiwum danych z opaski", 14f, TXT, bold = true), archiveView,
+                btnArchiveRebuild, btnArchiveSave, btnShareDaily, btnShareJsonl
+            )
+        )
+
         saveInfoView = text("", 12f, DIM)
-        btnSave = button("Zapisz plik w Pobranych") { saveToDownloads() }
-        btnShare = button("Udostępnij plik") { shareSaved() }
-        col.addView(card(text("Plik z surowymi pakietami (CSV)", 14f, TXT, bold = true), saveInfoView, btnSave, btnShare))
+        btnSave = button("Zapisz surowy plik w Pobranych") { saveRawToDownloads() }
+        btnShare = button("Udostępnij surowy plik (CSV)") { shareUri(savedRaw, "text/csv") }
+        col.addView(card(text("Surowe pakiety tej sesji (CSV)", 14f, TXT, bold = true), saveInfoView, btnSave, btnShare))
 
         logView = text("", 11f, DIM, mono = true)
         col.addView(card(text("Dziennik", 14f, TXT, bold = true), logView))
@@ -316,17 +421,29 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         log(s)
     }
 
+    private fun waiting(cmdId: Int): Boolean {
+        for (p in pendingCmds.values) if (p.cmdId == cmdId) return true
+        return false
+    }
+
     private fun updateButtons() {
         if (destroyed) return
+        val syncing = syncActive
         btnConnect.isEnabled = !connected && scanner == null
         btnScan.isEnabled = !connected && scanner == null
         btnDisconnect.isEnabled = connected || scanner != null
-        btnStart.isEnabled = ready && !streaming
-        btnStop.isEnabled = ready && streaming
-        btnBattery.isEnabled = ready
-        btnHistory.isEnabled = ready
+        btnStart.isEnabled = ready && !streaming && !syncing && !waiting(0x03)
+        btnStop.isEnabled = ready && streaming && !syncing && !waiting(0x03)
+        btnHello.isEnabled = ready && !syncing && !waiting(WhoopExtProtocol.SafeCommand.GET_HELLO.id)
+        btnHistory.isEnabled = ready && !syncing && !waiting(WhoopExtProtocol.SafeCommand.REQUEST_HISTORY.id)
+        btnSync.isEnabled = ready && !syncing && !waiting(WhoopExtProtocol.SafeCommand.REQUEST_HISTORY.id)
+        btnSyncStop.isEnabled = syncing
         btnSave.isEnabled = csvFile != null
-        btnShare.isEnabled = savedUri != null
+        btnShare.isEnabled = savedRaw != null
+        btnShareDaily.isEnabled = savedDaily != null
+        btnShareJsonl.isEnabled = savedJsonl != null
+        btnArchiveSave.isEnabled = !syncing
+        btnArchiveRebuild.isEnabled = !syncing
     }
 
     private fun refreshOwnWarning() {
@@ -360,20 +477,54 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     private fun f1(v: Double?, unit: String): String = if (v == null) "?" else String.format(Locale.US, "%.1f", v) + unit
     private fun f2(v: Double?): String = if (v == null) "?" else String.format(Locale.US, "%.2f", v)
 
+    private val tsFmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
+
+    private fun fmtMs(ms: Long): String = tsFmt.format(Date(ms))
+
+    /** One band timestamp as text: Unix seconds are shown as a date, uptime seconds are mapped through the live-packet offset when possible. */
+    private fun fmtTs(raw: Long): String {
+        if (raw >= WhoopExtProtocol.UNIX_MIN) return fmtMs(raw * 1000L)
+        val m = timeMap.toPhoneMs(raw)
+        return if (m != null) fmtMs(m) + " (przybliżony)" else "$raw s od startu opaski"
+    }
+
+    private fun rangeText(u: Range, up: Range): String {
+        val parts = ArrayList<String>()
+        if (u.has()) parts.add("zegar opaski: " + fmtTs(u.min) + " – " + fmtTs(u.max))
+        if (up.has()) parts.add("od startu opaski: " + fmtTs(up.min) + " – " + fmtTs(up.max))
+        return if (parts.isEmpty()) "-" else parts.joinToString("; ")
+    }
+
+    private fun mb(bytes: Long): String = String.format(Locale.US, "%.2f MB", bytes / (1024.0 * 1024.0))
+
+    private fun stateText(): String = when (syncState) {
+        S_WAIT_RESP -> "czekam na odpowiedź opaski"
+        S_RECEIVING -> "odbieram paczkę"
+        S_WAIT_FLUSH -> "zapisuję paczkę do pliku (przed potwierdzeniem)"
+        S_WAIT_ACK -> "potwierdzam paczkę"
+        S_WAIT_NEXT -> "czekam na następną paczkę"
+        else -> if (syncActive) "start" else "nieaktywna"
+    }
+
     private fun renderValues() {
         val sb = StringBuilder()
         sb.append("Tętno:        ").append(if (hr == null) "?" else hr.toString() + " /min" + hrSource).append('\n')
         sb.append("RR (ms):      ").append(if (rr.isEmpty()) "?" else rr.joinToString(" ")).append('\n')
         sb.append("Temp. skóry:  ").append(f1(tempC, " °C"))
-        if (tempRaw != null) sb.append("  (surowo ").append(tempRaw).append(", empirycznie)")
+        if (tempC != null && tempSrc.isNotEmpty()) sb.append("  ").append(tempSrc)
+        if (tempRaw != null) sb.append("  (surowo ").append(tempRaw).append(")")
         sb.append('\n')
         sb.append("SpO2:         ").append(if (spo2 == null) "?" else "$spo2 %").append(if (spo2 != null) "  (empirycznie)" else "").append('\n')
         sb.append("Ruch x/y/z:   ").append(f2(ax)).append(" / ").append(f2(ay)).append(" / ").append(f2(az)).append(if (ax != null) " g  (empirycznie)" else "").append('\n')
         sb.append("Bateria:      ").append(if (battery == null) "?" else f1(battery, " %") + "  (przypuszczalnie)").append('\n')
         sb.append("Paczka sync:  ").append(lastBatch?.toString() ?: "?").append('\n')
+        if (lastEventText.isNotEmpty()) sb.append("Zdarzenie:    ").append(lastEventText).append('\n')
         sb.append('\n')
         sb.append("Pakiety (powiadomienia): ").append(packetCount).append('\n')
-        sb.append("Ramki poprawne:          ").append(frameCount).append("  (z pamięci: ").append(histCount).append(", inne: ").append(otherFrames).append(")")
+        sb.append("Ramki poprawne:          ").append(frameCount).append('\n')
+        sb.append("Dane czujników 0x2F:     ").append(liveD).append('\n')
+        sb.append("Dziennik opaski 0x32:    ").append(liveLog).append('\n')
+        sb.append("Inne ramki:              ").append(otherFrames)
         var bad = 0
         var dropped = 0L
         for (a in assemblers.values) {
@@ -381,11 +532,30 @@ class WhoopExtDiagActivity : AppCompatActivity() {
             dropped += a.droppedBytes
         }
         if (bad > 0 || dropped > 0) sb.append('\n').append("Błędne CRC: ").append(bad).append(", pominięte bajty: ").append(dropped)
+        if (lcCount > 0) {
+            sb.append('\n').append("Błąd układu pomiaru baterii w opasce (LC709203): ").append(lcCount).append(" wpisów")
+        }
+        if (lastLogText.isNotEmpty()) sb.append('\n').append("Ostatni wpis dziennika: ").append(lastLogText)
         valuesView.text = sb.toString()
-        logView.text = logLines.joinToString("\n")
+
+        val sy = StringBuilder()
+        sy.append("Stan: ").append(stateText()).append('\n')
+        sy.append("Paczki potwierdzone: ").append(batchesSession).append(" (łącznie ").append(sp.getLong("t_batches", 0L)).append(")\n")
+        sy.append("Rekordy (potwierdzone, ta sesja): 0x2F ").append(tot.d).append(", 0x32 ").append(tot.log).append(", inne ").append(tot.other).append('\n')
+        sy.append("Rekordy (łącznie): 0x2F ").append(sp.getLong("t_d", 0L)).append(", 0x32 ").append(sp.getLong("t_log", 0L)).append(", inne ").append(sp.getLong("t_other", 0L)).append('\n')
+        sy.append("W bieżącej paczce: 0x2F ").append(cur.d).append(", 0x32 ").append(cur.log).append(", inne ").append(cur.other).append('\n')
+        sy.append("Dane 0x2F, czas: ").append(rangeText(dataUnix, dataUp)).append('\n')
+        sy.append("Dziennik 0x32, czas: ").append(rangeText(logUnix, logUp)).append('\n')
         val f = csvFile
+        val j = File(filesDir, "whoop_archive_records.jsonl")
+        sy.append("Zapisano: surowy plik ").append(if (f == null) "-" else mb(f.length())).append(", rekordy ").append(if (j.exists()) mb(j.length()) else "-")
+        if (syncSummary.isNotEmpty()) sy.append('\n').append(syncSummary)
+        syncView.text = sy.toString()
+
+        archiveView.text = archiveText.ifEmpty { "Archiwum jeszcze nie przeliczone." }
+        logView.text = logLines.joinToString("\n")
         saveInfoView.text = if (f == null) "Plik powstanie po połączeniu." else "Plik: " + f.name + " (" + (f.length() / 1024) + " kB)" +
-            (if (savedUri != null) "\nZapisano w Pobranych/Forma." else "")
+            (if (savedRaw != null) "\nZapisano w Pobranych/Forma." else "")
     }
 
     private fun log(msg: String) {
@@ -556,6 +726,7 @@ class WhoopExtDiagActivity : AppCompatActivity() {
 
     private fun userDisconnect() {
         stopScanInternal()
+        if (syncActive) finishSync("Synchronizację przerwano rozłączeniem. Potwierdzone paczki: $batchesSession. Reszta zostaje w opasce.", true)
         val g = gatt
         if (g != null && streaming && ready) {
             // explicit stop-stream before leaving, so the band does not keep streaming into nothing
@@ -574,21 +745,34 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         packetCount = 0
         frameCount = 0
         otherFrames = 0
-        histCount = 0
         hr = null
         hrSource = ""
         rr = emptyList()
         tempC = null
         tempRaw = null
+        tempSrc = ""
         spo2 = null
         ax = null
         ay = null
         az = null
         battery = null
         lastBatch = null
+        lastEventText = ""
+        lastLogText = ""
         seenKinds = HashSet()
         assemblers.clear()
-        savedUri = null
+        cur = Counts()
+        endCounts = Counts()
+        tot.d = 0L; tot.log = 0L; tot.other = 0L
+        dataUnix.reset(); dataUp.reset(); logUnix.reset(); logUp.reset()
+        lcSeen.clear()
+        lcCount = 0
+        liveD = 0L
+        liveLog = 0L
+        batchesSession = 0
+        syncSummary = ""
+        lastAckedTrim = sp.getLong("last_trim", -1L)
+        savedRaw = null
         openCsv()
         updateButtons()
     }
@@ -596,6 +780,17 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     private fun closeSession() {
         main.removeCallbacks(connectTimeout)
         main.removeCallbacks(opTimeoutRun)
+        if (syncActive) {
+            // link lost or user left: nothing more is sent; an unacknowledged batch simply stays on the band
+            main.removeCallbacks(syncWatch)
+            syncActive = false
+            syncState = S_IDLE
+            pendingEnd = null
+            ackGateTrim = -1L
+            syncSummary = "Połączenie przerwane: synchronizacja zatrzymana. Potwierdzone paczki: $batchesSession. Reszta zostaje w opasce."
+            log(syncSummary)
+        }
+        pendingCmds.clear()
         ops.clear()
         opBusy = false
         val g = gatt
@@ -663,7 +858,12 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
             main.post {
                 if (destroyed || g !== gatt) return@post
-                if (status != 0) log("Zapis polecenia nieudany (kod $status). Opaska może wymagać sparowania w ustawieniach Bluetooth telefonu.")
+                if (status != 0) {
+                    log("Zapis polecenia nieudany (kod $status). Opaska może wymagać sparowania w ustawieniach Bluetooth telefonu.")
+                    if (syncActive && syncState == S_WAIT_ACK) {
+                        finishSync("Zapis potwierdzenia nieudany (kod $status). Dane zostają w opasce.", false)
+                    }
+                }
                 opDone()
             }
         }
@@ -806,52 +1006,84 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     }
 
     // =====================================================================================================
-    // commands (SAFE-READ only: the type system allows nothing else)
+    // commands: SAFE-READ whitelist + the gated batch ACK. Every command shows "Wysłano / Odpowiedź / Brak odpowiedzi po 5 s".
     // =====================================================================================================
-    private fun sendSafe(cmd: WhoopExtProtocol.SafeCommand) {
+    private fun cmdStatus(s: String, color: Int = DIM) {
+        if (destroyed) return
+        cmdStatusView.text = s
+        cmdStatusView.setTextColor(color)
+    }
+
+    private fun trackCmd(label: String, cmdId: Int, s: Int) {
+        pendingCmds[s] = PendingCmd(label, cmdId, s)
+        cmdStatus("Wysłano: $label…", WARN)
+        main.postDelayed({ cmdTimeout(s) }, CMD_TIMEOUT_MS)
+        updateButtons()
+    }
+
+    private fun cmdTimeout(s: Int) {
+        if (destroyed) return
+        val p = pendingCmds.remove(s) ?: return
+        cmdStatus("Brak odpowiedzi po 5 s: " + p.label, BAD)
+        log("Brak odpowiedzi po 5 s na: " + p.label)
+        if (p.cmdId == WhoopExtProtocol.CMD_BATCH_ACK && syncActive && syncState == S_WAIT_ACK) syncAfterAck(false)
+        updateButtons()
+    }
+
+    private fun onCmdResponse(d: WhoopExtProtocol.Decoded) {
+        val echo = d.seqEcho
+        var p: PendingCmd? = if (echo != null) pendingCmds.remove(echo) else null
+        if (p == null) {
+            val c = d.cmd
+            if (c != null) {
+                for (x in pendingCmds.values) {
+                    if (x.cmdId == c) { p = x; break }
+                }
+                if (p != null) pendingCmds.remove(p.seq)
+            }
+        }
+        val label = p?.label ?: ("polecenie 0x" + Integer.toHexString(d.cmd ?: 0))
+        val st = d.status
+        cmdStatus("Odpowiedź na „" + label + "”: status " + st + (if (st == 2) " (zwykle: przyjęte)" else ""), if (st == 2) GOOD else WARN)
+        log("Odpowiedź: " + d.info)
+        val c = d.cmd
+        if (c == WhoopExtProtocol.CMD_BATCH_ACK && syncActive && syncState == S_WAIT_ACK) syncAfterAck(true)
+        if (c == WhoopExtProtocol.SafeCommand.REQUEST_HISTORY.id && syncActive && st != 2) {
+            finishSync("Opaska odrzuciła prośbę o dane (status $st). Nic nie zmieniono.", false)
+        }
+        updateButtons()
+    }
+
+    private fun sendSafe(cmd: WhoopExtProtocol.SafeCommand, force: Boolean = false) {
         val g = gatt
         val ch = cmdChar
         if (g == null || ch == null || !ready) {
             log("Polecenie pominięte: brak gotowego połączenia.")
             return
         }
-        val bytes = WhoopExtProtocol.buildCommand(cmd, nextSeq())
+        if (!force && waiting(cmd.id)) return
+        val s = nextSeq()
+        val bytes = WhoopExtProtocol.buildCommand(cmd, s)
         if (bytes == null) {
             log("Polecenie wyłączone w tej wersji: " + cmd.label)
             return
         }
         csvAppend("TX", WhoopExtProtocol.CH_CMD_TO_STRAP, WhoopExtProtocol.hex(bytes))
         log("Wysyłam: " + cmd.label)
+        trackCmd(cmd.label, cmd.id, s)
         enqueue { writeRaw(g, ch, bytes) }
-        when (cmd) {
-            WhoopExtProtocol.SafeCommand.START_REALTIME -> {
-                streaming = true
-                expectData("odczyt na żywo")
-            }
-            WhoopExtProtocol.SafeCommand.STOP_REALTIME -> streaming = false
-            WhoopExtProtocol.SafeCommand.GET_BATTERY -> expectData("bateria")
-            WhoopExtProtocol.SafeCommand.REQUEST_HISTORY -> expectData("dane z pamięci")
-        }
+        if (cmd == WhoopExtProtocol.SafeCommand.START_REALTIME) streaming = true
+        if (cmd == WhoopExtProtocol.SafeCommand.STOP_REALTIME) streaming = false
         updateButtons()
     }
 
-    /** If no notification at all arrives within a few seconds, say so (instead of staring at "?"). */
-    private fun expectData(what: String) {
-        val before = packetCount
-        main.postDelayed({
-            if (!destroyed && ready && packetCount == before) {
-                log("Brak odpowiedzi na: $what (7 s). Opaska mogła zignorować polecenie albo wymaga sparowania.")
-            }
-        }, NO_DATA_CHECK_MS)
-    }
-
-    private fun confirmHistory() {
+    private fun confirmPeek() {
         if (!ready) return
         AlertDialog.Builder(this)
-            .setTitle("Dane z pamięci opaski")
+            .setTitle("Podgląd pamięci opaski")
             .setMessage(
-                "Opaska zostanie poproszona o wysłanie zapisanych rekordów. Nic nie jest kasowane ani potwierdzane, " +
-                    "ale transfer może potrwać i zużyć trochę baterii. Kontynuować?"
+                "Opaska zostanie poproszona o wysłanie zapisanych rekordów. Nic nie jest potwierdzane ani zwalniane w opasce. " +
+                    "Rekordy trafią do pliku i archiwum. Kontynuować?"
             )
             .setPositiveButton("Tak, spróbuj") { _, _ -> sendSafe(WhoopExtProtocol.SafeCommand.REQUEST_HISTORY) }
             .setNegativeButton("Anuluj", null)
@@ -863,7 +1095,7 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     // =====================================================================================================
     private fun onRx(charId: String, data: ByteArray) {
         packetCount++
-        csvAppend("RX", charId, WhoopExtProtocol.hex(data))
+        csvAppend("RX", charId, WhoopExtProtocol.hex(data)) // queued BEFORE decoding, so a batch-end is always preceded by its packets in the file
         try {
             val asm = assemblers.getOrPut(charId) { WhoopExtProtocol.FrameAssembler() }
             for (payload in asm.feed(data)) {
@@ -881,60 +1113,475 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         if (seenKinds.add(d.kind)) {
             log("Pierwszy pakiet typu: " + d.kind + " (typ 0x" + Integer.toHexString(payload[0].toInt() and 0xFF) + ", " + payload.size + " B) " + d.info)
         }
+        val now = System.currentTimeMillis()
         when (d.kind) {
             "żywe" -> {
                 if (d.hr != null) { hr = d.hr; hrSource = " (na żywo)" }
                 if (d.rr.isNotEmpty()) rr = d.rr
+                val e = d.epoch
+                if (e != null) timeMap.observe(e, now)
             }
-            "pamięć" -> {
-                histCount++
-                if (d.hr != null) { hr = d.hr; hrSource = " (z pamięci)" }
-                if (d.rr.isNotEmpty()) rr = d.rr
-                if (d.tempRaw != null) tempRaw = d.tempRaw
-                if (d.tempC != null) tempC = d.tempC
-                if (d.spo2 != null) spo2 = d.spo2
-                if (d.ax != null && d.ay != null && d.az != null) { ax = d.ax; ay = d.ay; az = d.az }
+            "pamięć" -> onSensorRecord(d, now)
+            "dziennik" -> onLogRecord(d)
+            "synchronizacja" -> onMeta(d)
+            "odpowiedź" -> onCmdResponse(d)
+            "zdarzenie" -> {
+                otherFrames++
+                cur.other++
+                lastEventText = d.info
+                if (d.batteryPct != null) battery = d.batteryPct
+                if (d.tempC != null) { tempC = d.tempC; tempSrc = "(zdarzenie, przypuszczalnie)" }
             }
-            "synchronizacja" -> if (d.batchNo != null) lastBatch = d.batchNo
-            "odpowiedź" -> if (d.batteryPct != null) battery = d.batteryPct
+            else -> {
+                otherFrames++
+                cur.other++
+            }
+        }
+    }
+
+    private fun onSensorRecord(d: WhoopExtProtocol.Decoded, now: Long) {
+        liveD++
+        cur.d++
+        val raw = d.epoch
+        if (d.hr != null) { hr = d.hr; hrSource = " (z pamięci)" }
+        if (d.rr.isNotEmpty()) rr = d.rr
+        if (d.tempRaw != null) tempRaw = d.tempRaw
+        if (d.tempC != null) { tempC = d.tempC; tempSrc = "(z pamięci, empirycznie)" }
+        if (d.spo2 != null) spo2 = d.spo2
+        if (d.ax != null && d.ay != null && d.az != null) { ax = d.ax; ay = d.ay; az = d.az }
+        if (raw != null) {
+            if (raw >= WhoopExtProtocol.UNIX_MIN) dataUnix.add(raw) else dataUp.add(raw)
+            val clk = if (raw >= WhoopExtProtocol.UNIX_MIN) "unix" else "uptime"
+            val rec = WhoopArchive.Rec(
+                timeMap.toPhoneMs(raw), raw, clk, d.recCounter ?: 0L, d.hr, d.rr, d.tempC, d.tempRaw, d.spo2, d.ax, d.ay, d.az, now
+            )
+            val j = ensureJsonl()
+            if (j != null) j.append(WhoopArchive.toJson(rec))
+        }
+        syncTouch()
+    }
+
+    private fun onLogRecord(d: WhoopExtProtocol.Decoded) {
+        liveLog++
+        cur.log++
+        val raw = d.epoch
+        if (raw != null) {
+            if (raw >= WhoopExtProtocol.UNIX_MIN) logUnix.add(raw) else logUp.add(raw)
+        }
+        val txt = d.text ?: ""
+        if (txt.isNotEmpty()) lastLogText = txt
+        if (txt.contains("LC709203")) {
+            val key = ((d.recCounter ?: 0L) shl 32) xor (raw ?: 0L)
+            if (lcSeen.add(key)) lcCount++
+        }
+        syncTouch()
+    }
+
+    private fun onMeta(d: WhoopExtProtocol.Decoded) {
+        val be = d.batchEnd
+        if (be != null) lastBatch = be.trim
+        when (d.metaSub) {
+            1 -> {
+                if (syncActive) { log("Początek paczki."); syncTouch() }
+            }
+            2 -> {
+                if (be != null && syncActive) onBatchEnd(be)
+            }
+            3 -> {
+                if (syncActive && (syncState == S_WAIT_RESP || syncState == S_WAIT_NEXT)) {
+                    log("Opaska: komunikat 'zakończono' (może poprzedzać paczkę).")
+                    armWatch(10_000L)
+                }
+            }
             else -> otherFrames++
         }
     }
 
     // =====================================================================================================
-    // CSV of raw packets
+    // memory sync: 0x16 -> batch -> raw packets written + fsync -> ACK 0x17 -> repeat. Interruptible at any point.
+    // The ACK is built only by sendAck(), which runs only from afterFlush() after both files were flushed and fsynced.
     // =====================================================================================================
-    private inner class CsvLog(val file: File) {
-        private val w = BufferedWriter(OutputStreamWriter(FileOutputStream(file, true), Charsets.UTF_8))
+    private val syncWatch = Runnable { onSyncTimeout() }
+
+    private fun armWatch(ms: Long) {
+        main.removeCallbacks(syncWatch)
+        main.postDelayed(syncWatch, ms)
+    }
+
+    private fun confirmSync() {
+        if (!ready || syncActive) return
+        AlertDialog.Builder(this)
+            .setTitle("Synchronizacja pamięci opaski")
+            .setMessage(
+                "Forma pobierze zapisane dane z pamięci opaski paczka po paczce. Każdą paczkę najpierw zapisze w plikach na telefonie " +
+                    "i sprawdzi zapis, a dopiero potem potwierdzi jej odbiór. Po potwierdzeniu opaska zwalnia to miejsce i nie da się " +
+                    "pobrać tych danych drugi raz. Pliki zostaną zapisane też w Pobranych/Forma. Możesz w każdej chwili nacisnąć Stop. Kontynuować?"
+            )
+            .setPositiveButton("Tak, synchronizuj") { _, _ -> beginSync() }
+            .setNegativeButton("Anuluj", null)
+            .show()
+    }
+
+    private fun beginSync() {
+        if (!ready || syncActive) return
+        syncActive = true
+        syncState = S_IDLE
+        batchesSession = 0
+        nextRequests = 0
+        replays = 0
+        ackEcho = false
+        cur = Counts()
+        endCounts = Counts()
+        pendingEnd = null
+        ackGateTrim = -1L
+        syncSummary = ""
+        lastAckedTrim = sp.getLong("last_trim", -1L)
+        syncStartedStream = false
+        var delay = 0L
+        if (!streaming) {
+            // the live stream gives the band-clock offset needed to date the records
+            syncStartedStream = true
+            sendSafe(WhoopExtProtocol.SafeCommand.START_REALTIME)
+            delay = 3_000L
+        } else if (!timeMap.hasOffset()) {
+            delay = 3_000L
+        }
+        setStatus("Synchronizacja pamięci opaski rozpoczęta.")
+        updateButtons()
+        armWatch(delay)
+    }
+
+    private fun requestBatch() {
+        if (!syncActive) return
+        syncState = S_WAIT_RESP
+        sendSafe(WhoopExtProtocol.SafeCommand.REQUEST_HISTORY, true)
+        armWatch(10_000L)
+    }
+
+    /** Called for every history record / batch start. */
+    private fun syncTouch() {
+        if (!syncActive) return
+        if (syncState == S_WAIT_RESP || syncState == S_WAIT_NEXT) syncState = S_RECEIVING
+        if (syncState == S_RECEIVING) armWatch(12_000L)
+    }
+
+    private fun onSyncTimeout() {
+        if (!syncActive || destroyed) return
+        when (syncState) {
+            S_IDLE -> requestBatch()
+            S_WAIT_RESP -> {
+                if (batchesSession == 0) finishSync("Opaska nie przysłała żadnych danych z pamięci (jest pusta albo nie odpowiada).", false)
+                else finishSync("Synchronizacja zakończona: opaska nie ma więcej danych. Potwierdzone paczki: $batchesSession.", true)
+            }
+            S_RECEIVING -> finishSync("Przerwano: opaska przestała wysyłać paczkę. Nic nie potwierdzono, dane zostają w opasce.", false)
+            S_WAIT_NEXT -> {
+                if (nextRequests == 0) {
+                    nextRequests = 1
+                    requestBatch()
+                } else {
+                    finishSync("Synchronizacja zakończona: opaska nie ma więcej danych. Potwierdzone paczki: $batchesSession.", true)
+                }
+            }
+            else -> { /* flush / ack have their own completion paths */ }
+        }
+    }
+
+    private fun onBatchEnd(be: WhoopExtProtocol.BatchEnd) {
+        if (syncState == S_WAIT_FLUSH || syncState == S_WAIT_ACK) return
+        if (be.trim == lastAckedTrim) {
+            replays++
+            if (replays >= 2) {
+                finishSync("Opaska ponownie wysłała tę samą paczkę mimo potwierdzenia. Zatrzymano; dane są w pliku i zostają w opasce.", false)
+                return
+            }
+            ackEcho = true
+            log("Opaska powtórzyła potwierdzoną paczkę " + be.trim + ". Próbuję potwierdzenia z ogonem opaski.")
+        } else {
+            replays = 0
+        }
+        if (batchesSession >= MAX_BATCHES) {
+            finishSync("Osiągnięto limit $MAX_BATCHES paczek w jednej sesji. Uruchom synchronizację ponownie.", true)
+            return
+        }
+        syncState = S_WAIT_FLUSH
+        endCounts = cur
+        cur = Counts()
+        pendingEnd = be
+        main.removeCallbacks(syncWatch)
+        log("Koniec paczki " + be.trim + ": zapisuję i sprawdzam plik przed potwierdzeniem…")
+        flushThenAck(be)
+    }
+
+    private fun flushThenAck(be: WhoopExtProtocol.BatchEnd) {
+        if (filesDir.usableSpace < MIN_FREE_BYTES) {
+            finishSync("Za mało miejsca na telefonie. Nic nie potwierdzono, dane zostają w opasce.", false)
+            return
+        }
+        val rawLog = csv
+        if (rawLog == null) {
+            finishSync("Brak pliku na surowe pakiety. Nic nie potwierdzono.", false)
+            return
+        }
+        val rec = jsonl
+        rawLog.syncDisk { ok1 ->
+            if (rec == null) afterFlush(ok1, be) else rec.syncDisk { ok2 -> afterFlush(ok1 && ok2, be) }
+        }
+    }
+
+    private fun afterFlush(ok: Boolean, be: WhoopExtProtocol.BatchEnd) {
+        if (!syncActive || syncState != S_WAIT_FLUSH || pendingEnd !== be) return
+        if (!ok) {
+            finishSync("Zapis pliku nie powiódł się lub plik jest zbyt duży. Nic nie potwierdzono, dane zostają w opasce.", false)
+            return
+        }
+        ackGateTrim = be.trim
+        sendAck(be)
+    }
+
+    private fun sendAck(be: WhoopExtProtocol.BatchEnd) {
+        val g = gatt
+        val ch = cmdChar
+        if (!syncActive || syncState != S_WAIT_FLUSH || ackGateTrim != be.trim || g == null || ch == null) return
+        ackGateTrim = -1L
+        val s = nextSeq()
+        val bytes = WhoopExtProtocol.buildBatchAck(be, s, ackEcho)
+        csvAppend("TX", WhoopExtProtocol.CH_CMD_TO_STRAP, WhoopExtProtocol.hex(bytes))
+        log("Potwierdzam paczkę " + be.trim + (if (ackEcho) " (wariant z ogonem opaski)" else "") + ".")
+        syncState = S_WAIT_ACK
+        trackCmd("potwierdzenie paczki " + be.trim, WhoopExtProtocol.CMD_BATCH_ACK, s)
+        enqueue { writeRaw(g, ch, bytes) }
+        lastAckedTrim = be.trim
+        batchesSession++
+        tot.add(endCounts)
+        sp.edit()
+            .putLong("last_trim", be.trim)
+            .putLong("t_batches", sp.getLong("t_batches", 0L) + 1L)
+            .putLong("t_d", sp.getLong("t_d", 0L) + endCounts.d)
+            .putLong("t_log", sp.getLong("t_log", 0L) + endCounts.log)
+            .putLong("t_other", sp.getLong("t_other", 0L) + endCounts.other)
+            .apply()
+        updateButtons()
+    }
+
+    private fun syncAfterAck(confirmed: Boolean) {
+        if (!syncActive || syncState != S_WAIT_ACK) return
+        log(if (confirmed) "Opaska przyjęła potwierdzenie." else "Brak odpowiedzi na potwierdzenie. Sprawdzę, czy opaska wyśle kolejną paczkę.")
+        syncState = S_WAIT_NEXT
+        nextRequests = 0
+        armWatch(8_000L)
+    }
+
+    private fun stopSync() {
+        if (!syncActive) return
+        finishSync("Synchronizację zatrzymano. Potwierdzone paczki: $batchesSession. Reszta zostaje w opasce i można wznowić.", true)
+    }
+
+    private fun finishSync(msg: String, ok: Boolean) {
+        main.removeCallbacks(syncWatch)
+        val was = syncActive
+        syncActive = false
+        syncState = S_IDLE
+        pendingEnd = null
+        ackGateTrim = -1L
+        if (!was) return
+        syncSummary = msg
+        if (syncStartedStream) {
+            syncStartedStream = false
+            if (streaming) sendSafe(WhoopExtProtocol.SafeCommand.STOP_REALTIME)
+        }
+        setStatus(msg, if (ok) GOOD else BAD)
+        updateButtons()
+        archiveRefresh(true)
+    }
+
+    // =====================================================================================================
+    // archive: per-record JSONL (appended as records arrive) + per-day CSV (rebuilt from the JSONL, deduplicated)
+    // =====================================================================================================
+    private fun ensureJsonl(): FileLog? {
+        var j = jsonl
+        if (j == null) {
+            try {
+                j = FileLog(File(filesDir, "whoop_archive_records.jsonl"), null, JSONL_MAX_BYTES)
+                jsonl = j
+            } catch (t: Throwable) {
+                log("Nie udało się otworzyć pliku archiwum rekordów.")
+            }
+        }
+        return j
+    }
+
+    /** Streams the JSONL, groups by (date, clock), writes whoop_archive_daily.csv. Runs on the io thread. Returns the summary text. */
+    private fun buildDaily(): String {
+        val src = File(filesDir, "whoop_archive_records.jsonl")
+        val out = File(filesDir, "whoop_archive_daily.csv")
+        val groups = java.util.TreeMap<String, WhoopArchive.DayAcc>()
+        var total = 0L
+        var unmapped = 0L
+        if (src.exists()) {
+            src.bufferedReader(Charsets.UTF_8).useLines { seq ->
+                for (ln in seq) {
+                    val r = WhoopArchive.parseJson(ln) ?: continue
+                    total++
+                    val t = r.tMs
+                    if (t == null) {
+                        unmapped++
+                        continue
+                    }
+                    val d = WhoopArchive.dateOf(t)
+                    val key = d + "|" + r.clk
+                    var acc = groups[key]
+                    if (acc == null) {
+                        acc = WhoopArchive.DayAcc(d, r.clk)
+                        groups[key] = acc
+                    }
+                    acc.add(r)
+                }
+            }
+        }
+        val tmp = File(filesDir, "whoop_archive_daily.csv.tmp")
+        tmp.bufferedWriter(Charsets.UTF_8).use { w ->
+            w.write(WhoopArchive.DAILY_HEADER)
+            w.write("\n")
+            for (a in groups.values) {
+                w.write(a.row())
+                w.write("\n")
+            }
+        }
+        if (!tmp.renameTo(out)) {
+            tmp.copyTo(out, true)
+            tmp.delete()
+        }
+        val dates = java.util.TreeSet<String>()
+        for (a in groups.values) dates.add(a.date)
+        return if (total == 0L) {
+            "Dni z danymi czujników (rekordy 0x2F, nie dziennik): 0. Opaska nie zwróciła jeszcze rekordów czujników."
+        } else {
+            "Dni z danymi czujników (rekordy 0x2F, nie dziennik): " + dates.size +
+                (if (dates.isNotEmpty()) " (od " + dates.first() + " do " + dates.last() + ")" else "") +
+                "\nRekordów: " + total + (if (unmapped > 0) ", bez czasu: $unmapped" else "") +
+                "\nPlik dzienny: " + out.length() / 1024 + " kB, rekordy: " + src.length() / 1024 + " kB"
+        }
+    }
+
+    private class ExportResult(val uri: Uri?, val where: String)
+
+    private fun exportFile(src: File, mime: String): ExportResult {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val u = exportViaMediaStore(src, mime)
+            return ExportResult(u, if (u != null) "Pobrane/Forma/" + src.name else "błąd zapisu " + src.name)
+        }
+        val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return ExportResult(null, "brak miejsca na plik " + src.name)
+        dir.mkdirs()
+        val dst = File(dir, src.name)
+        src.copyTo(dst, true)
+        return ExportResult(null, dst.absolutePath)
+    }
+
+    /** Rebuilds the daily CSV; with export = true also saves records, daily and the raw CSV of this session to Downloads/Forma. */
+    private fun archiveRefresh(export: Boolean) {
+        archiveText = "Przeliczam archiwum…"
+        scheduleRefresh()
+        val rawFile = csvFile
+        val rawLog = csv
+        val recLog = jsonl
+        io.execute {
+            var text = ""
+            var ru: Uri? = null
+            var ju: Uri? = null
+            var du: Uri? = null
+            try {
+                rawLog?.flushNow()
+                recLog?.flushNow()
+                text = buildDaily()
+                if (export) {
+                    val places = ArrayList<String>()
+                    val jf = File(filesDir, "whoop_archive_records.jsonl")
+                    val df = File(filesDir, "whoop_archive_daily.csv")
+                    if (jf.exists()) { val r = exportFile(jf, "application/json"); ju = r.uri; places.add(r.where) }
+                    if (df.exists()) { val r = exportFile(df, "text/csv"); du = r.uri; places.add(r.where) }
+                    if (rawFile != null && rawFile.exists()) { val r = exportFile(rawFile, "text/csv"); ru = r.uri; places.add(r.where) }
+                    text += "\nZapisano: " + places.joinToString(", ")
+                }
+            } catch (t: Throwable) {
+                text = "Archiwum: błąd (" + t.javaClass.simpleName + ")"
+            }
+            runOnUiThread {
+                if (!destroyed) {
+                    archiveText = text
+                    if (ru != null) savedRaw = ru
+                    if (ju != null) savedJsonl = ju
+                    if (du != null) savedDaily = du
+                    updateButtons()
+                    renderValues()
+                }
+            }
+        }
+    }
+
+    // =====================================================================================================
+    // files: raw CSV of every packet and the record archive. Append on one background thread; syncDisk() = flush + fsync before an ACK.
+    // =====================================================================================================
+    private inner class FileLog(val file: File, header: String?, private val maxBytes: Long) {
+        private val fos = FileOutputStream(file, true)
+        private val w = BufferedWriter(OutputStreamWriter(fos, Charsets.UTF_8))
         private var lines = 0
-        private var bytes = 0L
+        private var bytes = file.length()
+
+        /** false after any failed or dropped write (disk full, size cap): the sync then refuses to ACK. */
+        @Volatile var healthy = true
 
         init {
-            write("time_iso,epoch_ms,dir,characteristic,hex_or_text")
+            if (header != null && bytes == 0L) write(header)
         }
 
         private fun write(line: String) {
             try {
-                if (bytes > CSV_MAX_BYTES) return
+                if (bytes + line.length + 1 > maxBytes) {
+                    healthy = false
+                    return
+                }
                 w.write(line)
                 w.write("\n")
                 bytes += line.length + 1
                 lines++
                 if (lines % 25 == 0) w.flush()
-            } catch (t: Throwable) { /* disk full etc.: keep the screen alive */ }
+            } catch (t: Throwable) {
+                healthy = false
+            }
         }
 
-        fun append(line: String) { io.execute { write(line) } }
+        fun append(line: String) {
+            try { io.execute { write(line) } } catch (t: Throwable) { /* executor already shut down */ }
+        }
 
-        fun closeLater() {
-            io.execute {
-                try { w.flush() } catch (t: Throwable) { /* ignore */ }
-                try { w.close() } catch (t: Throwable) { /* ignore */ }
-            }
+        /** Flushes and fsyncs on the io thread (after every queued append), then calls back on the UI thread with the result. */
+        fun syncDisk(cb: (Boolean) -> Unit) {
+            try {
+                io.execute {
+                    var ok = healthy
+                    try {
+                        w.flush()
+                        fos.fd.sync()
+                    } catch (t: Throwable) {
+                        ok = false
+                    }
+                    val result = ok
+                    runOnUiThread { if (!destroyed) cb(result) }
+                }
+            } catch (t: Throwable) { /* executor already shut down: no callback, so no ACK */ }
         }
 
         fun flushNow() {
             try { w.flush() } catch (t: Throwable) { /* ignore */ }
+        }
+
+        fun closeLater() {
+            try {
+                io.execute {
+                    try { w.flush() } catch (t: Throwable) { /* ignore */ }
+                    try { w.close() } catch (t: Throwable) { /* ignore */ }
+                }
+            } catch (t: Throwable) { /* ignore */ }
         }
     }
 
@@ -944,7 +1591,7 @@ class WhoopExtDiagActivity : AppCompatActivity() {
             val name = "whoop_ext_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".csv"
             val f = File(filesDir, name)
             csvFile = f
-            csv = CsvLog(f)
+            csv = FileLog(f, "time_iso,epoch_ms,dir,characteristic,hex_or_text", CSV_MAX_BYTES)
         } catch (t: Throwable) {
             csv = null
             csvFile = null
@@ -961,9 +1608,9 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     }
 
     // =====================================================================================================
-    // save to Downloads / share (no FileProvider needed: MediaStore gives a content:// URI)
+    // save to Downloads/Forma / share (no FileProvider needed: MediaStore gives a content:// URI)
     // =====================================================================================================
-    private fun saveToDownloads() {
+    private fun saveRawToDownloads() {
         val f = csvFile
         val c = csv
         if (f == null || c == null) {
@@ -972,72 +1619,81 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         }
         log("Zapisuję plik…")
         io.execute {
+            var r: ExportResult? = null
             try {
                 c.flushNow()
-                if (Build.VERSION.SDK_INT >= 29) {
-                    val uri = saveViaMediaStore(f)
-                    runOnUiThread {
-                        if (destroyed) return@runOnUiThread
-                        if (uri != null) {
-                            savedUri = uri
-                            setStatus("Zapisano: Pobrane/Forma/" + f.name, GOOD)
-                        } else {
-                            setStatus("Nie udało się zapisać pliku w Pobranych.", BAD)
-                        }
-                        updateButtons()
-                        renderValues()
-                    }
-                } else {
-                    val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-                    if (dir == null) {
-                        runOnUiThread { if (!destroyed) setStatus("Brak miejsca do zapisu pliku.", BAD) }
+                r = exportFile(f, "text/csv")
+            } catch (t: Throwable) { /* reported below */ }
+            val res = r
+            runOnUiThread {
+                if (!destroyed) {
+                    if (res != null && res.where.isNotEmpty() && (res.uri != null || Build.VERSION.SDK_INT < 29)) {
+                        savedRaw = res.uri
+                        setStatus("Zapisano: " + res.where, GOOD)
                     } else {
-                        dir.mkdirs()
-                        val out = File(dir, f.name)
-                        FileInputStream(f).use { input -> FileOutputStream(out).use { o -> input.copyTo(o) } }
-                        runOnUiThread {
-                            if (!destroyed) {
-                                setStatus("Zapisano: " + out.absolutePath, GOOD)
-                                updateButtons()
-                            }
-                        }
+                        setStatus("Zapis pliku nieudany.", BAD)
                     }
+                    updateButtons()
+                    renderValues()
                 }
-            } catch (t: Throwable) {
-                runOnUiThread { if (!destroyed) setStatus("Zapis pliku nieudany: " + t.javaClass.simpleName, BAD) }
             }
         }
     }
 
+    /** Saves src into Downloads/Forma, REPLACING an earlier file of the same name that this app wrote. */
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
-    private fun saveViaMediaStore(src: File): Uri? {
-        val values = ContentValues()
-        values.put(MediaStore.MediaColumns.DISPLAY_NAME, src.name)
-        values.put(MediaStore.MediaColumns.MIME_TYPE, "text/csv")
-        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Forma")
-        values.put(MediaStore.MediaColumns.IS_PENDING, 1)
+    private fun exportViaMediaStore(src: File, mime: String): Uri? {
         val resolver = contentResolver
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
-        val out = resolver.openOutputStream(uri)
-        if (out == null) {
-            resolver.delete(uri, null, null)
-            return null
+        val coll = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        val rel = Environment.DIRECTORY_DOWNLOADS + "/Forma/"
+        var uri: Uri? = null
+        try {
+            resolver.query(
+                coll, arrayOf(MediaStore.MediaColumns._ID),
+                MediaStore.MediaColumns.DISPLAY_NAME + "=? AND " + MediaStore.MediaColumns.RELATIVE_PATH + "=?",
+                arrayOf(src.name, rel), null
+            )?.use { c ->
+                if (c.moveToFirst()) uri = ContentUris.withAppendedId(coll, c.getLong(0))
+            }
+        } catch (t: Throwable) {
+            uri = null
         }
-        out.use { o -> FileInputStream(src).use { input -> input.copyTo(o) } }
+        var out: java.io.OutputStream? = null
+        val existing = uri
+        if (existing != null) {
+            out = try { resolver.openOutputStream(existing, "wt") } catch (t: Throwable) { null }
+        }
+        var target: Uri? = if (out != null) existing else null
+        if (out == null) {
+            val values = ContentValues()
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, src.name)
+            values.put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Forma")
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1)
+            val created = resolver.insert(coll, values) ?: return null
+            out = resolver.openOutputStream(created)
+            if (out == null) {
+                resolver.delete(created, null, null)
+                return null
+            }
+            target = created
+        }
+        val stream: java.io.OutputStream = out ?: return null
+        stream.use { o -> FileInputStream(src).use { input -> input.copyTo(o) } }
         val done = ContentValues()
         done.put(MediaStore.MediaColumns.IS_PENDING, 0)
-        resolver.update(uri, done, null, null)
-        return uri
+        try { resolver.update(target!!, done, null, null) } catch (t: Throwable) { /* replaced file has no pending flag */ }
+        return target
     }
 
-    private fun shareSaved() {
-        val uri = savedUri ?: return
+    private fun shareUri(uri: Uri?, mime: String) {
+        if (uri == null) return
         try {
             val i = Intent(Intent.ACTION_SEND)
-            i.type = "text/csv"
+            i.type = mime
             i.putExtra(Intent.EXTRA_STREAM, uri)
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            startActivity(Intent.createChooser(i, "Udostępnij plik CSV"))
+            startActivity(Intent.createChooser(i, "Udostępnij plik"))
         } catch (t: Throwable) {
             log("Nie udało się otworzyć udostępniania: " + t.javaClass.simpleName)
         }

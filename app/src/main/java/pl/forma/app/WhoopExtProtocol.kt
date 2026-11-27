@@ -43,27 +43,39 @@ object WhoopExtProtocol {
 
     // ---------- packet types (payload[0]) ----------
     const val PKT_COMMAND = 0x23
-    const val PKT_COMMAND_RESPONSE = 0x24 // from memory of other community notes, not in the sources we could open: unverified
+    const val PKT_COMMAND_RESPONSE = 0x24 // seen on a real band: payload = 24 | counter | cmd | seq echo | status | data
     const val PKT_REALTIME = 0x28
     const val PKT_HISTORICAL = 0x2F
     const val PKT_EVENT = 0x30
     const val PKT_METADATA = 0x31
+    const val PKT_FW_LOG = 0x32 // plain-text firmware console log records (seen on a real band)
+
+    /** Band clock: a value below this is seconds since band boot (RTC not set), at or above it is Unix seconds. */
+    const val UNIX_MIN = 1_000_000_000L
 
     // ---------- SAFE-READ whitelist ----------
     /**
-     * The ONLY commands this app can build. Anything else (erase 0x19, reboot 0x1D, alarm 0x42, haptics, HR broadcast 0x0E,
-     * clock set, batch ACK 0x17, IMU / raw-data modes, ...) has no constant here, so it cannot be sent by accident.
+     * The ONLY commands this app can build (plus the batch ACK below, which has its own gated builder).
+     * Anything else (erase 0x19, reboot 0x1D, alarm 0x42, haptics, HR broadcast 0x0E, clock set 0x0A, IMU / raw modes, ...)
+     * has no constant here, so it cannot be sent by accident.
      */
     enum class SafeCommand(val id: Int, val value: Int, val label: String) {
-        /** 0x03 value 1: start the 1 Hz realtime stream (HR + RR). Volatile toggle, documented as stopping with value 0. */
+        /** 0x03 value 1: start the 1 Hz realtime stream (HR + RR). Confirmed on a real band: answered by a 0x24 response, status 2. */
         START_REALTIME(0x03, 0x01, "start odczytu na żywo"),
-        /** 0x03 value 0: the explicit stop-stream. */
+        /** 0x03 value 0: the explicit stop-stream. Confirmed on a real band (status 2). */
         STOP_REALTIME(0x03, 0x00, "stop odczytu na żywo"),
-        /** 0x1A: battery level request (GET_BATTERY_LEVEL). ID from memory of other community notes; consistent with every other ID we could cross-check. */
-        GET_BATTERY(0x1A, 0x00, "odczyt baterii"),
-        /** 0x16: ask the band to send stored records (SEND_HISTORICAL_DATA). We never send the batch ACK (0x17), so nothing is released on the band. */
+        /**
+         * 0x23 value 0: GET_HELLO_HARVARD, the handshake / device-info read that the official app sends on connect.
+         * One secondary source (zordhalo/whoopsie-protocol) says battery is inside the reply; layout unverified, so the UI only shows candidates.
+         * Replaces the battery command 0x1A, which the user's band never answered (9 tries).
+         */
+        GET_HELLO(0x23, 0x00, "odczyt informacji o opasce (HELLO)"),
+        /** 0x16 value 0: ask the band to send its stored records (SEND_HISTORICAL_DATA). Answered by 0x24 (status 2), then 0x31 / 0x2F / 0x32 packets. */
         REQUEST_HISTORY(0x16, 0x00, "prośba o dane z pamięci")
     }
+
+    /** Opcode of HISTORICAL_DATA_RESULT, the batch ACK. Only buildBatchAck() makes it, and only for a parsed batch-end packet. */
+    const val CMD_BATCH_ACK = 0x17
 
     /** Set to false to hide the "Pobierz dane z pamięci (próba)" button and make the builder refuse REQUEST_HISTORY. */
     const val HISTORY_PULL_ENABLED = true
@@ -78,6 +90,76 @@ object WhoopExtProtocol {
             (cmd.value and 0xFF).toByte()
         )
         return frame(payload)
+    }
+
+    // ---------- batch end / ACK ----------
+    /**
+     * HISTORY_END metadata packet (type 0x31, sub-type 2), payload layout (checked on a real band and on the community example):
+     * [0]=0x31 [1]=counter [2]=0x02 [3..6]=band time [7..12]=? [13..16]=trim/batch number u32 LE [17..23]=? (04 00.. or 38 00.. seen).
+     * `tail` = payload[13..20] (8 bytes) as sent by the band.
+     */
+    class BatchEnd(val counter: Int, val bandTime: Long, val trim: Long, val tail: ByteArray)
+
+    fun parseBatchEnd(p: ByteArray): BatchEnd? {
+        return try {
+            if (p.size < 17 || u8(p, 0) != PKT_METADATA || u8(p, 2) != 0x02) return null
+            val tail = p.copyOfRange(13, minOf(p.size, 21))
+            BatchEnd(u8(p, 1), u32le(p, 3), u32le(p, 13), tail)
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Batch ACK (command 0x17): payload = 23 | seq | 17 | 01 | trim (u32 LE) | 4 trailing bytes. 12-byte payload, so the frame is
+     * 20 bytes with header aa 10 00 57.
+     * Sources: reverse-engineering-whoop-post ("aa10005723{count}1701{batch}00000000{crc}"), AStrasler/whoop4-ble docs
+     * (ACK = [01][LE u32 trim][00 00 00 00], trim read at byte 10 of the metadata data = payload[13]), ZHOOP ("[01] + end_data").
+     * Default trailing bytes: zeros. echoTail = true sends the band's own 4 bytes after the trim instead (variant described by
+     * zordhalo/whoopsie-protocol); the app falls back to it only if the band replays a batch after a zero-tail ACK.
+     */
+    fun buildBatchAck(end: BatchEnd, seq: Int, echoTail: Boolean): ByteArray {
+        val payload = ByteArray(12)
+        payload[0] = PKT_COMMAND.toByte()
+        payload[1] = (seq and 0xFF).toByte()
+        payload[2] = CMD_BATCH_ACK.toByte()
+        payload[3] = 0x01
+        for (i in 0 until 4) payload[4 + i] = ((end.trim shr (8 * i)) and 0xFF).toByte()
+        if (echoTail && end.tail.size >= 8) {
+            for (i in 0 until 4) payload[8 + i] = end.tail[4 + i]
+        }
+        return frame(payload)
+    }
+
+    // ---------- band clock -> phone clock ----------
+    /**
+     * Live 0x28 packets carry a band-seconds counter (uptime when the band RTC is unset). Comparing it with the phone receive time
+     * gives an offset; the minimum over a recent window is used because delivery delay only ever makes the difference larger.
+     * Values >= UNIX_MIN are Unix seconds already and need no offset. A band reboot (counter jumps back) clears the window.
+     * Records stored before the current boot cannot be mapped correctly (their uptime base is gone): callers label results "przybliżony".
+     */
+    class TimeMap {
+        private val window = ArrayDeque<Long>()
+        private var lastCounter = -1L
+
+        fun observe(counter: Long, rxMs: Long) {
+            if (counter <= 0L || counter >= UNIX_MIN) return
+            if (lastCounter >= 0L && counter + 5L < lastCounter) window.clear()
+            lastCounter = counter
+            window.addLast(rxMs / 1000L - counter)
+            while (window.size > 30) window.removeFirst()
+        }
+
+        fun hasOffset(): Boolean = window.isNotEmpty()
+
+        /** Phone time in ms, or null when ts is uptime and no live packet has been seen yet. */
+        fun toPhoneMs(ts: Long): Long? {
+            if (ts >= UNIX_MIN) return ts * 1000L
+            if (window.isEmpty()) return null
+            var m = Long.MAX_VALUE
+            for (v in window) if (v < m) m = v
+            return (ts + m) * 1000L
+        }
     }
 
     // ---------- framing and CRC ----------
@@ -215,6 +297,14 @@ object WhoopExtProtocol {
         val az: Double? = null,
         val batteryPct: Double? = null,
         val batchNo: Long? = null,
+        val cmd: Int? = null,
+        val seqEcho: Int? = null,
+        val status: Int? = null,
+        val metaSub: Int? = null,
+        val batchEnd: BatchEnd? = null,
+        val text: String? = null,
+        val recCounter: Long? = null,
+        val eventId: Int? = null,
         val info: String = ""
     )
 
@@ -228,6 +318,7 @@ object WhoopExtProtocol {
                 PKT_METADATA -> decodeMetadata(p)
                 PKT_COMMAND_RESPONSE -> decodeResponse(p)
                 PKT_EVENT -> decodeEvent(p)
+                PKT_FW_LOG -> decodeLog(p)
                 else -> Decoded("nieznany", info = "typ 0x" + Integer.toHexString(u8(p, 0)) + ", " + p.size + " B")
             }
         } catch (t: Throwable) {
@@ -313,6 +404,7 @@ object WhoopExtProtocol {
             ax = ax,
             ay = ay,
             az = az,
+            recCounter = u32le(p, 3),
             info = "licznik " + u32le(p, 3)
         )
     }
@@ -320,36 +412,303 @@ object WhoopExtProtocol {
     private fun ok(v: Double): Boolean = !v.isNaN() && !v.isInfinite() && Math.abs(v) <= 16.0
 
     /**
-     * Sync status (type 0x31, header aa1c00ab31 in the examples): [1]=counter [2]=0x02 [3..6]=unix time [13..16]=batch number.
-     * We only DISPLAY the batch number. Echoing it back (command 0x17) is the batch ACK, which we never send.
+     * Sync metadata (type 0x31): [1]=counter [2]=sub-type: 1 = HISTORY_START, 2 = HISTORY_END, 3 = HISTORY_COMPLETE (names from community notes),
+     * [3..6]=band time. Seen on a real band: a sub-type 3 packet can arrive BEFORE a start, so it is informational only.
+     * For sub-type 2 see BatchEnd (trim / batch number at [13..16]).
      */
     private fun decodeMetadata(p: ByteArray): Decoded {
-        if (p.size >= 17 && u8(p, 2) == 0x02) {
-            return Decoded("synchronizacja", epoch = u32le(p, 3), batchNo = u32le(p, 13), info = "numer paczki " + u32le(p, 13))
+        if (p.size < 7) return Decoded("synchronizacja", info = "typ 0x31, " + p.size + " B")
+        val sub = u8(p, 2)
+        val ts = u32le(p, 3)
+        val end = if (sub == 2) parseBatchEnd(p) else null
+        val name = when (sub) {
+            1 -> "początek paczki"
+            2 -> "koniec paczki"
+            3 -> "komunikat 'zakończono'"
+            else -> "podtyp $sub"
         }
-        return Decoded("synchronizacja", info = "typ 0x31, " + p.size + " B")
+        return Decoded(
+            kind = "synchronizacja",
+            epoch = ts,
+            metaSub = sub,
+            batchEnd = end,
+            batchNo = end?.trim,
+            info = name + (if (end != null) ", numer paczki " + end.trim else "")
+        )
     }
 
     /**
-     * Command response (type 0x24, CMD_FROM_STRAP): [1]=seq [2]=command echo [3]=status?. Layout NOT confirmed by any source we could open.
-     * For GET_BATTERY (0x1A) we try u16 LE at [4] divided by 10 (percent in tenths) and fall back to u8 at [4] as plain percent.
-     * Both are GUESSES: the UI shows the result as "przypuszczalnie" and the CSV keeps the raw bytes.
+     * Command response (type 0x24, CMD_FROM_STRAP), layout CONFIRMED on a real band: [1]=counter [2]=command id [3]=echo of our seq
+     * [4]=status (2 on every accepted command seen: 0x03, 0x16) [5..]=data (0x16: 0b 00 00).
+     * No response was ever seen for 0x1A (battery).
+     * For HELLO (0x23) a secondary source puts battery as u32 LE / 10 somewhere near the start of the data: we only report candidates
+     * for three possible offsets in `info`, never as a value.
      */
     private fun decodeResponse(p: ByteArray): Decoded {
-        if (p.size < 3) return Decoded("odpowiedź", info = "za krótka")
+        if (p.size < 5) return Decoded("odpowiedź", info = "za krótka")
         val cmd = u8(p, 2)
-        if (cmd == SafeCommand.GET_BATTERY.id && p.size >= 6) {
-            val tenths = u16le(p, 4) / 10.0
-            val plain = u8(p, 4)
-            val pct: Double? = if (tenths in 0.0..100.0) tenths else if (plain in 0..100) plain.toDouble() else null
-            return Decoded("odpowiedź", batteryPct = pct, info = "bateria: kandydaci u16/10=" + tenths + ", u8=" + plain)
+        val echo = u8(p, 3)
+        val st = u8(p, 4)
+        var info = "polecenie 0x" + Integer.toHexString(cmd) + ", status " + st
+        if (cmd == SafeCommand.GET_HELLO.id) {
+            val cands = StringBuilder()
+            for (o in intArrayOf(4, 5, 6)) {
+                if (o + 4 <= p.size) cands.append(" [").append(o).append("]=").append(u32le(p, o) / 10.0)
+            }
+            info += "; HELLO " + p.size + " B, kandydaci bateria u32/10:" + cands
         }
-        return Decoded("odpowiedź", info = "polecenie 0x" + Integer.toHexString(cmd))
+        return Decoded("odpowiedź", cmd = cmd, seqEcho = echo, status = st, info = info)
     }
 
-    /** Event (type 0x30): [1]=counter [2..3]=event id u16 [4..7]=unix time (may not match real time if the band clock is unset). */
+    /**
+     * Event (type 0x30): [1]=counter [2..3]=event id u16 [4..7]=band time [8..]=data.
+     * Event 0x03 BATTERY_LEVEL: u32 LE / 10 percent; event 0x11 TEMPERATURE_LEVEL: i16 LE / 10 degrees C (zordhalo/whoopsie-protocol,
+     * AStrasler/whoop4-ble confirms that temperature arrives as an event). Both are GUESSES for the user's firmware and range-checked.
+     */
     private fun decodeEvent(p: ByteArray): Decoded {
         if (p.size < 8) return Decoded("zdarzenie", info = "za krótkie")
-        return Decoded("zdarzenie", epoch = u32le(p, 4), info = "id 0x" + Integer.toHexString(u16le(p, 2)))
+        val id = u16le(p, 2)
+        var battery: Double? = null
+        var temp: Double? = null
+        if (id == 0x03 && p.size >= 12) {
+            val v = u32le(p, 8) / 10.0
+            if (v in 0.0..100.0) battery = v
+        }
+        if (id == 0x11 && p.size >= 10) {
+            var raw = u16le(p, 8)
+            if (raw > 32767) raw -= 65536
+            val t = raw / 10.0
+            if (t in 20.0..45.0) temp = t
+        }
+        return Decoded("zdarzenie", epoch = u32le(p, 4), eventId = id, batteryPct = battery, tempC = temp, info = "id 0x" + Integer.toHexString(id))
+    }
+
+    /**
+     * Firmware console log (type 0x32, seen on a real band): [1..2]=record counter u16 LE [4..7]=timestamp [8..11]=sub-second
+     * [12]=flags [13..]=ASCII text, NUL terminated (a log line is cut into ~46-byte fragments across records).
+     */
+    private fun decodeLog(p: ByteArray): Decoded {
+        if (p.size < 14) return Decoded("dziennik", info = "za krótki")
+        val sb = StringBuilder()
+        var i = 13
+        while (i < p.size) {
+            val c = u8(p, i)
+            if (c == 0) break
+            sb.append(if (c == 10) ' ' else if (c in 32..126) c.toChar() else '?')
+            i++
+        }
+        return Decoded("dziennik", epoch = u32le(p, 4), recCounter = u16le(p, 1).toLong(), text = sb.toString(), info = sb.toString())
+    }
+}
+
+/**
+ * Archive of decoded stored records: per-record JSON lines and a per-day summary CSV. Pure Kotlin (no Android classes).
+ *
+ * DAILY CSV COLUMNS (stable, in this order; see WHOOP-EXT-NOTES.md):
+ *   date          local date yyyy-MM-dd of the record time (phone time zone)
+ *   clock         "unix" = band stamped the record with Unix seconds; "uptime" = band seconds-since-boot mapped to phone time (approximate)
+ *   records       number of unique 0x2F records that day
+ *   first_ts,last_ts   first / last record time, Unix seconds
+ *   hr_min,hr_avg      heart rate over the whole day (records with a plausible HR)
+ *   hr_rest_est        lowest 5-minute average HR in the night window 00:00-06:00 local (buckets need >= 30 samples)
+ *   night_records      records inside 00:00-06:00 local
+ *   rmssd_ms,ln_rmssd  RMSSD of night RR (rules below); empty when fewer than 30 usable successive differences
+ *   rr_used            number of night RR values kept after cleaning
+ *   temp_avg_c         mean skin temperature, EMPIRICAL (record byte 70 / 4), empty if no plausible values
+ *   spo2_avg           mean SpO2, EMPIRICAL (record byte 72), empty if none
+ *   motion_min         minutes with motion, EMPIRICAL: a clock minute (>= 10 samples) counts when max - min of |accel| exceeds 0.10 g
+ * RR cleaning: keep 300..2000 ms, then drop a beat that deviates > 20 percent from the median of its 5 neighbouring beats (itself included);
+ * RMSSD uses only differences between consecutive kept beats whose record times are <= 3 s apart.
+ */
+object WhoopArchive {
+    const val DAILY_HEADER = "date,clock,records,first_ts,last_ts,hr_min,hr_avg,hr_rest_est,night_records,rmssd_ms,ln_rmssd,rr_used,temp_avg_c,spo2_avg,motion_min"
+
+    /** One decoded stored record. tMs = phone-clock milliseconds (null = uptime stamp that could not be mapped). clk = "unix" | "uptime". */
+    class Rec(
+        val tMs: Long?, val raw: Long, val clk: String, val ctr: Long, val hr: Int?, val rr: List<Int>,
+        val tempC: Double?, val tempRaw: Int?, val spo2: Int?, val ax: Double?, val ay: Double?, val az: Double?,
+        val rxMs: Long? = null
+    )
+
+    private fun num(v: Double): String = java.lang.Double.toString(Math.round(v * 10000.0) / 10000.0)
+
+    fun toJson(r: Rec): String {
+        val sb = StringBuilder(160)
+        sb.append("{\"clk\":\"").append(r.clk).append("\",\"raw\":").append(r.raw).append(",\"ctr\":").append(r.ctr)
+        if (r.tMs != null) sb.append(",\"t\":").append(r.tMs)
+        if (r.rxMs != null) sb.append(",\"rx\":").append(r.rxMs)
+        if (r.hr != null) sb.append(",\"hr\":").append(r.hr)
+        if (r.rr.isNotEmpty()) sb.append(",\"rr\":[").append(r.rr.joinToString(",")).append("]")
+        if (r.tempC != null) sb.append(",\"temp\":").append(num(r.tempC))
+        if (r.tempRaw != null) sb.append(",\"tr\":").append(r.tempRaw)
+        if (r.spo2 != null) sb.append(",\"spo2\":").append(r.spo2)
+        if (r.ax != null && r.ay != null && r.az != null) {
+            sb.append(",\"ax\":").append(num(r.ax)).append(",\"ay\":").append(num(r.ay)).append(",\"az\":").append(num(r.az))
+        }
+        sb.append("}")
+        return sb.toString()
+    }
+
+    private fun field(line: String, key: String): String? {
+        val k = "\"" + key + "\":"
+        val i = line.indexOf(k)
+        if (i < 0) return null
+        var j = i + k.length
+        val st = j
+        while (j < line.length && line[j] != ',' && line[j] != '}' && line[j] != ']') j++
+        return line.substring(st, j).trim('"')
+    }
+
+    /** Reads one line written by toJson. Never throws; null for a damaged line. */
+    fun parseJson(line: String): Rec? {
+        return try {
+            val raw = field(line, "raw")?.toLong() ?: return null
+            val clk = field(line, "clk") ?: return null
+            val rr = ArrayList<Int>()
+            val ri = line.indexOf("\"rr\":[")
+            if (ri >= 0) {
+                val e = line.indexOf(']', ri)
+                if (e > ri) for (x in line.substring(ri + 6, e).split(',')) { val v = x.trim().toIntOrNull(); if (v != null) rr.add(v) }
+            }
+            Rec(
+                field(line, "t")?.toLong(), raw, clk, field(line, "ctr")?.toLong() ?: 0L, field(line, "hr")?.toInt(), rr,
+                field(line, "temp")?.toDouble(), field(line, "tr")?.toInt(), field(line, "spo2")?.toInt(),
+                field(line, "ax")?.toDouble(), field(line, "ay")?.toDouble(), field(line, "az")?.toDouble(),
+                field(line, "rx")?.toLong()
+            )
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /** Local-time helpers (phone time zone at that instant). */
+    private fun localMs(tMs: Long): Long = tMs + java.util.TimeZone.getDefault().getOffset(tMs)
+
+    private val dateCache = HashMap<Long, String>()
+
+    fun dateOf(tMs: Long): String {
+        val day = Math.floorDiv(localMs(tMs), 86400000L)
+        val hit = dateCache[day]
+        if (hit != null) return hit
+        val f = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+        f.timeZone = java.util.TimeZone.getTimeZone("UTC")
+        val v = f.format(java.util.Date(day * 86400000L))
+        dateCache[day] = v
+        return v
+    }
+
+    /** Accumulates one (date, clock) group. Feed records in any order; duplicates (same raw stamp and counter) are ignored. */
+    class DayAcc(val date: String, val clk: String) {
+        private val seen = HashSet<Long>()
+        private var n = 0
+        private var first = Long.MAX_VALUE
+        private var last = Long.MIN_VALUE
+        private var hrMin = Int.MAX_VALUE
+        private var hrSum = 0L
+        private var hrN = 0
+        private var nightN = 0
+        private val nightBuckets = HashMap<Int, LongArray>()
+        private val nightRr = ArrayList<Long>()
+        private var tempSum = 0.0
+        private var tempN = 0
+        private var spoSum = 0L
+        private var spoN = 0
+        private val magMin = DoubleArray(1440) { Double.POSITIVE_INFINITY }
+        private val magMax = DoubleArray(1440) { Double.NEGATIVE_INFINITY }
+        private val magN = IntArray(1440)
+
+        fun records(): Int = n
+
+        fun add(r: Rec) {
+            val t = r.tMs ?: return
+            if (!seen.add((r.raw shl 20) xor (r.ctr and 0xFFFFF))) return
+            n++
+            if (t < first) first = t
+            if (t > last) last = t
+            val lm = localMs(t)
+            val minuteOfDay = (((lm / 60000L) % 1440L) + 1440L).toInt() % 1440
+            val hr = r.hr
+            if (hr != null && hr in 25..230) {
+                if (hr < hrMin) hrMin = hr
+                hrSum += hr
+                hrN++
+                if (minuteOfDay < 360) {
+                    val b = nightBuckets.getOrPut(minuteOfDay / 5) { LongArray(2) }
+                    b[0] += hr.toLong()
+                    b[1] += 1L
+                }
+            }
+            if (minuteOfDay < 360) {
+                nightN++
+                val tSec = t / 1000L
+                for (k in 0 until minOf(r.rr.size, 4)) {
+                    nightRr.add((tSec shl 24) or (k.toLong() shl 16) or (r.rr[k].toLong() and 0xFFFFL))
+                }
+            }
+            val tc = r.tempC
+            if (tc != null) { tempSum += tc; tempN++ }
+            val sp = r.spo2
+            if (sp != null) { spoSum += sp; spoN++ }
+            if (r.ax != null && r.ay != null && r.az != null) {
+                val m = Math.sqrt(r.ax * r.ax + r.ay * r.ay + r.az * r.az)
+                if (m.isFinite()) {
+                    if (m < magMin[minuteOfDay]) magMin[minuteOfDay] = m
+                    if (m > magMax[minuteOfDay]) magMax[minuteOfDay] = m
+                    magN[minuteOfDay]++
+                }
+            }
+        }
+
+        private fun f(v: Double, d: Int): String = String.format(java.util.Locale.US, "%." + d + "f", v)
+
+        /** Returns {rmssd or NaN, rr kept}. */
+        private fun rmssd(): DoubleArray {
+            nightRr.sort()
+            val tS = ArrayList<Long>()
+            val v = ArrayList<Int>()
+            for (x in nightRr) {
+                val rr = (x and 0xFFFFL).toInt()
+                if (rr in 300..2000) { tS.add(x shr 24); v.add(rr) }
+            }
+            val keepT = ArrayList<Long>()
+            val keepV = ArrayList<Int>()
+            for (i in 0 until v.size) {
+                val lo = maxOf(0, i - 2)
+                val hi = minOf(v.size - 1, i + 2)
+                val w = ArrayList<Int>()
+                for (j in lo..hi) w.add(v[j])
+                w.sort()
+                val med = w[w.size / 2].toDouble()
+                if (Math.abs(v[i] - med) / med <= 0.20) { keepT.add(tS[i]); keepV.add(v[i]) }
+            }
+            var sum = 0.0
+            var cnt = 0
+            for (i in 1 until keepV.size) {
+                if (keepT[i] - keepT[i - 1] <= 3L) {
+                    val d = (keepV[i] - keepV[i - 1]).toDouble()
+                    sum += d * d
+                    cnt++
+                }
+            }
+            return doubleArrayOf(if (cnt >= 30) Math.sqrt(sum / cnt) else Double.NaN, keepV.size.toDouble())
+        }
+
+        fun row(): String {
+            var rest = Double.NaN
+            for (b in nightBuckets.values) if (b[1] >= 30L) { val a = b[0].toDouble() / b[1]; if (rest.isNaN() || a < rest) rest = a }
+            val r = rmssd()
+            var motion = 0
+            for (i in 0 until 1440) if (magN[i] >= 10 && magMax[i] - magMin[i] > 0.10) motion++
+            val sb = StringBuilder()
+            sb.append(date).append(',').append(clk).append(',').append(n).append(',')
+            sb.append(if (n > 0) (first / 1000L).toString() else "").append(',').append(if (n > 0) (last / 1000L).toString() else "").append(',')
+            sb.append(if (hrN > 0) hrMin.toString() else "").append(',').append(if (hrN > 0) f(hrSum.toDouble() / hrN, 1) else "").append(',')
+            sb.append(if (rest.isNaN()) "" else f(rest, 1)).append(',').append(nightN).append(',')
+            sb.append(if (r[0].isNaN()) "" else f(r[0], 1)).append(',').append(if (r[0].isNaN()) "" else f(Math.log(r[0]), 3)).append(',')
+            sb.append(r[1].toInt()).append(',')
+            sb.append(if (tempN > 0) f(tempSum / tempN, 2) else "").append(',').append(if (spoN > 0) f(spoSum.toDouble() / spoN, 1) else "").append(',')
+            sb.append(motion)
+            return sb.toString()
+        }
     }
 }

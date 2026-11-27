@@ -57,18 +57,20 @@ Status sync `0x31` (przykład `aa1c00ab31...`): `[3..6]` czas, `[13..16]` numer 
 
 Temperatura: jednostki to według OpenStrap surowa wartość/4 w °C. Hackaday: odczyty analogowe (np. temperatura otoczenia) to względne wartości ADC wymagające kalibracji. Dlatego pokazujemy surową wartość obok °C i filtrujemy do przedziału 20 do 45 °C.
 
-## 3. Lista SAFE-READ (jedyne polecenia możliwe do zbudowania)
+## 3. Lista poleceń (stan po teście na prawdziwej opasce, 2026-11-27)
 
-Wymuszone typem: `WhoopExtProtocol.SafeCommand` to enum z 4 pozycjami; innych poleceń nie da się zbudować. Format: ładunek `23 seq id wartość`.
+Wymuszone typem: `WhoopExtProtocol.SafeCommand` to enum z 4 pozycjami plus jedno polecenie z bramką (ACK 0x17). Innych poleceń nie da się zbudować. Format: ładunek `23 seq id wartość`.
 
-| Polecenie | ID/wartość | Dlaczego bezpieczne | Pewność ID |
+| Polecenie | ID/wartość | Klasa | Wynik na prawdziwej opasce |
 |---|---|---|---|
-| Start odczytu na żywo | 0x03 / 0x01 | Przełącznik strumienia 1 Hz (HR+RR), nic nie zapisuje; udokumentowane zatrzymanie 0x03/0x00. Zastrzeżenie: źródła nazywają to "activity tracking", może zmieniać tymczasowy tryb opaski; trwałych skutków nie opisano | Wysoka (post, 3 podstrony) |
-| Stop | 0x03 / 0x00 | Jawne zatrzymanie strumienia | Wysoka |
-| Odczyt baterii | 0x1A / 0x00 | Zapytanie tylko-do-odczytu | Średnia: ID z pamięci innych notatek społeczności, spójne ze wszystkimi innymi ID, które da się zweryfikować; układ odpowiedzi ZGADYWANY |
-| Prośba o dane z pamięci | 0x16 / 0x00 | Prosi o wysłanie zapisanych rekordów. Nie wysyłamy potwierdzenia 0x17, więc opaska nie ma powodu zwalniać pamięci. Zastrzeżenie: źródła nie mówią wprost, że 0x16 niczego nie usuwa; usuwanie opisują tylko jako osobne polecenie 0x19 | Średnia (post: "trigger data retrieval"; wartość 0x00 nieopisana) |
+| Start odczytu na żywo | 0x03 / 0x01 | SAFE-READ (przełącznik strumienia) | Odpowiedź 0x24, status 2; potem pakiety 0x28 co ok. 1 s |
+| Stop | 0x03 / 0x00 | SAFE-READ | Odpowiedź 0x24, status 2 |
+| Informacje o opasce (HELLO) | 0x23 / 0x00 | SAFE-READ (nowe, niesprawdzone na opasce) | Jeszcze nieprzetestowane. Zastępuje baterię 0x1A |
+| Prośba o dane z pamięci | 0x16 / 0x00 | SAFE-READ (bez ACK nic się nie zwalnia) | Odpowiedź 0x24 status 2 (dane `0b 00 00`), potem 0x31, 0x32, 0x31 koniec paczki. Bez ACK opaska powtarza tę samą paczkę |
+| Potwierdzenie paczki (ACK) | 0x17 / patrz 8 | RYZYKOWNE, tylko z bramki synchronizacji | Zgoda użytkownika 2026-11-27: zwalnia pamięć opaski. Budowane wyłącznie po zapisie i fsync paczki |
+| ~~Odczyt baterii~~ | 0x1A | usunięte | Brak odpowiedzi w 9 próbach, więc ID nie działa na tej opasce; inne źródła podają to samo ID (patrz 9) |
 
-Stała `HISTORY_PULL_ENABLED = true` w `WhoopExtProtocol.kt`; ustaw `false`, a przycisk zniknie i polecenie przestanie być budowalne.
+Stała `HISTORY_PULL_ENABLED = true` w `WhoopExtProtocol.kt`; ustaw `false`, a przyciski podglądu i synchronizacji znikną, a polecenie 0x16 i ACK przestaną być budowalne.
 
 Ryzykowne, NIE zaimplementowane (brak stałych w kodzie):
 
@@ -96,16 +98,64 @@ Ryzykowne, NIE zaimplementowane (brak stałych w kodzie):
 
 ## 5. Instrukcja testu dla użytkownika (5 kroków)
 
-1. W Formie zatrzymaj pomiar nocny i pomiar na żywo. Zamknij aplikację WHOOP (nawet jeśli nie masz konta). Załóż opaskę na nadgarstek.
-2. Otwórz ekran „Diagnostyka WHOOP – tryb rozszerzony” (ikona „Forma – test WHOOP” albo z ustawień Formy) i naciśnij „Połącz”. Zezwól na Bluetooth. Poczekaj na zielony napis „Gotowe”.
-3. Naciśnij „Start odczytu na żywo”, poczekaj ok. 30 sekund, potem „Odczytaj baterię”, potem „Stop”.
-4. Naciśnij „Pobierz dane z pamięci (próba)”, potwierdź, poczekaj 1 do 2 minut (licznik „z pamięci” powinien rosnąć), potem „Rozłącz”.
-5. Naciśnij „Zapisz plik w Pobranych”, potem „Udostępnij plik” i wyślij plik CSV. Dołącz zrzut ekranu z odczytami i napisz, jaka była temperatura w pokoju i czy opaska była na ręce.
+1. W Formie zatrzymaj pomiar nocny. Zamknij aplikację WHOOP (nawet jeśli nie masz konta). Załóż opaskę.
+2. Otwórz „Diagnostyka WHOOP – tryb rozszerzony” i naciśnij „Połącz”. Forma sama odłączy pomiar na żywo. Poczekaj na zielony napis „Gotowe”.
+3. Naciśnij „Start odczytu na żywo” (po ok. 30 s „Stop”). Przy każdym przycisku zobaczysz „Wysłano… / Odpowiedź… / Brak odpowiedzi po 5 s”.
+4. Naciśnij „Synchronizuj pamięć opaski”, potwierdź i poczekaj, aż pojawi się napis o zakończeniu. Możesz w każdej chwili nacisnąć „Stop synchronizacji” (to bezpieczne, nic się nie traci).
+5. Forma sama zapisze pliki w Pobranych/Forma. Naciśnij „Udostępnij…” przy plikach archiwum i wyślij: `whoop_archive_daily.csv`, `whoop_archive_records.jsonl` i surowy plik `whoop_ext_*.csv`. Zachowaj te pliki: po potwierdzeniu opaska zwalnia pamięć i danych nie da się pobrać drugi raz.
 
 ## 6. Co odesłać
 
-Plik `whoop_ext_RRRRMMDD_GGMMSS.csv` (w Pobranych/Forma). Kolumny: czas, dir (RX/TX/INFO), charakterystyka, surowy hex. Wystarczy do ustalenia prawdziwych offsetów.
+Pliki z Pobranych/Forma: `whoop_ext_RRRRMMDD_GGMMSS.csv` (surowe pakiety: czas, dir RX/TX/INFO, charakterystyka, hex), `whoop_archive_records.jsonl` i `whoop_archive_daily.csv` (patrz 10).
 
 ## 7. Weryfikacja kodu
 
-`WhoopExtProtocol.kt` został skompilowany kompilatorem Kotlin 2.0.21 (dołączonym do Gradle) i uruchomiony na: wektorach CRC, złożeniu ramki z fragmentów 20+8 B, rekordach z postu i 20 000 losowych buforach (bez wyjątków). `WhoopExtDiagActivity.kt` NIE był kompilowany (brak Android SDK); sprawdzono go ręcznie, patrz punkty ryzyka w raporcie.
+`WhoopExtProtocol.kt` (razem z `WhoopArchive`) skompilowano kompilatorem Kotlin 2.0.21 dołączonym do Gradle i uruchomiono na: wektorach CRC, składaniu ramek z fragmentów, ramkach z obu plików CSV użytkownika (0x28, 0x24, 0x31, 0x32, 0x30, MEMFAULT: 0 błędnych CRC), budowie ACK (nagłówek `aa10005723` zgodny z postem), 20 000 losowych buforach (bez wyjątków) i syntetycznej dobie (odczyt JSONL, RMSSD, spoczynkowe HR, ruch). `WhoopExtDiagActivity.kt` NIE był kompilowany z prawdziwym Android SDK (brak SDK); przeszedł kontrolę typów i przepływu względem własnych zaślepek API Androida. Różnice między zaślepkami a prawdziwym API to główne ryzyko kompilacji.
+
+## 8. Synchronizacja pamięci opaski: przebieg i ACK
+
+Przebieg (tylko `WhoopExtDiagActivity`): `0x16` -> odpowiedź `0x24` -> pakiety `0x31` (początek), `0x2F` (dane czujników), `0x32` (dziennik tekstowy) -> `0x31` koniec paczki -> zapis wszystkich surowych pakietów paczki do CSV oraz rekordów do JSONL, `flush` + `fsync` obu plików -> dopiero wtedy ACK `0x17` -> opaska wysyła następną paczkę (lub po 8 s wysyłamy `0x16` jeszcze raz) -> koniec, gdy przez 10 s nic nie przychodzi albo użytkownik naciśnie Stop. Przerwanie w dowolnym momencie jest bezpieczne: niepotwierdzona paczka zostaje w opasce i zostanie wysłana ponownie.
+
+Zabezpieczenia: brak potwierdzenia, gdy zapis lub fsync się nie powiedzie, plik przekroczy limit (400 MB surowy, 800 MB JSONL) albo na telefonie zostaje mniej niż 40 MB; po potwierdzeniu, jeśli opaska ponownie wyśle ten sam numer paczki, aplikacja raz próbuje wariantu ACK z ogonem opaski, a przy drugim powtórzeniu zatrzymuje się; limit 500 paczek na sesję.
+
+Pakiet końca paczki (typ 0x31, podtyp 2), indeksy w ładunku: `[3..6]` czas opaski, `[13..16]` numer paczki / "trim" u32 LE. Na prawdziwej opasce: `aa1c00ab31 05 02 2c6b0200 384c32000000 98450100 38000000 00000000 ...` czyli trim = 0x00014598 = 83352.
+
+**ACK (polecenie 0x17), ładunek 12 bajtów:** `23 | seq | 17 | 01 | trim u32 LE | 00 00 00 00`, ramka 20 bajtów, nagłówek `aa 10 00 57`. Dla paczki z opaski użytkownika: `aa100057235017019845010000000000aebac79f` (seq 0x50). Źródła, które się zgadzają: post bWanShiTong (`aa10005723{count}1701{batch}00000000{crc}`, nagłówek identyczny), AStrasler/whoop4-ble (MIT; `[01][LE u32 trim][00 00 00 00]`, trim na bajcie 10 danych metadanych, czyli ładunek[13]; starszy offset 8 powodował pętlę powtórzeń), ZHOOP (`[01] + end_data`). Wariant rezerwowy (zordhalo/whoopsie-protocol, bez licencji, tylko fakty): po `01` całe 8 bajtów znacznika paczki z opaski, czyli `98450100 38000000`: `aa100057235017019845010038000000e06a58aa`. Aplikacja używa go tylko po wykryciu powtórzenia paczki.
+
+Nieznane: znaczenie bajtu `38`/`04` po trim w pakiecie końca paczki; czy opaska odpowiada na ACK pakietem 0x24 (brak odpowiedzi nie przerywa, o powodzeniu świadczy następna paczka); czy po ACK paczka naprawdę jest kasowana (źródła mówią, że bez ACK opaska powtarza ją w nieskończoność).
+
+## 9. Co odkryła opaska użytkownika (z dwóch plików CSV)
+
+- Usługa ma UUID `61080001-…`, połączenie stabilne po zwolnieniu łącza Formy.
+- Na żywo 0x28: `[2..5]` licznik sekund od startu opaski (ok. 158 000, to czas pracy, nie Unix), `[8]` HR, `[9]` liczba RR, potem u16 RR w ms. Potwierdzone.
+- Odpowiedź 0x24: `[1]` licznik, `[2]` id polecenia, `[3]` echo naszego seq, `[4]` status (2 przy 0x03 i 0x16).
+- 0x1A (bateria): brak odpowiedzi w 9 próbach. Inne źródła (ZHOOP, whoopsie, OpenStrap) podają to samo ID 26, więc lepszego ID nie ma. ZHOOP pisze, że na tej rodzinie opasek odpowiedź dla "pack" jest zaślepką z zerami. Inne miejsca z baterią według źródeł: odpowiedź HELLO 0x23 (u32 LE / 10, offset niepewny; aplikacja pokazuje kandydatów w dzienniku, nie wartość) oraz zdarzenie 0x03 (u32 / 10), zdarzenie 0x11 to temperatura skóry (i16 / 10 °C). To są odczyty przypuszczalne, oznaczone w ekranie.
+- Dziennik 0x32: `[1..2]` licznik rekordu u16, `[4..7]` czas Unix (np. 0x61c54e7f = 2021-12-24), `[13..]` tekst ASCII ucięty na kawałki ok. 46 znaków. W pierwszej paczce 72 rekordy, w tym 50 unikalnych wpisów z `LC709203: error reported, error code 1 severity 1` (układ pomiaru baterii). Ekran pokazuje liczbę takich wpisów.
+- Pakiet MEMFAULT: tekst `copley`, `9.9.3.0`, `copley_r14` (prawdopodobnie wersja oprogramowania opaski).
+- Obie próby zwróciły 0 rekordów 0x2F (danych czujników): pamięć opaski miała tylko dziennik tekstowy.
+- Pakiet 0x31 podtyp 3 (`31 03 03 ...`) przyszedł PRZED początkiem paczki, więc nie oznacza końca; aplikacja traktuje go tylko informacyjnie.
+
+Czas: licznik z 0x28 daje przesunięcie "sekundy opaski -> czas telefonu" (minimum z ostatnich 30 próbek, bo opóźnienie dostarczenia tylko je zwiększa; restart opaski czyści okno). Wartości >= 1 000 000 000 to czas Unix i są używane bezpośrednio; mniejsze to czas od startu opaski i dostają oznaczenie "przybliżony" (rekordy sprzed obecnego uruchomienia opaski nie dadzą się poprawnie zamapować). Zegara opaski NIE ustawiamy (SET_CLOCK 0x0A to zmiana ustawień).
+
+## 10. Archiwum: pliki i stabilne kolumny
+
+Pliki w pamięci aplikacji, kopiowane do `Pobrane/Forma` (istniejący plik o tej samej nazwie jest zastępowany): `whoop_archive_records.jsonl`, `whoop_archive_daily.csv`, `whoop_ext_RRRRMMDD_GGMMSS.csv`. Zapis automatycznie po synchronizacji oraz przyciskiem „Zapisz archiwum w Pobranych/Forma”; przy każdym jest „Udostępnij”.
+
+**`whoop_archive_records.jsonl`**: jeden rekord 0x2F na linię, dopisywany w miarę odbioru (powtórzenia po przerwanej paczce możliwe, usuwane przy liczeniu dni). Pola: `clk` ("unix" | "uptime"), `raw` (czas z rekordu w sekundach), `ctr` (licznik rekordu), `t` (czas telefonu w ms, brak gdy nie dało się zmapować), `rx` (czas odbioru w ms, do późniejszego ponownego mapowania), `hr`, `rr` (lista ms), `temp` (°C), `tr` (surowa wartość temp.), `spo2`, `ax`,`ay`,`az` (g). Pola puste są pomijane.
+
+**`whoop_archive_daily.csv`**: kolumny stałe i w tej kolejności:
+`date,clock,records,first_ts,last_ts,hr_min,hr_avg,hr_rest_est,night_records,rmssd_ms,ln_rmssd,rr_used,temp_avg_c,spo2_avg,motion_min`
+- `date`: data lokalna (strefa telefonu) yyyy-MM-dd; `clock`: "unix" lub "uptime" (zmapowany, przybliżony). Jeden wiersz na parę (date, clock).
+- `records`: liczba unikalnych rekordów (klucz: `raw` + `ctr`); `first_ts`,`last_ts`: Unix w sekundach.
+- `hr_min`, `hr_avg`: z rekordów z HR 25..230.
+- `hr_rest_est`: najniższa 5-minutowa średnia HR w oknie nocnym 00:00-06:00 (przedział musi mieć >= 30 próbek); `night_records`: rekordy w tym oknie.
+- `rmssd_ms`, `ln_rmssd`, `rr_used`: RMSSD z RR w oknie nocnym. Czyszczenie: zostaje 300..2000 ms, potem odrzucane jest uderzenie różniące się o więcej niż 20 % od mediany 5 sąsiednich uderzeń (z nim samym); liczone są tylko różnice kolejnych zachowanych uderzeń oddalonych w czasie o <= 3 s; pusto, gdy mniej niż 30 różnic. (Zasady wzorowane na regułach artefaktów z aplikacji; do dostrojenia, jeśli reguły w web-app różnią się.)
+- `temp_avg_c`: średnia temperatura skóry, EMPIRYCZNIE (bajt 70 rekordu / 4, zakres 20..45 °C); `spo2_avg`: EMPIRYCZNIE (bajt 72, zakres 50..100).
+- `motion_min`: EMPIRYCZNIE: minuta zegarowa (>= 10 próbek) liczy się jako ruch, gdy max - min z |przyspieszenia| przekracza 0,10 g.
+Plik jest przeliczany w całości z JSONL (przycisk „Przelicz archiwum dzienne”), więc jest zawsze spójny i bez duplikatów.
+
+## 11. Układ rekordu 0x2F: co jest potwierdzone
+
+Źródła porównane: post/OpenStrap (czas `[7..10]`, HR `[17]`), whoopsie (R10: czas ramka[11..14] czyli `[7..10]`, HR ramka[21] czyli `[17]`), zgodne w trzech miejscach. Temperatura wg whoopsie i AStrasler NIE leży w rekordzie 0x2F, tylko w zdarzeniu 0x11 (temperatura) i 0x03 (bateria); OpenStrap podaje bajt 70 / 4. Pole temperatury z rekordu pozostaje więc EMPIRYCZNE i może być puste; wartość ze zdarzenia jest osobnym źródłem. Opaska użytkownika nie zwróciła jeszcze żadnego rekordu 0x2F, więc offsety czujników nadal nie są potwierdzone na jej oprogramowaniu.
+
+Dodatkowe źródła tej aktualizacji: AStrasler/whoop4-ble (MIT), zordhalo/whoopsie-protocol (bez licencji w repo; tylko fakty), OpenStrap/protocol PR 63 (battery: gen4 u16 LE deci-procent), ZHOOP (zulusierra.co: opis blokowanych poleceń 25, 29, 32, 36-38, 45, 99). Nie otwarto: ujix/noop docs (PROTOCOL_WHOOP4.md, PROTOCOL_SENSORS.md), rusheelraj.com (robots.txt).
