@@ -80,7 +80,12 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         const val K_IDLE = 0
         const val K_RANGE = 1
         const val K_ACK = 2
-        const val OLD_BEFORE_UNIX = 1_640_995_200L // 2022-01-01: the stored backlog is from 2021
+        const val K_GAP = 3
+        const val SKIP_MARGIN = 48L
+        const val GAP_MS = 10_000L
+        /** Newest band time in the backlog read so far (2021-12-25 18:48:06). The band clock itself is stuck in 2021, so "old" = not newer than this. */
+        const val BACKLOG_MAX_TS = 1_640_458_086L
+        const val RECS_PER_UNIT = 50.0 / 24.0 // 50 records per batch, trim advances 24 per batch
         const val LOG_LINES = 40
         const val NAME_PREFIX = "WHOOP"
 
@@ -182,6 +187,11 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     private var skipState = K_IDLE
     private var skipTrim = -1L
     private var skipAnchor = -1L
+    private var rangeMode = 0 // 0 = show only, 1 = then skip, 2 = single read after a skip
+    private var rangeStep = 0
+    private var range1: WhoopExtProtocol.RangeInfo? = null
+    private val gapRun = Runnable { rangeSecondRead() }
+    private val jsonlSeen = HashSet<Long>()
     private var pvActive = false
     private var pvAfterSkip = false
     private var pvD = 0L
@@ -226,6 +236,7 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     private lateinit var btnSyncStop: Button
     private lateinit var btnSkip: Button
     private lateinit var btnCheck: Button
+    private lateinit var btnRange: Button
     private lateinit var skipView: TextView
     private lateinit var btnSave: Button
     private lateinit var btnShare: Button
@@ -412,7 +423,8 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         }
 
         skipView = text("", 12f, TXT, mono = true)
-        btnSkip = button("Przeskocz zaległość (usuń stary dziennik)") { confirmSkip() }
+        btnRange = button("Odczytaj zakres pamięci (tylko odczyt)") { beginRange(0) }
+        btnSkip = button("Przeskocz (eksperyment, może zostać odrzucony)") { confirmSkip() }
         btnCheck = button("Sprawdź nowe dane") { startPreview(false) }
         if (WhoopExtProtocol.HISTORY_PULL_ENABLED) {
             col.addView(
@@ -424,13 +436,14 @@ class WhoopExtDiagActivity : AppCompatActivity() {
                             "znanym źródle, więc może się nie udać. Nie da się go cofnąć.",
                         12f, DIM
                     ),
-                    skipView, btnSkip, btnCheck,
+                    skipView, btnRange, btnSkip, btnCheck,
                     text("Sprawdź nowe dane: jedna prośba o dane bez potwierdzania; nic nie jest usuwane. Użyj po nocy noszenia opaski.", 12f, DIM)
                 )
             )
         } else {
             btnSkip.visibility = View.GONE
             btnCheck.visibility = View.GONE
+            btnRange.visibility = View.GONE
         }
 
         archiveView = text("", 12f, TXT, mono = true)
@@ -485,6 +498,7 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         btnHistory.isEnabled = ready && !syncing && idleSkip && noHist
         btnSync.isEnabled = ready && !syncing && idleSkip && noHist
         btnSkip.isEnabled = ready && !syncing && idleSkip && noHist
+        btnRange.isEnabled = ready && !syncing && idleSkip && !waiting(WhoopExtProtocol.SafeCommand.GET_DATA_RANGE.id)
         btnCheck.isEnabled = ready && !syncing && idleSkip && noHist
         btnSyncStop.isEnabled = syncing
         btnSave.isEnabled = csvFile != null
@@ -841,6 +855,7 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         }
         if (skipState != K_IDLE || pvActive) {
             main.removeCallbacks(pvWatch)
+            main.removeCallbacks(gapRun)
             skipState = K_IDLE
             pvActive = false
             setSkipText("Połączenie przerwane podczas przeskoku lub podglądu. Nic więcej nie wysłano.", BAD)
@@ -1083,7 +1098,12 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         log("Brak odpowiedzi po 5 s na: " + p.label)
         if (p.cmdId == WhoopExtProtocol.CMD_BATCH_ACK && syncActive && syncState == S_WAIT_ACK) syncAfterAck(false)
         if (p.cmdId == WhoopExtProtocol.SafeCommand.GET_DATA_RANGE.id && skipState == K_RANGE) {
-            skipFail("Opaska nie podała zakresu – przeskok niemożliwy (brak odpowiedzi po 5 s). Nic nie zmieniono.")
+            if (rangeMode == 2) {
+                skipFail("Brak odpowiedzi na odczyt zakresu po przeskoku. Sprawdzam dane (bez potwierdzania).")
+                startPreview(true)
+            } else {
+                skipFail("Opaska nie podała zakresu – przeskok niemożliwy (brak odpowiedzi po 5 s). Nic nie zmieniono.")
+            }
         }
         if (p.cmdId == WhoopExtProtocol.CMD_BATCH_ACK && skipState == K_ACK) {
             skipFail(
@@ -1225,8 +1245,12 @@ class WhoopExtDiagActivity : AppCompatActivity() {
             val rec = WhoopArchive.Rec(
                 timeMap.toPhoneMs(raw), raw, clk, d.recCounter ?: 0L, d.hr, d.rr, d.tempC, d.tempRaw, d.spo2, d.ax, d.ay, d.az, now
             )
-            val j = ensureJsonl()
-            if (j != null) j.append(WhoopArchive.toJson(rec))
+            // only records requested by sync/preview are archived; replays of the same batch (band repeats it until ACKed) are written once
+            val key = (raw shl 16) xor (d.recCounter ?: 0L)
+            if ((syncActive || pvActive) && jsonlSeen.add(key)) {
+                val j = ensureJsonl()
+                if (j != null) j.append(WhoopArchive.toJson(rec))
+            }
         }
         syncTouch()
     }
@@ -1237,6 +1261,7 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         val raw = d.epoch
         if (raw != null) {
             if (raw >= WhoopExtProtocol.UNIX_MIN) logUnix.add(raw) else logUp.add(raw)
+            if (syncActive && raw > sp.getLong("log_max_ts", 0L)) sp.edit().putLong("log_max_ts", raw).apply()
         }
         val txt = d.text ?: ""
         if (txt.isNotEmpty()) lastLogText = txt
@@ -1465,8 +1490,9 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     }
 
     // =====================================================================================================
-    // backlog skip: GET_DATA_RANGE (0x22, read-only) -> check the numbers against our own last ACK -> ONE batch ACK (0x17) whose trim is the
-    // band's newest record index -> wait for its 0x24 status -> ONE 0x16 preview WITHOUT ACK. No retries, no guessed values, never 0x19.
+    // memory range + backlog skip. GET_DATA_RANGE (0x22, read-only) is read TWICE (10 s apart) to see whether the band's write position
+    // moves. Skip = ONE batch ACK (0x17) with trim = write position - 48, only after the layout check ([18] == our last ACK, status 1),
+    // then ONE read of the range and ONE 0x16 preview WITHOUT ACK. No retries, no other values, never 0x19.
     // =====================================================================================================
     private fun setSkipText(msg: String, color: Int = TXT) {
         if (destroyed) return
@@ -1475,15 +1501,17 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         log(msg)
     }
 
+    private fun oldLimit(): Long = maxOf(BACKLOG_MAX_TS, sp.getLong("log_max_ts", 0L))
+
     private fun confirmSkip() {
         if (!ready || syncActive || skipState != K_IDLE || pvActive) return
         AlertDialog.Builder(this)
-            .setTitle("Przeskoczyć zaległość?")
+            .setTitle("Przeskoczyć zaległość? (eksperyment)")
             .setMessage(
-                "Forma poprosi opaskę o zakres zapisanych danych, a potem potwierdzi odbiór wszystkiego, co w niej leży, BEZ pobierania. " +
-                    "To jest to samo potwierdzenie, które normalnie zwalnia miejsce po pobraniu paczki.\n\n" +
-                    "Stare wpisy (dziennik techniczny z 2021 r.) zostaną usunięte z opaski na stałe. Nie da się ich potem pobrać ani cofnąć. " +
-                    "To eksperyment: nie mamy pewności, że opaska zareaguje tak, jak oczekujemy."
+                "Forma odczyta zakres pamięci opaski, a potem wyśle JEDNO potwierdzenie z numerem tuż przed bieżącym miejscem zapisu opaski " +
+                    "(minus 48 jednostek zapasu), BEZ pobierania zaległych danych. To samo potwierdzenie normalnie zwalnia miejsce po pobraniu paczki.\n\n" +
+                    "Jeśli opaska je przyjmie, stary dziennik techniczny (błędy układu baterii) zniknie z niej na stałe i nie da się go odzyskać. " +
+                    "Żadne źródło nie opisuje tej operacji, więc opaska może ją odrzucić albo zareagować inaczej, niż zakładamy."
             )
             .setPositiveButton("Dalej") { _, _ -> confirmSkipSecond() }
             .setNegativeButton("Anuluj", null)
@@ -1495,28 +1523,79 @@ class WhoopExtDiagActivity : AppCompatActivity() {
             .setTitle("Ostatnie potwierdzenie")
             .setMessage(
                 "Naprawdę usunąć stary dziennik z opaski na stałe, bez pobierania? Tej operacji nie można cofnąć. " +
-                    "Jeśli opaska poda niezrozumiały zakres, Forma niczego nie wyśle."
+                    "Jeśli odpowiedź opaski będzie niezrozumiała albo inna niż oczekiwana, Forma niczego nie wyśle."
             )
-            .setPositiveButton("Tak, usuń na stałe") { _, _ -> beginSkip() }
+            .setPositiveButton("Tak, usuń na stałe") { _, _ -> beginRange(1) }
             .setNegativeButton("Nie, anuluj", null)
             .show()
     }
 
-    private fun beginSkip() {
+    private fun beginRange(mode: Int) {
         if (!ready || syncActive || skipState != K_IDLE || pvActive) return
+        rangeMode = mode
+        rangeStep = 1
+        range1 = null
         skipAnchor = sp.getLong("last_trim", -1L)
         skipTrim = -1L
         skipState = K_RANGE
-        setSkipText("Pytam opaskę o zakres danych (polecenie tylko do odczytu)…", WARN)
+        setSkipText("Pytam opaskę o zakres danych (polecenie tylko do odczytu), odczyt 1…", WARN)
+        sendSafe(WhoopExtProtocol.SafeCommand.GET_DATA_RANGE, true)
+        updateButtons()
+    }
+
+    private fun rangeSecondRead() {
+        if (skipState != K_GAP || !ready) return
+        rangeStep = 2
+        skipState = K_RANGE
         sendSafe(WhoopExtProtocol.SafeCommand.GET_DATA_RANGE, true)
         updateButtons()
     }
 
     private fun skipFail(msg: String) {
+        main.removeCallbacks(gapRun)
         skipState = K_IDLE
         skipTrim = -1L
         setSkipText(msg, BAD)
         updateButtons()
+    }
+
+    private fun dayText(t: Long): String = if (t >= WhoopExtProtocol.UNIX_MIN) fmtMs(t * 1000L) else "$t s"
+
+    private fun segText(r: WhoopExtProtocol.RangeInfo): String {
+        val sb = StringBuilder()
+        for (g in r.segs) sb.append("  ").append(dayText(g.ts)).append("  liczba ").append(g.n).append('\n')
+        return sb.toString()
+    }
+
+    private fun rangeText(r: WhoopExtProtocol.RangeInfo, prev: WhoopExtProtocol.RangeInfo?): String {
+        val sb = StringBuilder()
+        sb.append("Odczytano do: ").append(r.readPtr).append(" (ostatnie potwierdzenie)\n")
+        sb.append("Zapis opaski teraz: ").append(r.head).append('\n')
+        sb.append("Granica/najstarsze: ").append(r.limit).append(", koniec bieżącej paczki: ").append(r.end).append('\n')
+        if (r.head < r.readPtr) {
+            val est = (r.head * RECS_PER_UNIT).toLong()
+            sb.append("Zaległość: zawija się (miejsce zapisu jest przed miejscem odczytu); co najmniej ok. ").append(est)
+                .append(" rekordów od początku bufora do miejsca zapisu, plus reszta do końca bufora (jego rozmiar nieznany).\n")
+        } else {
+            sb.append("Zaległość: ok. ").append(((r.head - r.readPtr) * RECS_PER_UNIT).toLong()).append(" rekordów (bez zawijania).\n")
+        }
+        if (prev != null) {
+            val mv = r.head != prev.head
+            sb.append("Opaska zapisuje teraz dane: ").append(if (mv) "tak" else "nie").append(" (miejsce zapisu ")
+                .append(prev.head).append(" -> ").append(r.head).append(")\n")
+        }
+        val last = r.segs.lastOrNull()
+        if (last != null) sb.append("Zegar opaski teraz (przypuszczalnie): ").append(dayText(last.ts)).append('\n')
+        if (r.segs.isNotEmpty()) sb.append("Tabela (czas, liczba; znaczenie niepewne):\n").append(segText(r))
+        return sb.toString().trimEnd()
+    }
+
+    private fun noteRange(tag: String, r: WhoopExtProtocol.RangeInfo) {
+        csvAppend(
+            "NOTE", "-",
+            tag + " odczytano_do=" + r.readPtr + " zapis=" + r.head + " granica=" + r.limit + " koniec_paczki=" + r.end + " stala=" + r.tail +
+                " tabela=" + r.segs.joinToString(" | ") { dayText(it.ts) + " n=" + it.n } + " liczby: " + r.u32s
+        )
     }
 
     private fun onRangeResponse(d: WhoopExtProtocol.Decoded) {
@@ -1525,42 +1604,81 @@ class WhoopExtDiagActivity : AppCompatActivity() {
             skipFail("Opaska nie podała zakresu – przeskok niemożliwy (pusta odpowiedź). Nic nie zmieniono.")
             return
         }
-        val res = WhoopExtProtocol.parseDataRange(raw, skipAnchor)
-        csvAppend("NOTE", "-", "zakres status=" + d.status + " ostatnie_potwierdzenie=" + skipAnchor + " liczby: " + res.u32s)
-        val r = res.range
+        val res = WhoopExtProtocol.parseRange(raw)
+        val r = res.info
         if (r == null) {
-            skipFail("Opaska nie podała zakresu – przeskok niemożliwy (" + res.reason + "). Odpowiedź zapisano w pliku CSV. Nic nie zmieniono.")
+            csvAppend("NOTE", "-", "zakres odpowiedź nierozpoznana: " + res.reason + " hex=" + WhoopExtProtocol.hex(raw))
+            if (rangeMode == 2) {
+                skipFail("Nie rozpoznano odpowiedzi opaski o zakres po przeskoku (" + res.reason + "). Sprawdzam dane (bez potwierdzania).")
+                startPreview(true)
+            } else {
+                skipFail("Opaska nie podała zakresu – przeskok niemożliwy (" + res.reason + "). Odpowiedź zapisano w pliku CSV. Nic nie zmieniono.")
+            }
             return
         }
-        csvAppend("NOTE", "-", "zakres rozpoznany: ostatnio_zsynchronizowane=" + r.lastSynced + " najnowszy=" + r.newest + " przesuniecie=" + r.offset)
-        if (r.newest - r.lastSynced < 24L) {
-            skipFail("Zakres: ostatnio potwierdzone " + r.lastSynced + ", najnowszy " + r.newest + ". Nie ma czego przeskakiwać. Nic nie wysłano.")
+        noteRange("zakres" + rangeStep, r)
+        if (rangeMode == 2) {
+            // after the skip: remember where the band says it will read from, so the next layout check stays consistent
+            sp.edit().putLong("last_trim", r.readPtr).apply()
+            lastAckedTrim = r.readPtr
+            skipState = K_IDLE
+            setSkipText("Po przeskoku:\n" + rangeText(r, null) + "\nSprawdzam dane (bez potwierdzania)…", GOOD)
+            startPreview(true)
             return
         }
-        setSkipText(
-            "Zakres z opaski: ostatnio potwierdzone " + r.lastSynced + ", najnowszy " + r.newest +
-                " (zaległość " + (r.newest - r.lastSynced) + "). Zapisuję plik i wysyłam jedno potwierdzenie…", WARN
-        )
+        if (rangeStep == 1) {
+            range1 = r
+            skipState = K_GAP
+            setSkipText(rangeText(r, null) + "\nCzekam 10 s na drugi odczyt (czy opaska zapisuje)…", WARN)
+            main.removeCallbacks(gapRun)
+            main.postDelayed(gapRun, GAP_MS)
+            updateButtons()
+            return
+        }
+        val first = range1
+        if (rangeMode == 0) {
+            skipState = K_IDLE
+            setSkipText(rangeText(r, first), TXT)
+            updateButtons()
+            return
+        }
+        // rangeMode == 1: layout check, then the one skip ACK
+        if (r.readPtr != skipAnchor) {
+            skipFail(
+                rangeText(r, first) + "\nOpaska nie podała zakresu w znanym układzie (miejsce odczytu " + r.readPtr +
+                    " różni się od naszego ostatniego potwierdzenia " + skipAnchor + ") – przeskok niemożliwy. Nic nie zmieniono."
+            )
+            return
+        }
+        val target = WhoopExtProtocol.skipTarget(r, SKIP_MARGIN)
+        if (target == null) {
+            skipFail(rangeText(r, first) + "\nMiejsce zapisu jest zbyt małe na bezpieczny zapas. Nic nie wysłano.")
+            return
+        }
+        if (r.head > r.readPtr && target <= r.readPtr) {
+            skipFail(rangeText(r, first) + "\nNie ma czego przeskakiwać. Nic nie wysłano.")
+            return
+        }
+        setSkipText(rangeText(r, first) + "\nWysyłam jedno potwierdzenie z numerem " + target + " (miejsce zapisu minus " + SKIP_MARGIN + ")…", WARN)
         val rawLog = csv
         if (rawLog == null) {
             skipFail("Brak pliku na surowe pakiety. Nic nie wysłano.")
             return
         }
-        val newest = r.newest
         rawLog.syncDisk { ok ->
-            if (!ok) skipFail("Zapis pliku nie powiódł się. Nic nie wysłano.") else sendSkipAck(newest)
+            if (!ok) skipFail("Zapis pliku nie powiódł się. Nic nie wysłano.") else sendSkipAck(target)
         }
     }
 
-    /** The only place that builds the skip ACK. Runs once, after the range check and after the CSV was flushed and fsynced. */
+    /** The only place that builds the skip ACK. Runs once, after the layout check and after the CSV was flushed and fsynced. */
     private fun sendSkipAck(trim: Long) {
         val g = gatt
         val ch = cmdChar
-        if (skipState != K_RANGE || g == null || ch == null || !ready) return
+        if (skipState != K_RANGE || rangeMode != 1 || g == null || ch == null || !ready) return
         val s = nextSeq()
         val bytes = WhoopExtProtocol.buildSkipAck(trim, s)
         if (bytes == null) {
-            skipFail("Liczba z opaski poza dozwolonym zakresem. Nic nie wysłano.")
+            skipFail("Liczba poza dozwolonym zakresem. Nic nie wysłano.")
             return
         }
         skipTrim = trim
@@ -1574,11 +1692,13 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     private fun onSkipAckResponse(d: WhoopExtProtocol.Decoded) {
         val st = d.status
         if (st == 1) {
-            sp.edit().putLong("last_trim", skipTrim).apply()
-            lastAckedTrim = skipTrim
-            skipState = K_IDLE
-            setSkipText("Opaska przyjęła potwierdzenie z przeskokiem (status 1). Sprawdzam, co teraz jest w pamięci (bez potwierdzania)…", GOOD)
-            startPreview(true)
+            // do NOT store the skip trim as "last ACK": the band's own read position is read back below and stored instead
+            rangeMode = 2
+            rangeStep = 1
+            skipState = K_RANGE
+            setSkipText("Opaska przyjęła potwierdzenie z przeskokiem (status 1). Odczytuję zakres po przeskoku…", GOOD)
+            sendSafe(WhoopExtProtocol.SafeCommand.GET_DATA_RANGE, true)
+            updateButtons()
         } else {
             skipFail("Opaska odpowiedziała na przeskok statusem $st (oczekiwano 1). Zatrzymano; niczego więcej nie wysłano i nie ponawiam.")
         }
@@ -1610,11 +1730,11 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         when (k) {
             "pamięć" -> {
                 pvD++
-                if (t != null) { pvData.add(t); if (t in 1L until OLD_BEFORE_UNIX && t >= WhoopExtProtocol.UNIX_MIN) pvOld++ }
+                if (t != null) { pvData.add(t); if (t in WhoopExtProtocol.UNIX_MIN..oldLimit()) pvOld++ }
             }
             "dziennik" -> {
                 pvLog++
-                if (t != null) { pvLogR.add(t); if (t in WhoopExtProtocol.UNIX_MIN until OLD_BEFORE_UNIX) pvOld++ }
+                if (t != null) { pvLogR.add(t); if (t in WhoopExtProtocol.UNIX_MIN..oldLimit()) pvOld++ }
             }
             "synchronizacja" -> {
                 if (d.metaSub == 2) {
@@ -1650,13 +1770,14 @@ class WhoopExtDiagActivity : AppCompatActivity() {
             } else if (pvD > 0) {
                 sb.append("Są dane czujników 0x2F: to coś więcej niż stary dziennik.")
             } else if (pvOld > 0) {
-                sb.append("Nadal widać stare wpisy z 2021 r.")
-                if (pvAfterSkip) sb.append(" Przeskok nie zadziałał (albo opaska odtworzyła je).")
+                sb.append("Wszystkie wpisy są nie nowsze niż stara zaległość (czas opaski do ").append(fmtTs(oldLimit())).append("). ")
+                sb.append("Zegar opaski stoi w 2021 r., więc nowe wpisy też mają taką datę, ale będą nowsze niż ta granica.")
+                if (pvAfterSkip) sb.append(" Przeskok najpewniej nie zadziałał (albo opaska odtworzyła stare wpisy).")
             } else {
                 sb.append("Brak danych czujników 0x2F; widać tylko wpisy dziennika.")
             }
         }
-        csvAppend("NOTE", "-", "podglad 0x2F=" + pvD + " 0x32=" + pvLog + " inne=" + pvOther + " stare2021=" + pvOld)
+        csvAppend("NOTE", "-", "podglad 0x2F=" + pvD + " 0x32=" + pvLog + " inne=" + pvOther + " nie_nowsze_niz_zaleglosc=" + pvOld)
         setSkipText(sb.toString(), if (ok) TXT else BAD)
         updateButtons()
     }

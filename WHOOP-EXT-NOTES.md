@@ -168,14 +168,14 @@ Stan wyjściowy (trzeci plik CSV, ok. 1 h synchronizacji): 245 paczek potwierdzo
 - Kod 0x22, jeden bajt argumentu 0x00 (goose PR 26: Gen4 wymaga argumentu). Źródła: zordhalo/whoopsie-protocol ("zakres zapisanych danych", przykład ramki), AStrasler/whoop4-ble ("zwraca bieżące przesunięcie trim i zakres paczek"), b-nnett/goose PR 26. Wszystkie trzy opisują je jako odczyt. Nie ma w nich opisanego układu odpowiedzi. Goose wspomina tylko, że "last_synced" jest w okolicy payload[10..14] i że istnieje druga wartość (page_current), np. 34274 i 61458 u nich.
 - Ramka dla seq 0x02: aa0800a823022200824df537 (zgodna z przykładem whoopsie, CRC przeliczone naszym kodem). Seq 0x41: aa0800a8234122001b7e2945.
 - Pewność: kod i ramka wysoka; układ odpowiedzi niska; zachowanie opaski po potwierdzeniu "z wyprzedzeniem" nieznane (żadne źródło go nie opisuje; 0x21 SET_READ_POINTER i 0x19 FORCE_TRIM są wyłączone na stałe).
-- Odpowiedź nie jest czytana wg założonego układu. Aplikacja szuka w danych dwóch sąsiednich liczb u32 LE: jednej równej naszemu ostatniemu potwierdzonemu numerowi (do +48) i drugiej większej (< 0x10000000). Większa = najnowszy rekord. Gdy nie ma dokładnie jednej takiej pary, przeskok się nie odbywa i pokazuje się "Opaska nie podała zakresu – przeskok niemożliwy". Wszystkie liczby z odpowiedzi trafiają do CSV (wiersze NOTE).
+- Układ odpowiedzi: patrz sekcja 13 (ustalony na prawdziwej opasce, nie ze źródeł). Pierwsza wersja parsera (szukanie pary liczb) została zastąpiona stałym układem.
 
-### Przebieg przycisku "Przeskocz zaległość (usuń stary dziennik)"
+### Przebieg przycisku "Przeskocz (eksperyment, może zostać odrzucony)"
 1. Dwa okna z ostrzeżeniem o nieodwracalności.
 2. 0x22 (odczyt zakresu). Brak odpowiedzi lub nierozpoznany układ: stop, nic nie zmieniono.
 3. Zakres do dziennika i CSV (fsync), potem JEDNO potwierdzenie 0x17 z numerem = najnowszy z zakresu, zerowy ogon: payload 23 seq 17 01 <trim u32 LE> 00000000. Przykład (trim 129416, seq 0x50): aa1000572350170188f901000000000051aea904.
 4. Czeka na 0x24 dla 0x17. Status inny niż 1 lub brak odpowiedzi po 5 s: stop, bez ponawiania, bez zgadywania.
-5. Status 1: jedna prośba 0x16 BEZ potwierdzenia ("podgląd"): liczba rekordów 0x2F/0x32, zakresy czasu, pierwsze rekordy. Wpisy sprzed 2022 r. po przeskoku oznaczają, że przeskok nie zadziałał.
+5. Status 1: jedna prośba 0x16 BEZ potwierdzenia ("podgląd"): liczba rekordów 0x2F/0x32, zakresy czasu, pierwsze rekordy. Uwaga: zegar opaski stoi w 2021 r., więc "stare" znaczy "nie nowsze niż 2021-12-25 18:48:06 czasu opaski" (sekcja 13).
 - Nigdy nie wysyłamy 0x19, 0x21 ani żadnego polecenia spoza listy. Walidacja kodu: sekcja 7 plus testy ramek 0x22 i 0x17 z dowolnym numerem (trim poza 1..0x0FFFFFFF jest odrzucany).
 
 ### "Sprawdź nowe dane"
@@ -183,8 +183,33 @@ Jedno 0x16 bez potwierdzenia, zlicza 0x2F i 0x32 i pokazuje najnowsze czasy. Bez
 
 ### Kroki dla użytkownika
 1. Połącz z opaską (Forma zwolni własne połączenie), poczekaj na "gotowe".
-2. Dół ekranu: "Przeskocz zaległość (usuń stary dziennik)", potwierdź dwa okna.
+2. Dół ekranu: "Przeskocz (eksperyment, może zostać odrzucony)", potwierdź dwa okna.
 3. Przeczytaj wynik w ramce. Jeśli "przeskok niemożliwy" lub status inny niż 1, nic się nie stało, wyślij plik CSV.
 4. Noś opaskę noc, rano "Sprawdź nowe dane". Jeśli są dane 0x2F: "Synchronizuj pamięć opaski".
 5. Odeślij surowy plik CSV (zawiera zakres z opaski w wierszach NOTE).
+
+## 13. Odpowiedź GET_DATA_RANGE na prawdziwej opasce (plik 8c6fc63f, 2026-11-28)
+
+Dwa odczyty w odstępie 26 s, status 1, payload 72 B (offsety w payloadzie; [0]=0x24 [1]=licznik [2]=0x22 [3]=seq [4]=status [5]=01):
+
+| Offset | Odczyt 1 | Odczyt 2 | Przypuszczalne znaczenie |
+|---|---|---|---|
+| [6] u32 | 102208 | 102208 | granica / najstarsze (stałe) |
+| [10] u32 | 129417 | 129417 | koniec bieżącej paczki: numer końca następnej paczki (129416) + 1 |
+| [14] u32 | 102172 | 102181 | miejsce zapisu opaski (rośnie +9 w 26 s, więc opaska coś zapisuje) |
+| [18] u32 | 129392 | 129392 | miejsce odczytu = nasze ostatnie potwierdzenie |
+| [22] u32 | 56 | 56 | ta sama stała co ogon 38000000 w pakiecie końca paczki |
+| [26..37] | zmienia się o +18/-18 | | nieustalone |
+| [38..69] | 4 wiersze (czas unix, liczba) | | patrz niżej |
+
+Tabela: 2021-12-24 20:14:44 / 40; 2021-12-25 18:46:51 / 27544; 2021-12-25 18:48:06 / 21848; ostatni wiersz: 2021-12-29 03:19:46 / 28448, a 26 s później 03:20:13 / 26648. Czas w ostatnim wierszu biegnie razem z czasem rzeczywistym (+27 s w 26 s), więc to zegar opaski TERAZ. Wniosek: zegar opaski stoi w 2021 r. (nie był nigdy ustawiony przez aplikację WHOOP), więc także NOWE rekordy będą miały daty z 2021 r. Liczba w ostatnim wierszu maleje o ok. 64 B na sekundę zapisu. Znaczenie liczb w tabeli jest niepewne.
+
+Co jest pewne, a co nie:
+- Pewne: układ pól (dwa odczyty zgodne z sobą), [18] = nasze ostatnie potwierdzenie, [14] rośnie w czasie, czas w ostatnim wierszu to zegar opaski.
+- Hipoteza (nie potwierdzona żadnym źródłem): bufor cykliczny, [14] = miejsce zapisu, [18] = miejsce odczytu, a miejsce zapisu (102181) jest PRZED miejscem odczytu (129392), więc zaległość zawija się. Jednostka numerów to nie rekord: paczka 50 rekordów po 64 B zwiększa numer o 24 (ok. 2,08 rekordu na jednostkę). Zakładając zawijanie, zaległość to co najmniej ok. 212 tys. rekordów (4,7 godz. synchronizacji po ok. 4 s na paczkę).
+- Alternatywa: [10] to po prostu koniec bieżącej paczki, a numery nie zawijają się. Wtedy ACK z numerem 102133 (niższym niż obecny) zostanie zignorowany albo odrzucony.
+- Źródła (goose PR 26, whoopsie, AStrasler, post bWanShiTong) nie opisują ani maksymalnego numeru, ani zawijania, ani potwierdzenia z numerem niższym niż poprzedni. Dlatego przycisk jest oznaczony jako eksperyment.
+
+Przeskok teraz: dwa odczyty zakresu co 10 s (pokazuje, czy miejsce zapisu rośnie), sprawdzenie [18] == ostatnie potwierdzenie i status 1, JEDNO potwierdzenie z numerem = miejsce zapisu - 48 (dla odczytu 2: 102181 - 48 = 102133, ramka dla seq 0x50: aa10005723501701f58e010000000000b5c4331a), status 1 -> odczyt zakresu i zapamiętanie nowego miejsca odczytu opaski, potem jeden podgląd 0x16 bez potwierdzania. Status inny niż 1: stop, bez ponawiania. "Odczytaj zakres pamięci (tylko odczyt)" wykonuje tylko dwa odczyty i pokazuje wynik.
+Podgląd uznaje wpis za stary, gdy jego czas opaski jest nie nowszy niż 2021-12-25 18:48:06 (albo niż najnowszy zapisany podczas synchronizacji). Rekordy z podglądu i synchronizacji trafiają do archiwum JSONL raz (powtórki tej samej paczki są pomijane w jednej sesji).
 

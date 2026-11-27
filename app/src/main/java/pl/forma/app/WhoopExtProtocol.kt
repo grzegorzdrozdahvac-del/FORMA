@@ -148,44 +148,58 @@ object WhoopExtProtocol {
         return buildBatchAck(BatchEnd(0, 0L, trim, ByteArray(8)), seq, false)
     }
 
-    class DataRange(val lastSynced: Long, val newest: Long, val offset: Int)
-
-    /** reason is empty on success. u32s lists every little-endian u32 of the reply data for the log / CSV. */
-    class RangeResult(val range: DataRange?, val reason: String, val u32s: String)
+    /** One row of the table at the end of the GET_DATA_RANGE reply: band time + a count (meaning unconfirmed). */
+    class RangeSeg(val ts: Long, val n: Long)
 
     /**
-     * GET_DATA_RANGE reply (type 0x24, cmd 0x22): [1]=counter [2]=0x22 [3]=seq echo [4]=status [5..]=data. The layout of the data is NOT
-     * documented anywhere we could read (goose PR 26 only says "last_synced" sits near payload[10..14] and a "page_current" value exists,
-     * e.g. 34274 and 61458 on their band). So the layout is identified from the band's own numbers instead of being assumed:
-     * we look for an adjacent pair of u32 values (a, b) where ONE equals our last acknowledged trim (anchor .. anchor + 48, the band's
-     * "last synced" pointer) and the OTHER is larger and below 0x10000000: that larger one is the newest record index.
-     * Success only when exactly one such pair (one distinct newest value) exists; otherwise the caller must not skip.
+     * GET_DATA_RANGE reply as seen on a real band (72-byte payload, status 1), offsets inside the payload:
+     * [0]=0x24 [1]=counter [2]=0x22 [3]=seq echo [4]=status [5]=01
+     * [6] u32 limit    (102208 on the test band, static)
+     * [10] u32 end     (129417 = last trim 129416 of the next batch + 1)
+     * [14] u32 head    (102172 -> 102181 in 26 s: grows while the band records, so it is the band's WRITE position)
+     * [18] u32 readPtr (129392 = our last acknowledged trim)
+     * [22] u32 56 (same constant as the 38000000 tail of the batch-end packet) [26..37] 12 bytes that change slightly (+18/-18)
+     * [38..69] four rows of (u32 unix time, u32 count): 2021-12-24 20:14:44/40, 2021-12-25 18:46:51/27544, 2021-12-25 18:48:06/21848,
+     * and a last row whose time ADVANCES with real time (+27 s in 26 s): the band's own clock now, 2021-12-29 03:19:46 -> 03:20:13.
+     * The meaning of limit/end/head is a hypothesis (ring buffer: head = write position, readPtr = read/ACK position); no source documents it.
      */
-    fun parseDataRange(resp: ByteArray, anchor: Long): RangeResult {
+    class RangeInfo(
+        val status: Int, val limit: Long, val end: Long, val head: Long, val readPtr: Long, val tail: Long,
+        val segs: List<RangeSeg>, val u32s: String
+    )
+
+    /** reason is empty on success. */
+    class RangeResult(val info: RangeInfo?, val reason: String)
+
+    const val RANGE_MIN_SIZE = 70
+
+    /** Fixed-layout parse of the reply. Returns null reason-less failure as RangeResult(null, why). No guessing: wrong size/status -> refuse. */
+    fun parseRange(resp: ByteArray): RangeResult {
         return try {
+            if (resp.size < RANGE_MIN_SIZE) return RangeResult(null, "odpowiedź ma " + resp.size + " B, oczekiwano co najmniej " + RANGE_MIN_SIZE)
+            if ((resp[0].toInt() and 0xFF) != PKT_COMMAND_RESPONSE || (resp[2].toInt() and 0xFF) != 0x22) return RangeResult(null, "to nie jest odpowiedź na 0x22")
+            val st = resp[4].toInt() and 0xFF
+            if (st != 1) return RangeResult(null, "status odpowiedzi $st (oczekiwano 1)")
+            val segs = ArrayList<RangeSeg>()
+            var o = 38
+            while (o + 8 <= resp.size && segs.size < 8) {
+                val t = u32le(resp, o)
+                if (t in 1_000_000_000L..2_000_000_000L) segs.add(RangeSeg(t, u32le(resp, o + 4))) else break
+                o += 8
+            }
             val sb = StringBuilder()
-            var o = 5
-            while (o + 4 <= resp.size) {
-                sb.append('[').append(o).append("]=").append(u32le(resp, o)).append(' ')
-                o += 1
-            }
-            if (anchor < 0L) return RangeResult(null, "brak punktu odniesienia (nie znamy ostatniego potwierdzonego numeru paczki)", sb.toString())
-            val found = ArrayList<DataRange>()
             var i = 5
-            while (i + 8 <= resp.size) {
-                val a = u32le(resp, i)
-                val b = u32le(resp, i + 4)
-                if (a >= anchor && a <= anchor + 48L && b > a && b < 0x10000000L) found.add(DataRange(a, b, i))
-                if (b >= anchor && b <= anchor + 48L && a > b && a < 0x10000000L) found.add(DataRange(b, a, i))
-                i += 1
-            }
-            if (found.isEmpty()) return RangeResult(null, "w odpowiedzi nie ma pary liczb pasującej do ostatniego potwierdzenia ($anchor)", sb.toString())
-            var newest = found[0].newest
-            for (r in found) if (r.newest != newest) return RangeResult(null, "odpowiedź niejednoznaczna", sb.toString())
-            RangeResult(found[0], "", sb.toString())
+            while (i + 4 <= resp.size) { sb.append('[').append(i).append("]=").append(u32le(resp, i)).append(' '); i += 4 }
+            RangeResult(RangeInfo(st, u32le(resp, 6), u32le(resp, 10), u32le(resp, 14), u32le(resp, 18), u32le(resp, 22), segs, sb.toString()), "")
         } catch (t: Throwable) {
-            RangeResult(null, "błąd analizy odpowiedzi", "")
+            RangeResult(null, "błąd analizy odpowiedzi")
         }
+    }
+
+    /** Skip target = write head minus a safety margin (so the newest records are not discarded). null when it would be unusable. */
+    fun skipTarget(info: RangeInfo, margin: Long): Long? {
+        val t = info.head - margin
+        return if (t < 1L || t > 0x0FFFFFFFL) null else t
     }
 
     // ---------- band clock -> phone clock ----------
