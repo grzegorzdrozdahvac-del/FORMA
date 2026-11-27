@@ -81,6 +81,7 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     private val main = Handler(Looper.getMainLooper())
     private val io: ExecutorService = Executors.newSingleThreadExecutor()
     private var destroyed = false
+    private var releasedOwn = false
 
     // ---------- BLE state (main thread only) ----------
     private var gatt: BluetoothGatt? = null
@@ -427,6 +428,24 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         val ad = adapter()
         if (ad == null || !ad.isEnabled) {
             setStatus("Bluetooth jest wyłączony. Włącz go i spróbuj ponownie.", BAD)
+            return
+        }
+        if (try { Prefs.nightRunning(this) } catch (t: Throwable) { false }) {
+            setStatus("Trwa pomiar nocny. Zatrzymaj go w Formie i spróbuj ponownie.", BAD)
+            return
+        }
+        // Forma's own connection shares the same Bluetooth link inside this app; its watchdog/reconnect
+        // closes the link and the test gets status 22. Release it first, then connect after a short pause.
+        val ownBusy = try {
+            val st = BleManager.state
+            st == "connected" || st == "connecting" || st == "reconnecting"
+        } catch (t: Throwable) { false }
+        if (ownBusy && !releasedOwn) {
+            releasedOwn = true
+            try { LiveService.stop() } catch (t: Throwable) { /* ignore */ }
+            try { BleManager.disconnect() } catch (t: Throwable) { /* ignore */ }
+            setStatus("Odłączam Formę od opaski, za chwilę łączę…")
+            main.postDelayed({ if (!destroyed) startConnectFlow(forceScan) }, 3000)
             return
         }
         resetSession()
