@@ -8,10 +8,12 @@ import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
 import androidx.health.connect.client.records.BloodGlucoseRecord
 import androidx.health.connect.client.records.BloodPressureRecord
+import androidx.health.connect.client.records.DistanceRecord
 import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
 import androidx.health.connect.client.records.HeightRecord
+import androidx.health.connect.client.records.NutritionRecord
 import androidx.health.connect.client.records.Record
 import androidx.health.connect.client.records.RestingHeartRateRecord
 import androidx.health.connect.client.records.SleepSessionRecord
@@ -26,6 +28,9 @@ import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import androidx.health.connect.client.units.BloodGlucose
+import androidx.health.connect.client.units.Energy
+import androidx.health.connect.client.units.Length
+import androidx.health.connect.client.units.Mass
 import androidx.health.connect.client.units.Pressure
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -48,8 +53,8 @@ import kotlin.reflect.KClass
 /**
  * Health Connect (androidx.health.connect:connect-client 1.1.0-alpha07).
  * All reads / writes run on Dispatchers.IO; results go to the web UI as JSON events through [emitter]:
- *   hcStatus {status, sdk, granted[], missing[]}, hcPermissions {granted[], missing[]}, hcSyncResult {ok, since, data{...}, failed[]},
- *   hcWriteResult {ok, written[cid], failed[{cid,error}], denied[kind]}, hcError {code, message}.
+ *   hcStatus {status, sdk, granted[], missing[]}, hcPermissions {granted[], missing[]}, hcSyncResult {ok, since, data{..., stepsRecs[{s,e,n,o}]}, failed[]},
+ *   hcWriteResult {ok, written[cid], failed[{cid,error}], denied[kind]}, hcDeleteResult {ok, deleted[cid], failed[{cid,error}], denied[kind]}, hcError {code, message}.
  * Times are epoch milliseconds; the web side derives local dates itself. Daily aggregates carry a local "date" string.
  * Version-dependent spots are kept in a few places: sdkStatus(), grantedPermissions(), meta() (see BUILD-NOTES, fallback plan).
  */
@@ -64,7 +69,8 @@ object HealthConnectManager {
     )
     val WRITE_PERMISSIONS: Set<String> = setOf(
         P + "WRITE_HEART_RATE_VARIABILITY", P + "WRITE_RESTING_HEART_RATE", P + "WRITE_EXERCISE", P + "WRITE_HEART_RATE", P + "WRITE_SLEEP",
-        P + "WRITE_BLOOD_PRESSURE", P + "WRITE_BLOOD_GLUCOSE"
+        P + "WRITE_BLOOD_PRESSURE", P + "WRITE_BLOOD_GLUCOSE",
+        P + "WRITE_WEIGHT", P + "WRITE_HEIGHT", P + "WRITE_ACTIVE_CALORIES_BURNED", P + "WRITE_DISTANCE", P + "WRITE_NUTRITION"
     )
     val ALL_PERMISSIONS: Set<String> = READ_PERMISSIONS + WRITE_PERMISSIONS
 
@@ -297,6 +303,26 @@ object HealthConnectManager {
         return out
     }
 
+    /**
+     * Step records (intervals) of the last 2 days for the walk detection (e6bIngestHc): [{s: startMs, e: endMs, n: count, o: origin package}].
+     * Raw records, not aggregates: the JS side builds minute buckets itself and lets the highest source win per minute.
+     */
+    private suspend fun stepsRecs(c: HealthConnectClient, now: Instant): JSONArray {
+        val out = JSONArray()
+        val from = now.minus(Duration.ofDays(2))
+        for (x in readAll(c, StepsRecord::class, TimeRangeFilter.between(from, now))) {
+            if (x.count <= 0L) continue
+            val o = JSONObject()
+            o.put("s", x.startTime.toEpochMilli())
+            o.put("e", x.endTime.toEpochMilli())
+            o.put("n", x.count)
+            o.put("o", x.metadata.dataOrigin.packageName)
+            out.put(o)
+            if (out.length() >= 6000) break
+        }
+        return out
+    }
+
     private suspend fun weights(c: HealthConnectClient, r: Range): JSONArray {
         val list = ArrayList<WeightRecord>(readAll(c, WeightRecord::class, r.instants))
         val last = newest(c, WeightRecord::class, r.now) // the latest weighing even when it is older than the sync window
@@ -499,6 +525,7 @@ object HealthConnectManager {
                     val canSteps = has(granted, "READ_STEPS")
                     data.put("stepsDaily", if (canSteps) { section("steps", failed) { stepsDaily(c, r) } } else { JSONArray() })
                     data.put("stepsHourly", if (canSteps) { section("stepsHourly", failed) { stepsHourly(c, r) } } else { JSONArray() })
+                    data.put("stepsRecs", if (canSteps) { section("stepsRecs", failed) { stepsRecs(c, now) } } else { JSONArray() })
                     data.put("weight", if (has(granted, "READ_WEIGHT")) { section("weight", failed) { weights(c, r) } } else { JSONArray() })
                     data.put("height", if (has(granted, "READ_HEIGHT")) { section("height", failed) { heights(c, r) } } else { JSONArray() })
                     val canHr = has(granted, "READ_HEART_RATE")
@@ -548,8 +575,32 @@ object HealthConnectManager {
             "sleep" -> P + "WRITE_SLEEP"
             "bp" -> P + "WRITE_BLOOD_PRESSURE"
             "glucose" -> P + "WRITE_BLOOD_GLUCOSE"
+            "weight" -> P + "WRITE_WEIGHT"
+            "height" -> P + "WRITE_HEIGHT"
+            "kcal" -> P + "WRITE_ACTIVE_CALORIES_BURNED"
+            "distance" -> P + "WRITE_DISTANCE"
+            "nutrition" -> P + "WRITE_NUTRITION"
             else -> null
         }
+    }
+
+    /** Record class of the kinds the web app may delete again (by clientRecordId). */
+    private fun recordClassFor(kind: String): KClass<out Record>? {
+        return when (kind) {
+            "weight" -> WeightRecord::class
+            "height" -> HeightRecord::class
+            "kcal" -> ActiveCaloriesBurnedRecord::class
+            "distance" -> DistanceRecord::class
+            "nutrition" -> NutritionRecord::class
+            else -> null
+        }
+    }
+
+    /** Optional non-negative number from JSON (missing / null / negative -> null). */
+    private fun optPositive(j: JSONObject, key: String): Double? {
+        if (!j.has(key) || j.isNull(key)) return null
+        val v = j.optDouble(key, Double.NaN)
+        return if (v.isNaN() || v < 0.0) null else v
     }
 
     private fun exerciseType(name: String): Int {
@@ -634,12 +685,131 @@ object HealthConnectManager {
                     metadata = md
                 )
             }
+            "weight" -> {
+                val kg = j.optDouble("kg", Double.NaN)
+                if (kg.isNaN() || kg < 20.0 || kg > 400.0) null
+                else WeightRecord(time = Instant.ofEpochMilli(j.getLong("t")), zoneOffset = off, weight = Mass.kilograms(kg), metadata = md)
+            }
+            "height" -> {
+                val cm = j.optDouble("cm", Double.NaN)
+                if (cm.isNaN() || cm < 100.0 || cm > 230.0) null
+                else HeightRecord(time = Instant.ofEpochMilli(j.getLong("t")), zoneOffset = off, height = Length.meters(cm / 100.0), metadata = md)
+            }
+            "kcal" -> {
+                // active energy of ONE workout interval (Forma's estimate above resting), never a whole-day total
+                val kcal = j.optDouble("kcal", Double.NaN)
+                val start = Instant.ofEpochMilli(j.getLong("start"))
+                val end = Instant.ofEpochMilli(j.getLong("end"))
+                if (kcal.isNaN() || kcal <= 0.0 || kcal > 20000.0 || !end.isAfter(start)) null
+                else ActiveCaloriesBurnedRecord(
+                    startTime = start, startZoneOffset = off, endTime = end, endZoneOffset = off, energy = Energy.kilocalories(kcal), metadata = md
+                )
+            }
+            "distance" -> {
+                // GPS or step based distance of one workout (the web side also sends "src": gps | steps; alpha07 Metadata has no field for it)
+                val km = j.optDouble("km", Double.NaN)
+                val start = Instant.ofEpochMilli(j.getLong("start"))
+                val end = Instant.ofEpochMilli(j.getLong("end"))
+                if (km.isNaN() || km <= 0.0 || km > 500.0 || !end.isAfter(start)) null
+                else DistanceRecord(
+                    startTime = start, startZoneOffset = off, endTime = end, endZoneOffset = off, distance = Length.meters(km * 1000.0), metadata = md
+                )
+            }
+            "nutrition" -> {
+                // one record per day (12:00 local, one minute): energy, protein, carbohydrate, fat as typed in Makro
+                val kcal = optPositive(j, "kcal")
+                val p = optPositive(j, "p")
+                val c = optPositive(j, "c")
+                val f = optPositive(j, "f")
+                val start = Instant.ofEpochMilli(j.getLong("start"))
+                val end = Instant.ofEpochMilli(j.getLong("end"))
+                if ((kcal == null && p == null && c == null && f == null) || !end.isAfter(start)) null
+                else NutritionRecord(
+                    startTime = start, startZoneOffset = off, endTime = end, endZoneOffset = off,
+                    energy = if (kcal != null) Energy.kilocalories(kcal) else null,
+                    protein = if (p != null) Mass.grams(p) else null,
+                    totalCarbohydrate = if (c != null) Mass.grams(c) else null,
+                    totalFat = if (f != null) Mass.grams(f) else null,
+                    name = j.optString("name", "Forma – makro dnia"),
+                    metadata = md
+                )
+            }
             else -> null
         }
     }
 
     /**
-     * json: {"records":[{kind, cid, ver, ...}]} from the web app (own records only: HRV, resting HR, exercise, heart rate, sleep).
+     * Deletes our own records by clientRecordId. json: {"records":[{kind, cid}]}; result = event hcDeleteResult
+     * {ok, deleted[cid], failed[{cid,error}], denied[kind]}. A record that is already gone counts as deleted. Needs the WRITE permission of the kind.
+     */
+    fun delete(ctx: Context, json: String) {
+        val app = ctx.applicationContext
+        scope.launch {
+            writeMutex.withLock {
+                val o = ev("hcDeleteResult")
+                val deleted = JSONArray()
+                val failed = JSONArray()
+                val deniedKinds = LinkedHashSet<String>()
+                try {
+                    val s = sdkStatus(app)
+                    if (s != HealthConnectClient.SDK_AVAILABLE) {
+                        o.put("ok", false)
+                        o.put("code", statusName(s))
+                        o.put("message", "Health Connect nie jest dostępny.")
+                    } else {
+                        val c = HealthConnectClient.getOrCreate(app)
+                        val granted = grantedPermissions(app)
+                        val arr = JSONObject(json).optJSONArray("records") ?: JSONArray()
+                        for (i in 0 until arr.length()) {
+                            val j = arr.optJSONObject(i) ?: continue
+                            val kind = j.optString("kind")
+                            val cid = j.optString("cid")
+                            val cls = recordClassFor(kind)
+                            val need = writePermFor(kind)
+                            if (cls == null || cid.isEmpty() || !cid.startsWith("forma-")) {
+                                val f = JSONObject()
+                                f.put("cid", cid)
+                                f.put("error", "nieprawidłowy rekord")
+                                failed.put(f)
+                                continue
+                            }
+                            if (need == null || !granted.contains(need)) {
+                                deniedKinds.add(kind)
+                                continue
+                            }
+                            try {
+                                c.deleteRecords(cls, emptyList(), listOf(cid))
+                                deleted.put(cid)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                val f = JSONObject()
+                                f.put("cid", cid)
+                                f.put("error", e.message ?: e.javaClass.simpleName)
+                                failed.put(f)
+                            }
+                        }
+                        o.put("ok", true)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    o.put("ok", false)
+                    o.put("code", if (e is SecurityException) "permission" else "write")
+                    o.put("message", e.message ?: e.javaClass.simpleName)
+                }
+                val denied = JSONArray()
+                for (k in deniedKinds) denied.put(k)
+                o.put("deleted", deleted)
+                o.put("failed", failed)
+                o.put("denied", denied)
+                emit(o)
+            }
+        }
+    }
+
+    /**
+     * json: {"records":[{kind, cid, ver, ...}]} from the web app (own records only: HRV, resting HR, exercise, heart rate, sleep, blood pressure, glucose, weight, height, active calories, distance, nutrition).
      * Records go in per kind; if a batch fails they are retried one by one so a single bad record does not block the others.
      */
     fun write(ctx: Context, json: String) {

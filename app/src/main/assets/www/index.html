@@ -3294,19 +3294,23 @@ canvas{display:block;width:100%;height:200px}
   // id, label (Polish), read permission, write permission (null = we do not write it)
   var GROUPS = [
     { id: 'steps', label: 'Kroki', read: 'READ_STEPS', write: null },
-    { id: 'weight', label: 'Waga', read: 'READ_WEIGHT', write: null },
-    { id: 'height', label: 'Wzrost', read: 'READ_HEIGHT', write: null },
+    { id: 'weight', label: 'Waga', read: 'READ_WEIGHT', write: 'WRITE_WEIGHT' },
+    { id: 'height', label: 'Wzrost', read: 'READ_HEIGHT', write: 'WRITE_HEIGHT' },
     { id: 'exercise', label: 'Treningi', read: 'READ_EXERCISE', write: 'WRITE_EXERCISE' },
     { id: 'sleep', label: 'Sen', read: 'READ_SLEEP', write: 'WRITE_SLEEP' },
     { id: 'hr', label: 'Tętno', read: 'READ_HEART_RATE', write: 'WRITE_HEART_RATE' },
     { id: 'rhr', label: 'Tętno spoczynkowe', read: 'READ_RESTING_HEART_RATE', write: 'WRITE_RESTING_HEART_RATE' },
     { id: 'hrv', label: 'HRV (RMSSD)', read: 'READ_HEART_RATE_VARIABILITY', write: 'WRITE_HEART_RATE_VARIABILITY' },
-    { id: 'kcalActive', label: 'Kalorie aktywne', read: 'READ_ACTIVE_CALORIES_BURNED', write: null },
-    { id: 'kcalTotal', label: 'Kalorie całkowite', read: 'READ_TOTAL_CALORIES_BURNED', write: null }
+    { id: 'kcalActive', label: 'Kalorie aktywne', read: 'READ_ACTIVE_CALORIES_BURNED', write: 'WRITE_ACTIVE_CALORIES_BURNED' },
+    { id: 'kcalTotal', label: 'Kalorie całkowite', read: 'READ_TOTAL_CALORIES_BURNED', write: null },
+    // write only (we never read them back): workout distance and the daily macros
+    { id: 'distance', label: 'Dystans', read: null, write: 'WRITE_DISTANCE' },
+    { id: 'nutrition', label: 'Odżywianie (makro)', read: null, write: 'WRITE_NUTRITION' }
   ];
   // record kind (as in planWrites / hcWrite) -> write permission
-  var WRITE_PERM = { hrv: 'WRITE_HEART_RATE_VARIABILITY', rhr: 'WRITE_RESTING_HEART_RATE', exercise: 'WRITE_EXERCISE', hr: 'WRITE_HEART_RATE', sleep: 'WRITE_SLEEP', bp: 'WRITE_BLOOD_PRESSURE', glucose: 'WRITE_BLOOD_GLUCOSE' };
-  function allReadPerms() { return GROUPS.map(function (g) { return PFX + g.read; }); }
+  var WRITE_PERM = { hrv: 'WRITE_HEART_RATE_VARIABILITY', rhr: 'WRITE_RESTING_HEART_RATE', exercise: 'WRITE_EXERCISE', hr: 'WRITE_HEART_RATE', sleep: 'WRITE_SLEEP', bp: 'WRITE_BLOOD_PRESSURE', glucose: 'WRITE_BLOOD_GLUCOSE',
+    weight: 'WRITE_WEIGHT', height: 'WRITE_HEIGHT', kcal: 'WRITE_ACTIVE_CALORIES_BURNED', distance: 'WRITE_DISTANCE', nutrition: 'WRITE_NUTRITION' };
+  function allReadPerms() { return GROUPS.filter(function (g) { return g.read; }).map(function (g) { return PFX + g.read; }); }
   function allWritePerms() { return GROUPS.filter(function (g) { return g.write; }).map(function (g) { return PFX + g.write; }); }
   function allPerms() { return allReadPerms().concat(allWritePerms()); }
   // granted: array of full permission strings (or short names). Returns the per-group state and the lists of what is missing.
@@ -3314,19 +3318,19 @@ canvas{display:block;width:100%;height:200px}
     var set = {};
     arr(granted).forEach(function (p) { if (typeof p === 'string') set[p.indexOf(PFX) === 0 ? p : PFX + p] = 1; });
     var groups = GROUPS.map(function (g) {
-      return { id: g.id, label: g.label, canWrite: !!g.write, readOk: !!set[PFX + g.read], writeOk: g.write ? !!set[PFX + g.write] : null };
+      return { id: g.id, label: g.label, canWrite: !!g.write, readOk: g.read ? !!set[PFX + g.read] : null, writeOk: g.write ? !!set[PFX + g.write] : null };
     });
-    var missingRead = groups.filter(function (g) { return !g.readOk; }), missingWrite = groups.filter(function (g) { return g.canWrite && !g.writeOk; });
-    var anyRead = groups.some(function (g) { return g.readOk; });
+    var missingRead = groups.filter(function (g) { return g.readOk === false; }), missingWrite = groups.filter(function (g) { return g.canWrite && !g.writeOk; });
+    var anyRead = groups.some(function (g) { return g.readOk === true; });
     // Write permissions are per record type: besides the groups above, blood pressure and glucose (typed in "Zdrowie serca") have their own.
     // A user who granted only those two can write them, so they count for anyWrite / connected too.
     var anyWrite = groups.some(function (g) { return g.writeOk; }) || !!set[PFX + WRITE_PERM.bp] || !!set[PFX + WRITE_PERM.glucose];
     return {
       groups: groups, anyRead: anyRead, anyWrite: anyWrite, connected: anyRead || anyWrite,
-      can: function (kind) { return !!WRITE_PERM[kind] && !!set[PFX + WRITE_PERM[kind]]; }, // kind: hrv | rhr | exercise | hr | sleep | bp | glucose
+      can: function (kind) { return !!WRITE_PERM[kind] && !!set[PFX + WRITE_PERM[kind]]; }, // kind: hrv | rhr | exercise | hr | sleep | bp | glucose | weight | height | kcal | distance | nutrition
       complete: !missingRead.length && !missingWrite.length, partial: (anyRead || anyWrite) && (missingRead.length + missingWrite.length > 0),
       missingRead: missingRead.map(function (g) { return g.label; }), missingWrite: missingWrite.map(function (g) { return g.label; }),
-      has: function (id, mode) { var g = groups.filter(function (x) { return x.id === id; })[0]; return !!g && (mode === 'write' ? g.writeOk === true : g.readOk); }
+      has: function (id, mode) { var g = groups.filter(function (x) { return x.id === id; })[0]; return !!g && (mode === 'write' ? g.writeOk === true : g.readOk === true); }
     };
   }
 
@@ -3377,7 +3381,7 @@ canvas{display:block;width:100%;height:200px}
   }
 
   // ---------------- local store (what we keep between syncs) ----------------
-  function emptyStore() { return { v: 1, lastSync: null, steps: { daily: {}, hourly: {} }, sleeps: {}, cal: {}, hrv: [], rhr: [], heightOffered: null, heightSug: null, written: {}, stats: null }; }
+  function emptyStore() { return { v: 1, lastSync: null, steps: { daily: {}, hourly: {} }, sleeps: {}, cal: {}, hrv: [], rhr: [], heightOffered: null, heightSug: null, heightImported: null, hcHeight: null, written: {}, pendingDel: [], stats: null }; }
   function cleanStore(o) {
     var s = emptyStore(); if (!o || typeof o !== 'object') return s;
     if (fin(o.lastSync)) s.lastSync = o.lastSync;
@@ -3391,7 +3395,10 @@ canvas{display:block;width:100%;height:200px}
     s.rhr = arr(o.rhr).filter(function (x) { return x && fin(x.t) && fin(x.bpm); });
     if (fin(o.heightOffered)) s.heightOffered = o.heightOffered;
     if (o.heightSug && fin(o.heightSug.cm)) s.heightSug = { cm: o.heightSug.cm, date: str(o.heightSug.date, 10), origin: str(o.heightSug.origin, 80) };
-    if (o.written && typeof o.written === 'object') Object.keys(o.written).forEach(function (k) { var w = o.written[k]; if (w && fin(w.ver) && typeof w.sig === 'string') s.written[k] = { ver: w.ver, sig: w.sig }; });
+    if (fin(o.heightImported)) s.heightImported = o.heightImported;
+    if (o.hcHeight && fin(o.hcHeight.cm)) s.hcHeight = { cm: o.hcHeight.cm, t: fin(o.hcHeight.t) ? o.hcHeight.t : 0 };
+    if (o.written && typeof o.written === 'object') Object.keys(o.written).forEach(function (k) { var w = o.written[k]; if (w && fin(w.ver) && typeof w.sig === 'string') s.written[k] = fin(w.at) ? { ver: w.ver, sig: w.sig, at: w.at } : { ver: w.ver, sig: w.sig }; });
+    s.pendingDel = arr(o.pendingDel).filter(function (x) { return x && typeof x.cid === 'string' && x.cid && WRITE_PERM[x.kind]; }).map(function (x) { return { kind: x.kind, cid: x.cid }; }).slice(0, 200);
     if (o.stats && typeof o.stats === 'object') s.stats = o.stats;
     return s;
   }
@@ -3585,6 +3592,9 @@ canvas{display:block;width:100%;height:200px}
     stats.workoutsAdded = mw.added; stats.workoutsUpdated = mw.updated; stats.workoutsSkipped = mw.skipped; stats.workoutsSelf = mw.skippedSelf; stats.workoutsDropped = mw.dropped; stats.workoutsDup = mw.dupHc;
     var hs = heightSuggestion(st.profile, data.height, store.heightOffered);
     store.heightSug = hs ? { cm: hs.cm, date: hs.date, origin: hs.origin } : null;
+    // newest height of ANOTHER app (our own records are ignored): the planner does not write the same value back
+    var hn = null; data.height.forEach(function (x) { if (!isSelf(x.origin) && (!hn || x.t > hn.t)) hn = x; });
+    if (hn) store.hcHeight = { cm: hn.cm, t: hn.t };
     store.lastSync = nowMs; prune(store, nowMs); store.stats = Object.assign({ at: nowMs }, stats);
     return { store: store, weights: wm.items, workouts: mw.items, stats: stats, heightSuggestion: hs };
   }
@@ -3599,11 +3609,18 @@ canvas{display:block;width:100%;height:200px}
   }
 
   // ---------------- writes ----------------
+  var LONG_DAYS = 60; // weights and macros are entered by hand, so a longer window than the sensor data
   var ETYPE = { gym: 'STRENGTH_TRAINING', run: 'RUNNING', walk: 'WALKING', other: 'OTHER_WORKOUT' }; // sauna: not written
   var WK_TITLE = { gym: 'Siłownia', run: 'Bieg', walk: 'Spacer', other: 'Trening' };
   // A record that came from Health Connect (or WHOOP) is never ours to write. The planner checks this for every kind.
   function foreign(x) { return !!x && (x.source === 'hc' || x.source === 'whoop' || !!x.hc || (typeof x.pkg === 'string' && x.pkg !== '' && !isSelf(x.pkg))); }
-  // Records to write now. ledger: store.written. opts: { nowMs, today, nights }. Returns { records, same, foreign }.
+  // Records to write now. ledger: store.written.
+  // opts: { nowMs, today, nights, weights, profile, macros, hcHeight, heightImported }. Returns { records, same, foreign }.
+  //   weights (S.weights): manual entries only (source 'hc' = imported, never written back); one WeightRecord per date at 12:00 local (today: not in the future).
+  //   profile.heightCm: one HeightRecord (cid forma-height, updated in place); not written when the value came from Health Connect (heightImported)
+  //     or when another app already has the same height there (hcHeight).
+  //   macros (S.e5.macros): one NutritionRecord per day, 12:00-12:01 local (today before 12:01: ends now), name "Forma – makro dnia".
+  //   workouts: besides the session also ActiveCalories (kcalNet = above resting, per workout interval, not whole day) and Distance (GPS or step based).
   // opts.nights (HcCore.nightsOf): for a date where another app already has the night in Health Connect we do not add a second sleep session.
   // Every record has a stable cid (our id) and a ver that grows with each rewrite (Health Connect only updates when the version is higher).
   function planWrites(days, workouts, ledger, opts) {
@@ -3636,20 +3653,104 @@ canvas{display:block;width:100%;height:200px}
       if (w.type === 'sauna' || !ETYPE[w.type] || !fin(w.start) || w.start <= 0 || !(w.durMin >= 1)) return;
       var end = w.start + Math.round(w.durMin * MIN);
       add({ kind: 'exercise', cid: 'forma-w-' + w.id, start: w.start, end: end, off: offsetSecAt(w.start), etype: ETYPE[w.type], title: WK_TITLE[w.type] }, w.start + '|' + end + '|' + ETYPE[w.type]);
+      if (fin(w.kcalNet) && w.kcalNet > 0 && end <= now + 60000) add({ kind: 'kcal', cid: 'forma-kcal-' + w.id, start: w.start, end: end, off: offsetSecAt(w.start), kcal: Math.round(w.kcalNet) }, Math.round(w.kcalNet) + '|' + w.start + '|' + end);
+      var ds = distanceOf(w);
+      if (ds && end <= now + 60000) add({ kind: 'distance', cid: 'forma-dist-' + w.id, start: w.start, end: end, off: offsetSecAt(w.start), km: ds.km, src: ds.src }, ds.km + '|' + ds.src + '|' + w.start + '|' + end);
       if (Array.isArray(w.hr5)) {
         var samples = [], sum = 0;
         w.hr5.forEach(function (v, k) { if (v > 0) { samples.push({ t: w.start + k * 5000, bpm: v }); sum += v; } });
         if (samples.length) add({ kind: 'hr', cid: 'forma-hr-' + w.id, start: samples[0].t, end: samples[samples.length - 1].t + 1000, off: offsetSecAt(w.start), samples: samples }, samples.length + '|' + samples[0].t + '|' + sum);
       }
     });
+    var lowDay = H.addDays(today, -LONG_DAYS);
+    arr(opts.weights).forEach(function (x) {
+      if (!x || x.source === 'hc' || !validDate(x.date) || x.date < lowDay || x.date > today || !fin(x.kg) || x.kg < 20 || x.kg > 400) return;
+      var t = Math.min(localMs(x.date, '12:00'), now - 60000);
+      add({ kind: 'weight', cid: 'forma-weight-' + x.date, t: t, off: offsetSecAt(t), kg: Math.round(x.kg * 10) / 10 }, Math.round(x.kg * 10) / 10 + '|' + x.date);
+    });
+    var cm = opts.profile && fin(opts.profile.heightCm) ? Math.round(opts.profile.heightCm * 10) / 10 : null;
+    if (cm != null && cm >= 100 && cm <= 230 && opts.heightImported !== cm) {
+      var hc = opts.hcHeight, seen = !!ledger['forma-height'] || !(hc && fin(hc.cm) && Math.abs(hc.cm - cm) < 1);
+      if (seen) { var th = now - 60000; add({ kind: 'height', cid: 'forma-height', t: th, off: offsetSecAt(th), cm: cm }, String(cm)); }
+    }
+    var mk = opts.macros && typeof opts.macros === 'object' ? opts.macros : {};
+    Object.keys(mk).sort().forEach(function (date) {
+      var m = mk[date]; if (!m || !validDate(date) || date < lowDay || date > today) return;
+      var v = {}, any = false;
+      ['kcal', 'p', 'c', 'f'].forEach(function (k) { v[k] = fin(m[k]) && m[k] >= 0 ? m[k] : null; if (v[k] != null) any = true; });
+      if (!any) return;
+      var st = localMs(date, '12:00'), en = Math.min(st + MIN, now);
+      if (en <= st) { st = en - MIN; }          // today before 12:00: a one-minute interval ending now
+      if (en > now) return;
+      add({ kind: 'nutrition', cid: 'forma-nutr-' + date, start: st, end: en, off: offsetSecAt(st), name: 'Forma – makro dnia', kcal: v.kcal, p: v.p, c: v.c, f: v.f }, [v.kcal, v.p, v.c, v.f].join('|'));
+    });
     return { records: out, same: same, foreign: skippedForeign };
   }
+  // distance of a workout: GPS (own run / walk with a GPS summary) or step based (auto-detected walk). A typed distance without either is not written.
+  function distanceOf(w) {
+    if (!w || (w.type !== 'run' && w.type !== 'walk')) return null;
+    var km = fin(w.distanceKm) && w.distanceKm > 0 ? w.distanceKm : (w.gps && fin(w.gps.distM) && w.gps.distM > 0 ? w.gps.distM / 1000 : 0);
+    km = Math.round(km * 1000) / 1000;
+    if (!(km > 0)) return null;
+    if (w.distEst === true) return { km: km, src: 'steps' };
+    if (w.gps && fin(w.gps.distM) && w.gps.distM > 0) return { km: km, src: 'gps' };
+    return null;
+  }
   // result: { written: [cid...] } from hcWriteResult; planned: the records that were sent. Returns the new ledger.
-  function applyWriteResult(ledger, planned, result) {
+  function applyWriteResult(ledger, planned, result, nowMs) {
     var out = Object.assign({}, ledger || {}), done = {};
     arr(result && result.written).forEach(function (c) { done[c] = 1; });
-    arr(planned).forEach(function (r) { if (done[r.cid]) out[r.cid] = { ver: r.ver, sig: r.sig }; });
+    arr(planned).forEach(function (r) { if (done[r.cid]) out[r.cid] = { ver: r.ver, sig: r.sig, at: fin(nowMs) ? nowMs : r.ver }; });
     return out;
+  }
+  // ---------------- deletions ----------------
+  // A deleted weight / makro day: its Health Connect record (found by clientRecordId) is removed too. Only what the ledger says we wrote.
+  function deleteCid(kind, date) { return kind === 'weight' ? 'forma-weight-' + date : (kind === 'nutrition' ? 'forma-nutr-' + date : null); }
+  // Returns { pending, ledger, queued }: the record joins pendingDel when we wrote it (it is in the ledger). Nothing else is ever deleted.
+  function queueDelete(store, kind, date) {
+    var cid = deleteCid(kind, date), st = cleanStore(JSON.parse(JSON.stringify(store || emptyStore())));
+    if (!cid || !st.written[cid]) return { store: st, queued: false, cid: cid };
+    if (!st.pendingDel.some(function (x) { return x.cid === cid; })) st.pendingDel.push({ kind: kind, cid: cid });
+    return { store: st, queued: true, cid: cid };
+  }
+  // result of hcDeleteResult { deleted: [cid], missing?: [cid] }: those leave the ledger and the queue (a record already gone counts as deleted)
+  function applyDeleteResult(store, result) {
+    var st = cleanStore(JSON.parse(JSON.stringify(store || emptyStore()))), gone = {};
+    arr(result && result.deleted).forEach(function (c) { gone[c] = 1; });
+    st.pendingDel = st.pendingDel.filter(function (x) { return !gone[x.cid]; });
+    Object.keys(gone).forEach(function (c) { delete st.written[c]; });
+    return st;
+  }
+  // ---------------- status per record type (Profil card) ----------------
+  var WRITE_TYPES = [
+    { kind: 'weight', label: 'Waga', prefix: 'forma-weight-' }, { kind: 'height', label: 'Wzrost', prefix: 'forma-height' },
+    { kind: 'exercise', label: 'Treningi', prefix: 'forma-w-' }, { kind: 'hr', label: 'Tętno z treningów', prefix: 'forma-hr-' },
+    { kind: 'kcal', label: 'Kalorie aktywne', prefix: 'forma-kcal-' }, { kind: 'distance', label: 'Dystans', prefix: 'forma-dist-' },
+    { kind: 'sleep', label: 'Sen', prefix: 'forma-sleep-' }, { kind: 'hrv', label: 'HRV (RMSSD)', prefix: 'forma-hrv-' },
+    { kind: 'rhr', label: 'Tętno spoczynkowe', prefix: 'forma-rhr-' }, { kind: 'nutrition', label: 'Makro dnia', prefix: 'forma-nutr-' },
+    { kind: 'bp', label: 'Ciśnienie', prefix: 'forma-bp-' }, { kind: 'glucose', label: 'Glukoza', prefix: 'forma-glu-' }
+  ];
+  function kindOfCid(cid) {
+    cid = String(cid || '');
+    for (var i = 0; i < WRITE_TYPES.length; i++) if (cid.indexOf(WRITE_TYPES[i].prefix) === 0) return WRITE_TYPES[i].kind;
+    return null;
+  }
+  // Rows for the Profil card. rep: permissionReport (or null). Time of last write = newest ledger time of that kind.
+  function writeStatus(ledger, rep) {
+    var by = {}; WRITE_TYPES.forEach(function (t) { by[t.kind] = { n: 0, last: null }; });
+    Object.keys(ledger || {}).forEach(function (c) { var k = kindOfCid(c); if (!k) return; var w = ledger[c], at = fin(w.at) ? w.at : (fin(w.ver) ? w.ver : null); by[k].n++; if (at != null && (by[k].last == null || at > by[k].last)) by[k].last = at; });
+    return WRITE_TYPES.map(function (t) { return { kind: t.kind, label: t.label, granted: !!(rep && rep.can(t.kind)), count: by[t.kind].n, last: by[t.kind].last }; });
+  }
+  // text for the result of a manual send: planned = records sent, result = hcWriteResult
+  function sendSummary(planned, result, skippedKinds) {
+    var names = {}; WRITE_TYPES.forEach(function (t) { names[t.kind] = t.label.toLowerCase(); });
+    var ok = {}; arr(result && result.written).forEach(function (c) { ok[c] = 1; });
+    var cnt = {}, n = 0; arr(planned).forEach(function (r) { if (ok[r.cid]) { cnt[r.kind] = (cnt[r.kind] || 0) + 1; n++; } });
+    var bad = arr(result && result.failed).length, parts = Object.keys(cnt).map(function (k) { return (names[k] || k) + ' ' + cnt[k]; });
+    var txt = n ? 'Wysłano do Health Connect: ' + n + ' ' + (n === 1 ? 'rekord' : 'rekordów') + ' (' + parts.join(', ') + ').' : 'Nic nie zostało wysłane.';
+    if (bad) txt += ' Nieudane: ' + bad + ' (spróbuję ponownie).';
+    if (skippedKinds && skippedKinds.length) txt += ' Bez zgody na zapis: ' + skippedKinds.map(function (k) { return names[k] || k; }).join(', ') + '.';
+    return txt;
   }
   // The heart-rate series of a workout is no longer needed locally once its 'hr' record has been written.
   function stripWrittenHr(workouts, written) {
@@ -3666,7 +3767,8 @@ canvas{display:block;width:100%;height:200px}
     stepsNorm: stepsNorm, mergeSteps: mergeSteps, mergeWeights: mergeWeights, heightSuggestion: heightSuggestion, typeInfo: typeInfo, workoutFromExercise: workoutFromExercise,
     mergeWorkouts: mergeWorkouts, nightFromSleep: nightFromSleep, nightsFromSleeps: nightsFromSleeps, nightsOf: nightsOf, sleepView: sleepView,
     dayCompare: dayCompare, kcalCompare: kcalCompare, applySync: applySync, summaryText: summaryText,
-    planWrites: planWrites, applyWriteResult: applyWriteResult, stripWrittenHr: stripWrittenHr, foreign: foreign, dateOfMs: dateOfMs, timeOfMs: timeOfMs, localMs: localMs
+    planWrites: planWrites, applyWriteResult: applyWriteResult, queueDelete: queueDelete, applyDeleteResult: applyDeleteResult, deleteCid: deleteCid,
+    WRITE_TYPES: WRITE_TYPES, WRITE_PERM: WRITE_PERM, kindOfCid: kindOfCid, writeStatus: writeStatus, sendSummary: sendSummary, distanceOf: distanceOf, stripWrittenHr: stripWrittenHr, foreign: foreign, dateOfMs: dateOfMs, timeOfMs: timeOfMs, localMs: localMs
   };
   if (isNode) module.exports = api; else root.HcCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -4086,9 +4188,100 @@ canvas{display:block;width:100%;height:200px}
       if (!isDate(d) || !o[d] || typeof o[d] !== 'object') return;
       var e = o[d], g = function (v, mx) { v = num(v); return v != null && v >= 0 && v <= mx ? Math.round(v * 10) / 10 : null; };
       var m = { kcal: g(e.kcal, 10000), p: g(e.p, 1000), c: g(e.c, 2000), f: g(e.f, 1000) };
-      if (m.kcal != null || m.p != null || m.c != null || m.f != null) { m.kcal = m.kcal != null ? Math.round(m.kcal) : null; m.derived = !!e.derived && m.kcal != null; out[d] = m; }
+      if (m.kcal != null || m.p != null || m.c != null || m.f != null) { m.kcal = m.kcal != null ? Math.round(m.kcal) : null; m.derived = !!e.derived && m.kcal != null; if (e.src === 'plan') m.src = 'plan'; out[d] = m; }
     });
     return out;
+  }
+
+  // ============================== diet plan: daily base + skipped meals + extra meals ==============================
+  // plan { name, kcal, p, c, f, from }: the base of every day from `from` on (status "z planu", no clicking needed).
+  // day  { mode: 'plan' | 'manual', base: {kcal,p,c,f,derived} (manual), plan: snapshot of the plan (plan mode), skipped: [meal ids], extras: [{id,name,kcal,p,c,f,time,fav}] }
+  // Day total = (plan - skipped meals | manual totals) + extras. materialize() writes the totals into `macros` (what the calibration and Health Connect read).
+  var MEALS = [{ id: 'sniadanie', label: 'Śniadanie', kcal: 700 }, { id: 'przekaska', label: 'Przekąska', kcal: 375 }, { id: 'obiad', label: 'Obiad', kcal: 800 }, { id: 'kolacja', label: 'Kolacja', kcal: 625 }];
+  var MEALS_KCAL = 2500; // the meals of the plan add up to this; a skipped meal removes its share (kcal / 2500) of every value of the plan
+  var PRESET_KETO = { name: 'Keto 2500 kcal (średnia z jadłospisu)', kcal: 2500, p: 122, c: 49, f: 202 };
+  var SHAKE = { id: 'fav-shake', name: 'Szejk proteinowy', kcal: 120, p: 24, c: 3, f: 2, note: 'wartości przykładowe – popraw wg etykiety' };
+  var PROTEIN_HINT = 'przy treningu siłowym zwykle 1,6–2,2 g/kg';
+  function r1(v) { return Math.round(v * 10) / 10; }
+  function vals4(e) {
+    var g = function (v, mx) { v = num(v); return v != null && v >= 0 && v <= mx ? v : null; };
+    return { kcal: g(e && e.kcal, 10000), p: g(e && e.p, 1000), c: g(e && e.c, 2000), f: g(e && e.f, 1000) };
+  }
+  function cleanPlan(o) {
+    if (!o || typeof o !== 'object') return null;
+    var v = vals4(o); if (!(v.kcal > 0)) return null;
+    return { name: String(o.name || 'Plan diety').slice(0, 60), kcal: Math.round(v.kcal), p: v.p != null ? r1(v.p) : null, c: v.c != null ? r1(v.c) : null, f: v.f != null ? r1(v.f) : null, from: isDate(o.from) ? o.from : null };
+  }
+  function cleanExtra(x) {
+    if (!x || typeof x !== 'object' || typeof x.id !== 'string' || !x.id) return null;
+    var v = vals4(x); if (v.kcal == null && v.p == null && v.c == null && v.f == null) return null;
+    return { id: x.id.slice(0, 40), name: String(x.name || 'Posiłek').slice(0, 60), kcal: v.kcal != null ? Math.round(v.kcal) : null, p: v.p != null ? r1(v.p) : null, c: v.c != null ? r1(v.c) : null, f: v.f != null ? r1(v.f) : null, time: /^\d{2}:\d{2}$/.test(x.time || '') ? x.time : '12:00', fav: typeof x.fav === 'string' ? x.fav.slice(0, 40) : null };
+  }
+  // null (not an array) -> the caller seeds the default favourites
+  function cleanFavs(a) {
+    if (!Array.isArray(a)) return null; var seen = {}, out = [];
+    a.forEach(function (x) {
+      var e = cleanExtra(x); if (!e || seen[e.id]) return; seen[e.id] = 1;
+      out.push({ id: e.id, name: e.name, kcal: e.kcal, p: e.p, c: e.c, f: e.f, note: typeof x.note === 'string' ? x.note.slice(0, 120) : '' });
+    });
+    return out.slice(0, 20);
+  }
+  function cleanDays(o) {
+    var out = {}; if (!o || typeof o !== 'object') return out;
+    Object.keys(o).sort().slice(-90).forEach(function (d) {
+      var e = o[d]; if (!isDate(d) || !e || typeof e !== 'object') return;
+      var mode = e.mode === 'manual' ? 'manual' : 'plan', base = null, snap = null;
+      if (mode === 'manual') { var b = vals4(e.base); if (b.kcal != null || b.p != null || b.c != null || b.f != null) base = { kcal: b.kcal != null ? Math.round(b.kcal) : null, p: b.p, c: b.c, f: b.f, derived: !!e.base.derived && b.kcal != null }; else mode = 'plan'; }
+      if (e.plan) snap = cleanPlan(Object.assign({ from: d }, e.plan));
+      var ids = {}; MEALS.forEach(function (m) { ids[m.id] = 1; });
+      out[d] = { mode: mode, base: base, plan: snap, skipped: (Array.isArray(e.skipped) ? e.skipped : []).filter(function (k, i, a) { return ids[k] && a.indexOf(k) === i; }), extras: (Array.isArray(e.extras) ? e.extras : []).map(cleanExtra).filter(Boolean).slice(0, 30) };
+    });
+    return out;
+  }
+  function planCovers(plan, date) { return !!(plan && plan.from && date >= plan.from); }
+  // total of one day or null. plan: current plan (used when the day has no snapshot of its own)
+  function dayTotal(plan, day) {
+    day = day || { mode: 'plan', skipped: [], extras: [] };
+    var base = null;
+    if (day.mode === 'manual' && day.base) base = { kcal: day.base.kcal, p: day.base.p, c: day.base.c, f: day.base.f };
+    else { var pl = day.plan || plan; if (pl) { base = { kcal: pl.kcal, p: pl.p, c: pl.c, f: pl.f }; var k = 0; (day.skipped || []).forEach(function (id) { MEALS.forEach(function (m) { if (m.id === id) k += m.kcal; }); }); var keep = 1 - k / MEALS_KCAL; if (keep < 0) keep = 0; ['kcal', 'p', 'c', 'f'].forEach(function (key) { if (base[key] != null) base[key] = base[key] * keep; }); } }
+    var ex = day.extras || [];
+    if (!base && !ex.length) return null;
+    var out = {}, any = false;
+    ['kcal', 'p', 'c', 'f'].forEach(function (key) {
+      var sum = base && base[key] != null ? base[key] : null;
+      ex.forEach(function (x) { if (x[key] != null) sum = (sum || 0) + x[key]; });
+      out[key] = sum == null ? null : (key === 'kcal' ? Math.round(sum) : r1(sum)); if (sum != null) any = true;
+    });
+    if (!any) return null;
+    out.derived = !!(day.mode === 'manual' && day.base && day.base.derived && !ex.length);
+    return out;
+  }
+  // Writes the totals of every day with a plan / own entry into macros (a new object). Past days made from the plan alone are not touched again
+  // (a plan edit changes today onward, not the history). Returns { macros, days, changed }.
+  function materialize(macros, plan, days, today) {
+    macros = JSON.parse(JSON.stringify(macros || {})); days = JSON.parse(JSON.stringify(days || {})); var changed = false, low = H.addDays(today, -60), dates = {};
+    Object.keys(days).forEach(function (d) { if (d >= low && d <= today) dates[d] = 1; });
+    if (plan && plan.from) for (var k = Math.max(H.dayNum(plan.from), H.dayNum(low)); k <= H.dayNum(today); k++) dates[H.dateFromNum(k)] = 1;
+    Object.keys(dates).sort().forEach(function (d) {
+      var cur = macros[d], day = days[d];
+      if (!day && cur && cur.src !== 'plan') { // typed before the plan existed: stays the manual base of the day
+        day = days[d] = { mode: 'manual', base: { kcal: cur.kcal, p: cur.p, c: cur.c, f: cur.f, derived: !!cur.derived }, plan: null, skipped: [], extras: [] }; changed = true;
+      }
+      if (!day && d < today && cur && cur.src === 'plan') return; // frozen history
+      var t = dayTotal(plan, day);
+      if (!t) { if (cur && cur.src === 'plan') { delete macros[d]; changed = true; } return; }
+      var nv = { kcal: t.kcal, p: t.p, c: t.c, f: t.f, derived: t.derived }; if (!day || day.mode === 'plan') nv.src = 'plan';
+      if (!cur || JSON.stringify(cur) !== JSON.stringify(nv)) { macros[d] = nv; changed = true; }
+    });
+    return { macros: macros, days: days, changed: changed };
+  }
+  function proteinPerKg(m, kg) { return m && fin(m.p) && fin(kg) && kg > 0 ? Math.round(m.p / kg * 10) / 10 : null; }
+  function dayStatus(plan, day, date) {
+    if (day && day.mode === 'manual') return 'ręcznie' + (day.extras && day.extras.length ? ' + dodatki' : '');
+    if (!(day && day.plan) && !planCovers(plan, date)) return day && day.extras && day.extras.length ? 'dodatki' : '';
+    var sk = (day && day.skipped || []).map(function (id) { return MEALS.filter(function (m) { return m.id === id; })[0].label.toLowerCase(); });
+    return 'z planu' + (sk.length ? ', pominięto: ' + sk.join(', ') : '') + (day && day.extras && day.extras.length ? ' + dodatki' : '');
   }
   function kcalFromMacros(p, c, f) { return Math.round(4 * (p || 0) + 4 * (c || 0) + 9 * (f || 0)); }
   // raw: { kcal, p, c, f } as typed. At least one value; kcal missing but macros given -> kcal = 4P + 4C + 9F (marked as derived).
@@ -4215,6 +4408,7 @@ canvas{display:block;width:100%;height:200px}
     hrrLabel: hrrLabel, computeHrr: computeHrr, cleanHrr: cleanHrr, hrrList: hrrList,
     BP_DISCLAIMER: BP_DISCLAIMER, GLU_CTX: GLU_CTX, validateBp: validateBp, bpCategory: bpCategory, validateGlucose: validateGlucose, glucoseCategory: glucoseCategory, mgdlToMmol: mgdlToMmol,
     cleanBp: cleanBp, cleanGlu: cleanGlu, mergeById: mergeById, hcRecords: hcRecords, hhPerms: hhPerms, entryTime: entryTime,
+    MEALS: MEALS, PRESET_KETO: PRESET_KETO, SHAKE: SHAKE, PROTEIN_HINT: PROTEIN_HINT, cleanPlan: cleanPlan, cleanFavs: cleanFavs, cleanDays: cleanDays, cleanExtra: cleanExtra, dayTotal: dayTotal, materialize: materialize, planCovers: planCovers, proteinPerKg: proteinPerKg, dayStatus: dayStatus,
     cleanMacros: cleanMacros, validateMacros: validateMacros, kcalFromMacros: kcalFromMacros, intakeFromMacros: intakeFromMacros, macroShare: macroShare,
     lastFullWeekStart: lastFullWeekStart, weekReport: weekReport, weekRecommendation: weekRecommendation, explainDay: explainDay,
     dowIdx: dowIdx, dowName: dowName, dayShort: dayShort, DOW_CAP: DOW_CAP, fmtInt: fmtInt, pl1: pl1
@@ -5329,6 +5523,7 @@ function commitWorkout(rpe) {
   var m = FC.mergeById(S.workouts, [w], 'id'); S.workouts = FC.sortWorkouts(m.items);
   var ok = persist('workouts'); var saved = w; S.pendingWorkout = null; S.rpe = null; savePending();
   if (typeof e4AfterWorkout === 'function') e4AfterWorkout(saved);
+  if (typeof e5ShakeSuggest === 'function') e5ShakeSuggest(saved);
   if (typeof hcAfterSave === 'function') hcAfterSave(); // write the workout (with its heart rate) to Health Connect
   if (UI.onData) UI.onData();
   return ok;
@@ -5685,7 +5880,7 @@ if (window.FormaNative) window.__formaNativeEvent = function (ev) {
       case 'gpsPermission': if (typeof gpsOnPermission === 'function') gpsOnPermission(ev); break;
       case 'stepsPermission': if (typeof e4StepsPermission === 'function') e4StepsPermission(ev); break;
       case 'whoopAuth': case 'whoopSync': if (typeof whoopNativeEvent === 'function') whoopNativeEvent(ev); break;
-      case 'hcStatus': case 'hcPermissions': case 'hcSyncResult': case 'hcWriteResult': case 'hcError': if (typeof hcNativeEvent === 'function') hcNativeEvent(ev); break;
+      case 'hcStatus': case 'hcPermissions': case 'hcSyncResult': case 'hcWriteResult': case 'hcDeleteResult': case 'hcError': if (typeof hcNativeEvent === 'function') hcNativeEvent(ev); break;
       case 'error': log('Błąd natywny: ' + ev.message); if (ev.message) showError(String(ev.message)); break;
       default: break;
     }
@@ -6686,6 +6881,7 @@ function kcalDay(date) {
 }
 // calibration over the stable-weight period (estimates are per day, from the formulas)
 function kcalCalibration() {
+  if (typeof e5DietRefresh === 'function') e5DietRefresh(); // day totals from the diet plan
   var today = todayStr(), st = KC.weightStability(S.weights, today), est = {};
   if (st.ok && S.profile) for (var k = C.dayNum(st.from); k <= C.dayNum(st.to); k++) { var d = C.dateFromNum(k), e = kcalDay(d); if (e.ok && e.total > 0) est[d] = e.total; }
   // intake typed in Makro (>= 7 days inside the stable-weight window) replaces the single "typical intake" from Profil
@@ -6722,7 +6918,7 @@ var HC_ERR = {
   app: 'Nie udało się otworzyć Health Connect.',
   timeout: 'Health Connect nie odpowiedział. Spróbuj ponownie.'
 };
-S.hc = { avail: null, rep: null, store: HCC.emptyStore(), syncing: false, requesting: false, writing: false, writeAgain: false, inflight: null, err: null, msg: '', msgAt: 0, failed: [], autoPending: false, lastWrite: null, writeFail: 0, syncTimer: null, writeTimer: null };
+S.hc = { avail: null, rep: null, store: HCC.emptyStore(), syncing: false, requesting: false, writing: false, writeAgain: false, inflight: null, err: null, msg: '', msgAt: 0, failed: [], autoPending: false, lastWrite: null, writeFail: 0, syncTimer: null, writeTimer: null, send: null, sendSkipped: [], delInflight: null, delTimer: null };
 S.stepsPhone = null; // StepsCore.normalize() of the phone counter, before the Health Connect merge
 
 function hcSupported() { return NATIVE && !!window.FormaNative && typeof window.FormaNative.hcStatus === 'function'; }
@@ -6735,11 +6931,12 @@ function hcUi() { if (UI.onHc) UI.onHc(); }
 function hcSetErr(code, detail, soft) {
   S.hc.err = { code: code, text: HC_ERR[code] || HC_ERR.sync, detail: detail || '', soft: !!soft };
   S.hc.syncing = false; S.hc.requesting = false; S.hc.writing = false;
+  if (S.hc.send && S.hc.send.busy) S.hc.send = { busy: false, ok: false, at: Date.now(), msg: 'Nie udało się wysłać: ' + (HC_ERR[code] || HC_ERR.sync) };
   log('Health Connect: błąd ' + code + (detail ? ' – ' + detail : ''));
   hcUi();
 }
 function hcConnected() { return !!(S.hc.avail === 'available' && S.hc.rep && S.hc.rep.anyRead); }
-// Write permission is checked per record type (hrv | rhr | exercise | hr | sleep | bp | glucose); without a kind: is there any write permission at all
+// Write permission is checked per record type (hrv | rhr | exercise | hr | sleep | bp | glucose | weight | height | kcal | distance | nutrition); without a kind: is there any write permission at all
 function hcCanWrite(kind) {
   if (!(S.hc.avail === 'available' && S.hc.rep)) return false;
   return kind ? S.hc.rep.can(kind) : S.hc.rep.anyWrite;
@@ -6784,6 +6981,7 @@ function hcApplyStatus(st) {
   else if (st.status && st.status !== 'available') S.hc.rep = null;
   if (S.hc.avail === 'available' && S.hc.err && S.hc.err.soft) S.hc.err = null;
   if (S.hc.autoPending && S.hc.avail && (S.hc.avail !== 'available' || S.hc.rep)) { S.hc.autoPending = false; hcMaybeSync(); }
+  if (S.hc.rep && S.hc.store.pendingDel.length) hcFlushDeletes(); // a permission granted later releases queued deletions
   hcUi();
 }
 function hcRefreshStatus() {
@@ -6847,14 +7045,33 @@ function hcMaybeSync() { // app open / resume: sync when connected and the last 
 }
 
 // ---------- writes (our own records only; see HcCore.planWrites) ----------
-var HC_WRITE_GROUP = { hrv: 'hrv', rhr: 'rhr', exercise: 'exercise', hr: 'hr', sleep: 'sleep' };
-function hcWriteNow() {
+function hcWritePlan() {
+  if (typeof e5DietRefresh === 'function') e5DietRefresh();
+  var macros = S.e5 && S.e5.macros ? S.e5.macros : {}, st = S.hc.store;
+  return HCC.planWrites(S.days, S.workouts, st.written, { nowMs: Date.now(), today: todayStr(), nights: HCC.nightsOf(st), weights: S.weights, profile: S.profile, macros: macros, hcHeight: st.hcHeight, heightImported: st.heightImported });
+}
+// pending deletions whose source entry exists again (weight / makro typed again for the same day) are dropped: the record is updated instead
+function hcPrunePendingDel() {
+  var st = S.hc.store, macros = S.e5 && S.e5.macros ? S.e5.macros : {}, n = st.pendingDel.length;
+  st.pendingDel = st.pendingDel.filter(function (x) {
+    var date = x.cid.replace(/^forma-(weight|nutr)-/, '');
+    if (S.hc.delInflight && S.hc.delInflight.some(function (y) { return y.cid === x.cid; })) return true;
+    return x.kind === 'weight' ? !S.weights.some(function (w) { return w.date === date; }) : !macros[date];
+  });
+  return st.pendingDel.length !== n;
+}
+// manual = "Wyślij teraz" in the Profil card: the outcome is shown there (S.hc.send)
+function hcWriteNow(manual) {
   if (!hcSupported() || !hcCanWrite()) return false;
+  if (manual) S.hc.sendSkipped = [];
+  if (hcPrunePendingDel()) hcSaveStore();
+  var delStarted = hcFlushDeletes();
   if (S.hc.writing) { S.hc.writeAgain = true; return false; }
-  var plan = HCC.planWrites(S.days, S.workouts, S.hc.store.written, { nowMs: Date.now(), today: todayStr(), nights: HCC.nightsOf(S.hc.store) });
+  var plan = hcWritePlan();
   var recs = plan.records.filter(function (r) { return hcCanWrite(r.kind); });
+  if (manual) plan.records.forEach(function (r) { if (!hcCanWrite(r.kind) && S.hc.sendSkipped.indexOf(r.kind) < 0) S.hc.sendSkipped.push(r.kind); });
   if (typeof e5HcRecords === 'function') recs = recs.concat(e5HcRecords(S.hc.store.written).filter(function (r) { return hcCanWrite(r.kind); }));
-  if (!recs.length) return false;
+  if (!recs.length) return delStarted;
   S.hc.writing = true; S.hc.inflight = recs;
   log('Health Connect: zapis ' + recs.length + ' rekordów (' + recs.map(function (r) { return r.kind; }).filter(function (k, i, a) { return a.indexOf(k) === i; }).join(', ') + ').');
   clearTimeout(S.hc.writeTimer); S.hc.writeTimer = setTimeout(function () { if (S.hc.writing) { S.hc.writing = false; S.hc.inflight = null; hcSetErr('timeout', 'zapis', true); } }, 60000);
@@ -6865,7 +7082,7 @@ function hcWriteNow() {
 function hcOnWriteResult(ev) {
   clearTimeout(S.hc.writeTimer); S.hc.writing = false;
   var planned = S.hc.inflight || []; S.hc.inflight = null;
-  S.hc.store.written = HCC.applyWriteResult(S.hc.store.written, planned, ev);
+  S.hc.store.written = HCC.applyWriteResult(S.hc.store.written, planned, ev, Date.now());
   var st = HCC.stripWrittenHr(S.workouts, S.hc.store.written);
   if (st.changed) { S.workouts = st.items; persist('workouts'); }
   hcSaveStore();
@@ -6873,9 +7090,59 @@ function hcOnWriteResult(ev) {
   if (n) S.hc.lastWrite = Date.now();
   S.hc.writeFail = bad;
   log('Health Connect: zapisano ' + n + (bad ? ', nieudane ' + bad : '') + (Array.isArray(ev.denied) && ev.denied.length ? ', bez uprawnień: ' + ev.denied.join(', ') : '') + '.');
+  if (S.hc.send && S.hc.send.busy) S.hc.send = { busy: false, ok: ev.ok !== false && !bad, at: Date.now(), msg: ev.ok === false ? 'Nie udało się wysłać: ' + (HC_ERR[ev.code === 'permission' ? 'permission' : 'write']) : HCC.sendSummary(planned, ev, S.hc.sendSkipped) };
   if (ev.ok === false) hcSetErr(ev.code === 'permission' ? 'permission' : 'write', ev.message, true);
   else hcUi();
   if (S.hc.writeAgain) { S.hc.writeAgain = false; hcWriteNow(); }
+}
+// "Wyślij teraz": sends everything that is new or changed (and pending deletions) and shows what happened
+function hcSendNow() {
+  if (!hcSupported()) return false;
+  var at = Date.now();
+  if (S.hc.send && S.hc.send.busy) return false;
+  if (!hcCanWrite()) { S.hc.send = { busy: false, ok: false, at: at, msg: 'Brak zgody na zapis w Health Connect. Przyznaj uprawnienia poniżej.' }; hcUi(); return false; }
+  S.hc.send = { busy: true, ok: true, at: at, msg: 'Wysyłam…' };
+  var started = hcWriteNow(true);
+  if (!started && S.hc.send.busy) {
+    var sk = S.hc.sendSkipped, names = {}; HCC.WRITE_TYPES.forEach(function (t) { names[t.kind] = t.label.toLowerCase(); });
+    S.hc.send = { busy: false, ok: true, at: Date.now(), msg: 'Wszystko jest już wysłane. Nic nowego do zapisania.' + (sk.length ? ' Bez zgody na zapis: ' + sk.map(function (k) { return names[k] || k; }).join(', ') + '.' : '') };
+  } else if (started && !S.hc.writing && S.hc.send.busy) { // only deletions went out
+    S.hc.send.msg = 'Usuwam zapisy z Health Connect…';
+  }
+  hcUi();
+  return started;
+}
+
+// ---------- deletions: a weight / makro day deleted in Forma removes its Health Connect record (by clientRecordId) ----------
+function hcFlushDeletes() {
+  if (!hcSupported() || S.hc.delInflight) return false;
+  var q = S.hc.store.pendingDel.filter(function (x) { return hcCanWrite(x.kind); });
+  if (!q.length) return false;
+  S.hc.delInflight = q;
+  log('Health Connect: usuwam ' + q.length + ' rekordów.');
+  clearTimeout(S.hc.delTimer); S.hc.delTimer = setTimeout(function () { S.hc.delInflight = null; if (S.hc.send && S.hc.send.busy && !S.hc.writing) { S.hc.send = { busy: false, ok: false, at: Date.now(), msg: HC_ERR.timeout }; hcUi(); } }, 60000);
+  var r = nat('hcDelete', JSON.stringify({ records: q }));
+  if (!r || r.ok === false) { clearTimeout(S.hc.delTimer); S.hc.delInflight = null; log('Health Connect: usuwanie nieudane' + (r && r.error ? ' – ' + r.error : '') + '.'); return false; }
+  return true;
+}
+function hcOnDeleteResult(ev) {
+  clearTimeout(S.hc.delTimer); S.hc.delInflight = null;
+  S.hc.store = HCC.applyDeleteResult(S.hc.store, ev); hcSaveStore();
+  var n = Array.isArray(ev.deleted) ? ev.deleted.length : 0, bad = Array.isArray(ev.failed) ? ev.failed.length : 0;
+  log('Health Connect: usunięto ' + n + (bad ? ', nieudane ' + bad : '') + '.');
+  if (bad) { var slot = ev.failed.some(function (f) { return /^forma-nutr-/.test(f.cid || ''); }) ? 'macro' : 'weight'; markSaved(slot, 'Nie udało się usunąć zapisu z Health Connect. Spróbuję ponownie przy następnym zapisie.', 7000); }
+  if (S.hc.send && S.hc.send.busy && !S.hc.writing) S.hc.send = { busy: false, ok: !bad, at: Date.now(), msg: n ? 'Usunięto z Health Connect: ' + n + '.' : 'Nic nie zostało usunięte.' };
+  hcUi();
+}
+// Called after the user deleted a weight ('weight') or a makro day ('nutrition'). Returns the sentence for the confirmation ('' when nothing was ever written there).
+function hcDeleteFor(kind, date) {
+  if (!hcSupported()) return '';
+  var q = HCC.queueDelete(S.hc.store, kind, date);
+  if (!q.queued) return '';
+  S.hc.store = q.store; hcSaveStore();
+  var label = kind === 'weight' ? 'wagi' : 'makro';
+  if (hcCanWrite(kind) && hcConnected()) { setTimeout(hcFlushDeletes, 0); return ' Usunięto też zapis w Health Connect.'; }
+  return ' Zapis w Health Connect zostaje, bo nie ma zgody na zapis ' + label + ' – usunę go po przyznaniu zgody.';
 }
 function hcAfterSave() { if (hcSupported() && hcCanWrite()) setTimeout(hcWriteNow, 0); } // morning record, night, workout saved
 
@@ -6889,8 +7156,10 @@ function hcHeightSug() {
 function hcHeightAnswer(accept) {
   var g = S.hc.store.heightSug; if (!g) return;
   markSaved('height', accept ? 'Zaktualizowano wzrost w profilu: ' + g.cm + ' cm' : 'Zapisano: zostaje wzrost z profilu' + (S.profile && S.profile.heightCm ? ' (' + S.profile.heightCm + ' cm)' : ''), 7000);
+  S.hc.store.heightOffered = g.cm; S.hc.store.heightSug = null;
+  if (accept) S.hc.store.heightImported = g.cm; // a value that came from Health Connect is never written back
+  hcSaveStore();
   if (accept) applyProfile({ heightCm: g.cm });
-  S.hc.store.heightOffered = g.cm; S.hc.store.heightSug = null; hcSaveStore();
   log('Health Connect: wzrost ' + g.cm + ' cm ' + (accept ? 'zapisano w profilu' : 'odrzucono') + '.');
   hcUi();
 }
@@ -6906,6 +7175,7 @@ function hcNativeEvent(ev) {
   }
   else if (ev.type === 'hcSyncResult') hcApplyData(ev);
   else if (ev.type === 'hcWriteResult') hcOnWriteResult(ev);
+  else if (ev.type === 'hcDeleteResult') hcOnDeleteResult(ev);
   else if (ev.type === 'hcError') hcSetErr(HC_ERR[ev.code] ? ev.code : 'sync', ev.message);
 }
 function hcResume() { // app back in front: permissions may have changed in the Health Connect settings
@@ -6932,15 +7202,19 @@ var E5 = window.E5Core;
 var E5_KINDS = { whoop: 'WHOOP', loop: 'Polar Loop', h10: 'Polar H10', other: 'Dowolny pas BT' };
 var E5_KIND_ORDER = ['whoop', 'loop', 'h10', 'other'];
 DRAFT_IDS.goalIn = 1; DRAFT_IDS.goalIn2 = 1; DRAFT_IDS.bpSys = 1; DRAFT_IDS.bpDia = 1; DRAFT_IDS.bpPulse = 1; DRAFT_IDS.bpTime = 1;
+DRAFT_IDS.mkPlName = 1; DRAFT_IDS.mkPlKcal = 1; DRAFT_IDS.mkPlP = 1; DRAFT_IDS.mkPlC = 1; DRAFT_IDS.mkPlF = 1; DRAFT_IDS.mkFvName = 1; DRAFT_IDS.mkFvKcal = 1; DRAFT_IDS.mkFvP = 1; DRAFT_IDS.mkFvC = 1; DRAFT_IDS.mkFvF = 1;
 DRAFT_IDS.gluVal = 1; DRAFT_IDS.gluTime = 1; DRAFT_IDS.mkKcal = 1; DRAFT_IDS.mkP = 1; DRAFT_IDS.mkC = 1; DRAFT_IDS.mkF = 1;
 KEYS.e5 = 'forma.v1.e5';
 
 function e5Clean(o) {
-  var d = { v: 1, goals: E5.defaultGoals(), goalsPrev: null, badges: {}, challenges: {}, bp: [], glu: [], macros: {}, hrr: {}, dev: { list: [], def: null }, ui: { sumTab: 'przeglad' } };
+  var d = { v: 1, goals: E5.defaultGoals(), goalsPrev: null, badges: {}, challenges: {}, bp: [], glu: [], macros: {}, hrr: {}, dev: { list: [], def: null }, ui: { sumTab: 'przeglad' }, plan: null, days: {}, favs: [Object.assign({}, E5.SHAKE)], shakeDone: {}, shakeSug: null };
   if (!o || typeof o !== 'object') return d;
   d.goals = E5.cleanGoals(o.goals); d.goalsPrev = o.goalsPrev ? E5.cleanGoals(o.goalsPrev) : null;
   d.badges = E5.cleanBadges(o.badges); d.challenges = E5.cleanChallenges(o.challenges);
   d.bp = E5.cleanBp(o.bp); d.glu = E5.cleanGlu(o.glu); d.macros = E5.cleanMacros(o.macros); d.hrr = E5.cleanHrr(o.hrr);
+  d.plan = E5.cleanPlan(o.plan); d.days = E5.cleanDays(o.days); var fv = E5.cleanFavs(o.favs); if (fv) d.favs = fv; // no saved list yet: the seed favourite (shake)
+  if (o.shakeDone && typeof o.shakeDone === 'object') Object.keys(o.shakeDone).slice(-60).forEach(function (k) { d.shakeDone[String(k).slice(0, 64)] = 1; });
+  if (typeof o.shakeSug === 'string' && o.shakeSug) d.shakeSug = o.shakeSug.slice(0, 64);
   if (o.dev && typeof o.dev === 'object') {
     var seen = {};
     (Array.isArray(o.dev.list) ? o.dev.list : []).forEach(function (x) {
@@ -6956,19 +7230,20 @@ function e5Clean(o) {
 S.e5 = e5Clean(null);
 S.sumDate = null; S.raportOff = 0; S.devSel = null; S.goalEdit = null; S.gluCtx = 'fasting'; S.macroDate = null; S.hrrPending = null; S.newBadges = [];
 function e5Save() { if (!S.storageBroken) persist('e5'); }
-function e5Init() { S.e5 = e5Clean(readKey(KEYS.e5)); if (DEMO) e5Demo(); e5Refresh(); }
+function e5Init() { S.e5 = e5Clean(readKey(KEYS.e5)); if (DEMO) e5Demo(); e5DietRefresh(true); e5Refresh(); }
 function e5OnWipe() { S.e5 = e5Clean(null); S.hrrPending = null; S.newBadges = []; if (DEMO) e5Demo(); }
 function e5SetUi(k, v) { S.e5.ui[k] = v; e5Save(); }
 
 // ---------- backup (JSON export / import) ----------
-function e5Export() { var e = S.e5; return { goals: e.goals, badges: e.badges, challenges: e.challenges, bp: e.bp, glu: e.glu, macros: e.macros, hrr: e.hrr }; }
+function e5Export() { var e = S.e5; return { goals: e.goals, badges: e.badges, challenges: e.challenges, bp: e.bp, glu: e.glu, macros: e.macros, hrr: e.hrr, plan: e.plan, days: e.days, favs: e.favs }; }
 function e5Import(j) {
   if (!j || typeof j !== 'object') return;
   var c = e5Clean(j), e = S.e5;
   if (j.goals) e.goals = c.goals;
   e.badges = Object.assign({}, c.badges, e.badges); e.challenges = Object.assign({}, c.challenges, e.challenges);
   e.bp = E5.mergeById(e.bp, c.bp); e.glu = E5.mergeById(e.glu, c.glu); e.macros = Object.assign({}, e.macros, c.macros); e.hrr = Object.assign({}, e.hrr, c.hrr);
-  e5Save();
+  if (j.plan) e.plan = c.plan; if (j.days) e.days = Object.assign({}, e.days, c.days); if (Array.isArray(j.favs)) e.favs = c.favs;
+  e5DietRefresh(true); e5Save();
 }
 
 // ---------- shared contexts ----------
@@ -7132,8 +7407,64 @@ function e5HcState() {
 }
 
 // ---------- macros ----------
-function macroSet(date, vals) { S.e5.macros[date] = { kcal: vals.kcal, p: vals.p, c: vals.c, f: vals.f, derived: !!vals.derived }; e5CalMemo = { t: 0, v: null }; e5Save(); if (UI.onData) UI.onData(); }
-function macroDel(date) { delete S.e5.macros[date]; e5CalMemo = { t: 0, v: null }; e5Save(); if (UI.onData) UI.onData(); }
+function macroSet(date, vals) { var dy = e5DayEnsure(date); dy.mode = 'manual'; dy.base = { kcal: vals.kcal, p: vals.p, c: vals.c, f: vals.f, derived: !!vals.derived }; dy.skipped = []; e5DietRefresh(true); e5CalMemo = { t: 0, v: null }; e5Save(); if (UI.onData) UI.onData(); if (typeof hcAfterSave === 'function') hcAfterSave(); }
+function macroDel(date) { delete S.e5.macros[date]; delete S.e5.days[date]; e5DietRefresh(true); e5CalMemo = { t: 0, v: null }; e5Save(); if (UI.onData) UI.onData(); }
+
+// ---------- diet plan: base of every day, skipped meals, extra meals (logic in E5Core; totals land in S.e5.macros) ----------
+var e5DietKey = '';
+// recomputes the totals of the days (cheap; once per day, and forced after every edit). Called before anything reads S.e5.macros.
+function e5DietRefresh(force) {
+  if (!S.e5) return; var key = todayStr();
+  if (!force && key === e5DietKey) return; e5DietKey = key;
+  var r = E5.materialize(S.e5.macros, S.e5.plan, S.e5.days, todayStr());
+  if (r.changed) { S.e5.macros = r.macros; S.e5.days = r.days; e5CalMemo = { t: 0, v: null }; if (!DEMO) e5Save(); }
+}
+function e5DayOf(date) { return S.e5.days[date] || null; }
+// own entry of the day (created on the first edit; keeps a snapshot of the plan so later plan edits do not rewrite it)
+function e5DayEnsure(date) {
+  if (!S.e5.days[date]) {
+    var cur = S.e5.macros[date], pl = S.e5.plan;
+    S.e5.days[date] = cur && cur.src !== 'plan' ? { mode: 'manual', base: { kcal: cur.kcal, p: cur.p, c: cur.c, f: cur.f, derived: !!cur.derived }, plan: null, skipped: [], extras: [] }
+      : { mode: 'plan', base: null, plan: pl ? { name: pl.name, kcal: pl.kcal, p: pl.p, c: pl.c, f: pl.f, from: date } : null, skipped: [], extras: [] };
+  }
+  return S.e5.days[date];
+}
+function e5DayChanged() { e5DietRefresh(true); e5Save(); if (UI.onData) UI.onData(); if (typeof hcAfterSave === 'function') hcAfterSave(); }
+function e5PlanSave(vals) { S.e5.plan = E5.cleanPlan(Object.assign({}, vals, { from: todayStr() })); e5DayChanged(); }
+function e5PlanDel() { S.e5.plan = null; e5DayChanged(); }
+function e5DaySkip(date, id, on) {
+  var d = e5DayEnsure(date); if (d.mode === 'manual') return;
+  d.skipped = d.skipped.filter(function (x) { return x !== id; }); if (on) d.skipped.push(id); e5DayChanged();
+}
+function e5DayToPlan(date) { delete S.e5.days[date]; delete S.e5.macros[date]; e5DayChanged(); }
+function e5FavById(id) { return S.e5.favs.filter(function (f) { return f.id === id; })[0] || null; }
+function e5ExtraAdd(date, fav) {
+  var d = e5DayEnsure(date), now = new Date(), t = date === todayStr() ? C.localTimeStr(now) : '12:00', id = 'x' + Date.now().toString(36) + d.extras.length;
+  var x = E5.cleanExtra({ id: id, name: fav.name, kcal: fav.kcal, p: fav.p, c: fav.c, f: fav.f, time: t, fav: fav.id }); if (!x) return null;
+  d.extras.push(x); e5DayChanged(); return x;
+}
+function e5ExtraDel(date, id) {
+  var d = S.e5.days[date]; if (!d) return false; var n = d.extras.length; d.extras = d.extras.filter(function (x) { return x.id !== id; });
+  if (d.mode === 'plan' && !d.extras.length && !d.skipped.length && S.e5.plan) delete S.e5.days[date]; // back to the pure plan day
+  e5DayChanged(); return n !== d.extras.length;
+}
+function e5FavSave(f) {
+  var v = E5.cleanFavs([f]); if (!v || !v.length) return false; var x = v[0];
+  var i = S.e5.favs.map(function (y) { return y.id; }).indexOf(x.id); if (i >= 0) S.e5.favs[i] = x; else S.e5.favs.push(x);
+  e5Save(); if (UI.onData) UI.onData(); return true;
+}
+function e5FavDel(id) { S.e5.favs = S.e5.favs.filter(function (f) { return f.id !== id; }); if (S.e5.shakeSug && id === 'fav-shake') S.e5.shakeSug = null; e5Save(); if (UI.onData) UI.onData(); }
+// after a saved gym workout (today): offer the shake once per workout, only when the favourite exists
+function e5ShakeSuggest(w) {
+  if (!w || w.type !== 'gym' || w.date !== todayStr() || S.e5.shakeDone[w.id] || !e5FavById('fav-shake')) return;
+  S.e5.shakeSug = w.id; e5Save();
+}
+function e5ShakeAnswer(add) {
+  var wid = S.e5.shakeSug, fav = e5FavById('fav-shake'); if (!wid) return null; var x = null;
+  S.e5.shakeDone[wid] = 1; var ks = Object.keys(S.e5.shakeDone); if (ks.length > 60) delete S.e5.shakeDone[ks[0]]; S.e5.shakeSug = null;
+  if (add && fav) x = e5ExtraAdd(todayStr(), fav); else e5Save();
+  if (UI.onData) UI.onData(); return x;
+}
 
 // ---------- weekly report ----------
 function e5ReportStart() { return C.addDays(E5.lastFullWeekStart(todayStr()), 7 * (S.raportOff || 0)); } // raportOff: 0 = last full week, 1 = this week so far, -n = earlier
@@ -9065,7 +9396,7 @@ function alarmTrendLink(i) {
 /* ===== Forma - UI of the Health Connect integration: Profil card, comparison cards, actions ===== */
 var ACT_HC = {};
 var HC_READ_TXT = 'kroki, waga, wzrost, treningi, sen, tętno, tętno spoczynkowe, HRV, kalorie (aktywne i całkowite)';
-var HC_WRITE_TXT = 'HRV (RMSSD), tętno spoczynkowe, treningi (z tętnem), sen. Sauny nie zapisujemy.';
+var HC_WRITE_TXT = 'HRV (RMSSD), tętno spoczynkowe, treningi (z tętnem), sen, waga, wzrost, kalorie aktywne i dystans treningów, makro dnia. Kroków i sauny nie zapisujemy.';
 function hcPill(state) {
   var m = { web: ['Tylko Android', '#9AA6B0'], checking: ['Sprawdzam…', '#9AA6B0'], na: ['Wymaga instalacji', '#F2A93B'], off: ['Niepołączono', '#9AA6B0'], on: ['Połączono', '#2EE86B'], partial: ['Część uprawnień', '#F2A93B'], error: ['Błąd', '#FF8A96'] }[state];
   return '<span class="row xs" style="gap:6px;color:' + m[1] + ';font-weight:600" data-hc="pill"><span class="dotp" style="background:' + m[1] + ';animation:none"></span>' + m[0] + '</span>';
@@ -9125,6 +9456,30 @@ function hcCardHtml() {
   }
   return h + '</div>';
 }
+// Profil: "Co Forma zapisuje do Health Connect" - one row per record type (consent, last write, record count), manual send, link to the missing permissions
+function hcWriteTimeText(ms) {
+  if (!ms) return 'brak';
+  var d = new Date(ms), ds = C.localDateStr(d), hm = C.localTimeStr(d);
+  return (ds === todayStr() ? 'dziś' : ds.slice(8) + '.' + ds.slice(5, 7)) + ' ' + hm;
+}
+function hcWriteCardHtml() {
+  var st = hcState(); if (st === 'web' || st === 'checking' || st === 'na') return '';
+  var rows = HCC.writeStatus(S.hc.store.written, S.hc.rep), miss = rows.filter(function (r) { return !r.granted; }), sd = S.hc.send, pd = S.hc.store.pendingDel.length;
+  var h = '<div class="card js-hcw" data-hc="wcard"><p class="lbl">Co Forma zapisuje do Health Connect</p>' +
+    '<div class="col" style="gap:0" data-hc="wlist">' + rows.map(function (r, i) {
+      return '<div class="row" style="align-items:flex-start;gap:10px;min-height:44px;padding:8px 0;border-top:' + (i ? '1px solid rgba(255,255,255,.08)' : '0') + '" data-hc="wrow" data-kind="' + r.kind + '" data-granted="' + (r.granted ? 1 : 0) + '">' +
+        '<div class="grow" style="min-width:0"><b class="sm">' + esc(r.label) + '</b><div class="xs mut" data-hc="wlast">ostatni zapis: ' + esc(hcWriteTimeText(r.last)) + ' · rekordów: ' + r.count + '</div></div>' +
+        '<span class="xs" style="font-weight:600;white-space:nowrap;color:' + (r.granted ? '#2EE86B' : '#F2A93B') + '" data-hc="wconsent">zgoda: ' + (r.granted ? 'tak' : 'nie') + '</span></div>';
+    }).join('') + '</div>' +
+    '<p class="xs mut" style="margin:0">Zapisujemy tylko własne wpisy Formy. Kroków nie zapisujemy (telefon robi to sam). Usunięcie wagi albo makro w Formie usuwa też ich zapis tutaj.</p>' +
+    (pd ? '<p class="xs mut" style="margin:0" data-hc="wpend">Do usunięcia z Health Connect: ' + pd + ' (czeka na zgodę na zapis).</p>' : '');
+  if (miss.length && st === 'off') h += '<p class="xs mut" style="margin:0" data-hc="wmissing">Zgody na zapis przyznasz po połączeniu Health Connect (przycisk wyżej).</p>';
+  else if (miss.length) h += '<div class="note" role="status" data-hc="wmissing">Brak zgody na zapis: ' + esc(miss.map(function (r) { return r.label; }).join(', ')) + '. <button class="btn sm" data-act="hcConnect" style="margin-top:8px"' + (S.hc.requesting ? ' disabled' : '') + '>Przyznaj brakujące zgody</button></div>';
+  if (sd && sd.msg) h += '<div class="note ' + (sd.busy ? '' : (sd.ok ? 'ok' : 'err')) + '" role="status" data-hc="send-msg">' + esc(sd.msg) + '</div>';
+  if (st === 'off') return h + '</div>';
+  h += '<button class="btn pri full" data-act="hcSendNow" data-hc="send"' + (sd && sd.busy ? ' disabled' : '') + '>' + (sd && sd.busy ? 'Wysyłam…' : 'Wyślij teraz') + '</button></div>';
+  return h;
+}
 // row in "Źródła danych"
 function hcSourceRowHtml() {
   var st = hcState(), on = st === 'on' || st === 'partial', col = on ? '#2EE86B' : (st === 'error' ? '#FF8A96' : '#6E7A84');
@@ -9158,6 +9513,7 @@ ACT_HC.hcConnect = function () { hcConnect(); };
 ACT_HC.hcStore = function () { S.hc.msgAt = Date.now(); S.hc.msg = 'Zainstaluj lub zaktualizuj Health Connect, a potem wróć do Formy.'; hcOpenSettings(); hcUi(); };
 ACT_HC.hcSyncNow = function () { hcSync(true); };
 ACT_HC.hcManage = function () { hcOpenSettings(); };
+ACT_HC.hcSendNow = function () { hcSendNow(); };
 ACT_HC.hcHeightYes = function () { hcHeightAnswer(true); };
 ACT_HC.hcHeightNo = function () { hcHeightAnswer(false); };
 UI.onHc = function () { var top = stack[stack.length - 1]; if (top && /^(profil|dzis|kalorie|regeneracja|sen|trendy|serce|urzadzenia)$/.test(top.path)) rerender(); };
@@ -9630,12 +9986,65 @@ function mkDate() { var t = todayStr(), d = S.macroDate; return d && C.dayNum(d)
 function macroRing(label, g, share, color) {
   return '<div class="col" style="align-items:center;gap:4px;min-width:0">' + ringHtml(86, 9, share || 0, color, '<span class="col" style="align-items:center;gap:0"><span class="n" style="font-size:20px;line-height:1">' + (g != null ? nf(g, 0) : '—') + '</span><span class="xs mut" style="line-height:1">g</span></span>') + '<span class="xs sub">' + label + '</span><span class="xs mut">' + (share != null ? Math.round(share * 100) + '% energii' : '') + '</span></div>';
 }
+
+// ---- diet plan UI ----
+function mkPlanLine(p) { return nfi(p.kcal) + ' kcal' + (p.p != null ? ' · B ' + nf(p.p, 0) : '') + (p.c != null ? ' · W ' + nf(p.c, 0) : '') + (p.f != null ? ' · T ' + nf(p.f, 0) : ''); }
+// the day follows the plan (default), skips meals, or is typed by hand (then the plan is not used for this day)
+function mkControlsHtml(date) {
+  var pl = S.e5.plan, d = e5DayOf(date), manual = d && d.mode === 'manual';
+  if (!pl && !(d && d.mode === 'plan' && d.plan)) return '';
+  if (!E5.planCovers(pl, date) && !(d && d.plan)) return '<div class="card fu" data-e5="macro-ctl"><p class="lbl">Plan diety</p><p class="xs mut" style="margin:0">Plan „' + esc(pl.name) + '” obowiązuje od ' + ddmm(pl.from) + '.' + ' Ten dzień jest wcześniejszy – wpisz go ręcznie.</p></div>';
+  var sk = d && !manual ? d.skipped : [], none = !manual && !sk.length;
+  var h = '<div class="card fu" data-e5="macro-ctl"><p class="lbl">Ten dzień</p><div class="row" style="flex-wrap:wrap">' +
+    '<button class="btn sm grow' + (none ? ' pri' : '') + '" data-act="mkPlanDay" data-e5="ctl-plan" aria-pressed="' + none + '">Zgodnie z planem</button>' +
+    '<button class="btn sm grow' + (!manual && sk.length ? ' pri' : '') + '" data-act="mkSkipOpen" data-e5="ctl-skip" aria-pressed="' + (!manual && sk.length > 0) + '"' + (manual ? ' disabled' : '') + '>Pominięty posiłek</button></div>';
+  if (manual) h += '<p class="xs mut" style="margin:0" data-e5="ctl-manual">Ten dzień jest wpisany ręcznie (suma z formularza poniżej). Plan wróci po „Zgodnie z planem”.</p>';
+  else if (S.mkSkipOpen || sk.length) h += '<p class="xs mut" style="margin:0">Które posiłki pominąłeś? Makro odejmujemy proporcjonalnie do kalorii posiłku.</p><div class="row" style="flex-wrap:wrap" data-e5="ctl-meals">' + E5.MEALS.map(function (m) { var on = sk.indexOf(m.id) >= 0; return '<button class="btn sm grow' + (on ? ' pri' : '') + '" data-act="mkSkip" data-id="' + m.id + '" aria-pressed="' + on + '">' + m.label + ' ' + m.kcal + '</button>'; }).join('') + '</div>';
+  return h + '</div>';
+}
+function mkUndoHtml() {
+  var u = S.mkUndo; if (!u || u.until <= Date.now()) return '';
+  return '<div class="note ok" role="status" data-e5="mk-undo">' + esc(u.text) + ' <button class="btn sm" data-act="mkUndo" style="margin-left:8px">Cofnij</button></div>';
+}
+function mkExtrasHtml(date, isToday) {
+  var d = e5DayOf(date), ex = d ? d.extras : [], favs = S.e5.favs, h = '<div class="card fu" data-e5="macro-extras"><p class="lbl">Dodatkowy posiłek</p>' + e5Note('extra') + mkUndoHtml();
+  if (ex.length) h += '<div class="col" style="gap:0" data-e5="extras-list">' + ex.map(function (x, i) { return '<div class="row sp" style="min-height:44px;border-top:' + (i ? '1px solid rgba(255,255,255,.08)' : '0') + '"><span class="sm grow" style="min-width:0">' + esc(x.time) + ' · ' + esc(x.name) + '<span class="xs mut" style="display:block">' + (x.kcal != null ? nfi(x.kcal) + ' kcal' : '') + (x.p != null ? ' · B ' + nf(x.p, 0) : '') + '</span></span><button class="btn sm" data-act="mkExtraDel" data-id="' + esc(x.id) + '">Usuń</button></div>'; }).join('') + '</div>';
+  else h += '<p class="xs mut" style="margin:0">Np. szejk po treningu. Jedno dotknięcie dodaje ulubiony posiłek do ' + (isToday ? 'dzisiejszej sumy' : 'sumy tego dnia') + '.</p>';
+  h += '<p class="xs sub" style="margin:0">Ulubione</p><div class="col" style="gap:0" data-e5="favs">' + favs.map(function (f, i) {
+    return '<div class="row sp" style="min-height:44px;border-top:' + (i ? '1px solid rgba(255,255,255,.08)' : '0') + '" data-e5="fav" data-id="' + esc(f.id) + '"><span class="sm grow" style="min-width:0">' + esc(f.name) + '<span class="xs mut" style="display:block">' + (f.kcal != null ? nfi(f.kcal) + ' kcal' : '') + (f.p != null ? ' · B ' + nf(f.p, 0) : '') + (f.c != null ? ' · W ' + nf(f.c, 0) : '') + (f.f != null ? ' · T ' + nf(f.f, 0) : '') + (f.note ? ' · ' + esc(f.note) : '') + '</span></span>' +
+      '<button class="btn sm pri" data-act="mkFavAdd" data-id="' + esc(f.id) + '">Dodaj</button><button class="btn sm" data-act="mkFavEdit" data-id="' + esc(f.id) + '">Edytuj</button></div>';
+  }).join('') + '</div>';
+  if (S.favEdit) {
+    var f = S.favEdit === 'new' ? { id: '', name: '', kcal: null, p: null, c: null, f: null, note: '' } : (e5FavById(S.favEdit) || { id: '', name: '' }), dr = S.drafts.makro || {}, v = function (id, k) { return dr[id] != null ? dr[id] : (f[k] != null ? String(f[k]).replace('.', ',') : ''); };
+    h += '<div class="col" style="gap:8px" data-e5="fav-form"><p class="xs sub" style="margin:0">' + (S.favEdit === 'new' ? 'Nowy ulubiony posiłek' : 'Edytuj: ' + esc(f.name)) + '</p>' +
+      [['mkFvName', 'name', 'Nazwa', 'np. Szejk proteinowy'], ['mkFvKcal', 'kcal', 'Kalorie (kcal)', ''], ['mkFvP', 'p', 'Białko (g)', ''], ['mkFvC', 'c', 'Węglowodany (g)', ''], ['mkFvF', 'f', 'Tłuszcze (g)', '']].map(function (x) { return '<label class="xs mut">' + x[2] + '<input class="inp" id="' + x[0] + '" type="text" inputmode="' + (x[1] === 'name' ? 'text' : 'decimal') + '" data-keep="1" placeholder="' + x[3] + '" value="' + esc(v(x[0], x[1])) + '" aria-label="' + x[2] + '"></label>'; }).join('') +
+      (f.note ? '<p class="xs mut" style="margin:0">' + esc(f.note) + '</p>' : '') + '<p class="err" id="fvErr" hidden></p><div class="row" style="flex-wrap:wrap"><button class="btn pri grow" data-act="mkFavSave">Zapisz</button><button class="btn grow" data-act="mkFavCancel">Anuluj</button>' + (S.favEdit !== 'new' ? '<button class="btn grow danger" data-act="mkFavDel" data-confirm="Usuń">Usuń</button>' : '') + '</div></div>';
+  } else h += '<button class="btn full" data-act="mkFavNew">Nowy ulubiony posiłek</button>';
+  return h + '</div>';
+}
+function mkPlanHtml() {
+  var pl = S.e5.plan, dr = S.drafts.makro || {}, v = function (id, k) { return dr[id] != null ? dr[id] : (pl && pl[k] != null ? String(pl[k]).replace('.', ',') : ''); };
+  return '<div class="card fu" data-e5="macro-plan"><p class="lbl">Plan diety</p>' + e5Note('plan') +
+    (pl ? '<p class="sm" style="margin:0" data-e5="plan-now"><b>' + esc(pl.name) + '</b><span class="xs mut" style="display:block">' + mkPlanLine(pl) + ' · każdy dzień od ' + ddmm(pl.from) + ' liczy się z planu</span></p>' : '<p class="xs mut" style="margin:0" data-e5="plan-none">Wpisz dzienną bazę (kalorie i makro z jadłospisu). Każdy dzień dostanie ją sam, a Ty tylko zaznaczasz odstępstwa.</p>') +
+    '<button class="btn full" data-act="mkPlanPreset" data-e5="plan-preset">Keto 2500 kcal (średnia z jadłospisu)</button>' +
+    [['mkPlName', 'name', 'Nazwa planu', 'np. Mój jadłospis', 'text'], ['mkPlKcal', 'kcal', 'Kalorie dziennie (kcal)', 'np. 2500', 'decimal'], ['mkPlP', 'p', 'Białko (g)', '', 'decimal'], ['mkPlC', 'c', 'Węglowodany (g)', '', 'decimal'], ['mkPlF', 'f', 'Tłuszcze (g)', '', 'decimal']].map(function (x) {
+      return '<label class="xs mut">' + x[2] + '<input class="inp" id="' + x[0] + '" type="text" inputmode="' + x[4] + '" data-keep="1" placeholder="' + x[3] + '" value="' + esc(v(x[0], x[1])) + '" aria-label="' + x[2] + '"></label>';
+    }).join('') + '<p class="err" id="plErr" hidden></p><div class="row" style="flex-wrap:wrap"><button class="btn pri grow" data-act="mkPlanSave">Zapisz plan</button>' + (pl ? '<button class="btn grow danger" data-act="mkPlanDel" data-confirm="Usuń plan">Usuń plan</button>' : '') + '</div></div>';
+}
+function mkShakeCardHtml() { // suggestion after a saved gym workout (Trening screen); once per workout, only when the favourite exists
+  var f = S.e5.shakeSug && e5FavById('fav-shake'); if (!f) return '';
+  return '<div class="card tint-g" data-e5="shake-sug" role="group"><span class="lbl">Po treningu</span><span class="n" style="font-size:18px">Dodać ' + esc(f.name.toLowerCase()) + '?</span><span class="xs sub">' + (f.kcal != null ? nfi(f.kcal) + ' kcal' : '') + (f.p != null ? ' · B ' + nf(f.p, 0) + ' g' : '') + (f.note ? ' · ' + esc(f.note) : '') + '</span><div class="row" style="flex-wrap:wrap"><button class="btn pri grow" data-act="shakeYes">Dodaj do dzisiaj</button><button class="btn grow" data-act="shakeNo">Nie teraz</button></div></div>';
+}
+function mkFvVals() { return { id: S.favEdit === 'new' ? 'f' + Date.now().toString(36) : S.favEdit, name: $('mkFvName').value.trim(), kcal: $('mkFvKcal').value, p: $('mkFvP').value, c: $('mkFvC').value, f: $('mkFvF').value }; }
 function rMakro() {
+  e5DietRefresh();
   var date = mkDate(), today = todayStr(), isToday = date === today, m = S.e5.macros[date] || null, sh = E5.macroShare(m);
   var h = header('Makro', { back: 'profil' }) + '<div class="body">';
   h += '<div class="row sp fu" role="group" aria-label="Wybór dnia"><button class="ib" data-act="mkPrev" aria-label="Poprzedni dzień"' + (C.dayNum(date) <= C.dayNum(today) - 60 ? ' disabled' : '') + '>' + ico('back', 22) + '</button><button class="chip n" data-act="mkToday" style="min-width:150px;font-size:16px" aria-label="Wybrany dzień: ' + esc(dayWord(date) + ' ' + dayFull(date)) + '">' + esc(dayWord(date)) + ' · ' + esc(dayFull(date)) + '</button><button class="ib" data-act="mkNext" aria-label="Następny dzień"' + (isToday ? ' disabled' : '') + '>' + ico('chev', 22) + '</button></div>';
-  var dr = S.drafts.makro || {}, val = function (id, k) { return dr[id] != null ? dr[id] : (m && m[k] != null ? String(m[k]).replace('.', ',') : ''); };
-  h += '<div class="card fu" data-e5="macro-form"><p class="lbl">Wpis ręczny</p>' + e5Note('macro') +
+  var dr = S.drafts.makro || {}, dyy = e5DayOf(date), mb = m;
+  if (m && m.src === 'plan' || (dyy && dyy.extras.length)) mb = E5.dayTotal(S.e5.plan, dyy ? Object.assign({}, dyy, { extras: [] }) : null) || m; // the form shows the day without extras (they are added on top of what is typed)
+  var val = function (id, k) { return dr[id] != null ? dr[id] : (mb && mb[k] != null ? String(mb[k]).replace('.', ',') : ''); };
+  var formH = '<div class="card fu" data-e5="macro-form"><p class="lbl">Wpis ręczny' + (S.e5.plan ? ' (zastępuje plan tego dnia)' : '') + '</p>' + e5Note('macro') +
     [['mkKcal', 'kcal', 'Kalorie (kcal)', 'np. 650'], ['mkP', 'p', 'Białko (g)', 'np. 40'], ['mkC', 'c', 'Węglowodany (g)', 'np. 70'], ['mkF', 'f', 'Tłuszcze (g)', 'np. 20']].map(function (x) {
       return '<label class="xs mut">' + x[2] + '<input class="inp" id="' + x[0] + '" type="text" inputmode="decimal" data-keep="1" placeholder="' + x[3] + '" value="' + esc(val(x[0], x[1])) + '" aria-label="' + x[2] + '"></label>';
     }).join('') + '<p class="err" id="mkErr" hidden></p><div class="row"><button class="btn pri grow" data-act="mkSave">Zapisz</button>' + (m ? '<button class="btn grow danger" data-act="mkDel" data-confirm="Usuń wpis">Usuń wpis</button>' : '') + '</div>' +
@@ -9646,8 +10055,12 @@ function rMakro() {
     h += '<div class="g3" style="gap:6px">' + macroRing('Białko', m.p, sh ? sh.p : null, '#C08BFF') + macroRing('Węglowodany', m.c, sh ? sh.c : null, '#4C9EFF') + macroRing('Tłuszcze', m.f, sh ? sh.f : null, '#FF9A59') + '</div>';
     var kd = kcalDay(date), cal = e5Cal(), burn = kd.ok ? Math.round(kd.total * (cal.ok ? cal.factor : 1)) : null;
     h += '<p class="sm sub" style="margin:0;text-align:center" data-e5="macro-sum">Zjedzone <b style="color:#fff">' + (m.kcal != null ? nfi(m.kcal) + ' kcal' + (m.derived ? ' (z makro)' : '') : '—') + '</b>' + (burn != null ? ' · spalone ok. <b style="color:#fff">' + nfi(burn) + ' kcal</b> (szacunek ±20%)' : ' · spalone: uzupełnij profil, żeby policzyć') + '</p>';
+    var stt = E5.dayStatus(S.e5.plan, e5DayOf(date), date); if (stt) h += '<p class="xs" style="margin:0;text-align:center;color:#2CE8B5" data-e5="macro-status">' + esc(stt) + '</p>';
+    var kgw = KC.weightOn(S.weights, date), ppk = E5.proteinPerKg(m, kgw);
+    h += '<p class="xs sub" style="margin:0;text-align:center" data-e5="macro-protkg">' + (ppk != null ? 'Białko: <b style="color:#fff">' + nf(ppk, 1) + ' g/kg</b> (waga ' + nf(kgw, 1) + ' kg) · ' + E5.PROTEIN_HINT + ' (tylko informacja)' : 'Białko na kg wagi pojawi się, gdy dodasz wagę w Profilu. ' + E5.PROTEIN_HINT + ' (tylko informacja).') + '</p>';
   }
   h += '</div>';
+  h += mkControlsHtml(date) + mkExtrasHtml(date, isToday) + formH + mkPlanHtml();
   // calibration
   var cal2 = e5Cal(), st = cal2.stab, mi = st && st.ok ? E5.intakeFromMacros(S.e5.macros, st.from, st.to, 7) : null, all = Object.keys(S.e5.macros).filter(function (d) { return S.e5.macros[d].kcal > 0; }).length;
   h += '<div class="card fu" data-e5="macro-calib"><p class="lbl">Kalibracja kalorii</p>' +
@@ -9670,7 +10083,40 @@ ACT_E5.mkSave = function () {
   var date = mkDate(); S.drafts.makro = {}; macroSet(date, r.value);
   markSaved('macro', 'Zapisano wpis z ' + (date === todayStr() ? 'dziś' : dayFull(date)) + ': ' + nfi(r.value.kcal) + ' kcal' + (r.value.derived ? ' (policzone z makro)' : ''), 6000); buzz(30);
 };
-ACT_E5.mkDel = function () { var date = mkDate(); S.drafts.makro = {}; macroDel(date); markSaved('macro', 'Usunięto wpis z ' + (date === todayStr() ? 'dziś' : dayFull(date)) + '.', 6000); };
+ACT_E5.mkPlanDay = function () { e5DayToPlan(mkDate()); S.mkSkipOpen = false; markSaved('plan', 'Ten dzień jest zgodny z planem.', 4000); };
+ACT_E5.mkSkipOpen = function () { S.mkSkipOpen = !S.mkSkipOpen; rerender(); };
+ACT_E5.mkSkip = function (el) { var d = mkDate(), cur = e5DayOf(d), on = !(cur && cur.skipped.indexOf(el.dataset.id) >= 0); e5DaySkip(d, el.dataset.id, on); };
+ACT_E5.mkPlanPreset = function () { var p = E5.PRESET_KETO; S.drafts.makro = {}; e5PlanSave(p); markSaved('plan', 'Zapisano plan: ' + p.name + '. Każdy dzień od dziś liczy się z planu.', 7000); };
+ACT_E5.mkPlanSave = function () {
+  var pl = E5.cleanPlan({ name: $('mkPlName').value.trim() || 'Plan diety', kcal: $('mkPlKcal').value, p: $('mkPlP').value, c: $('mkPlC').value, f: $('mkPlF').value });
+  if (!pl) return e5ShowErr('plErr', 'Podaj kalorie dzienne (1–10 000 kcal).');
+  S.drafts.makro = {}; e5PlanSave(pl); markSaved('plan', 'Zapisano plan: ' + pl.name + ' (' + nfi(pl.kcal) + ' kcal).', 7000);
+};
+ACT_E5.mkPlanDel = function () { S.drafts.makro = {}; e5PlanDel(); markSaved('plan', 'Usunięto plan. Zapisane dni zostają.', 6000); };
+ACT_E5.mkFavAdd = function (el) {
+  var f = e5FavById(el.dataset.id), d = mkDate(); if (!f) return; var x = e5ExtraAdd(d, f); if (!x) return;
+  S.mkUndo = { date: d, id: x.id, text: 'Dodano: ' + f.name + ' (' + (f.kcal != null ? nfi(f.kcal) + ' kcal' : '—') + ') o ' + x.time + '.', until: Date.now() + 9000 }; buzz(30);
+  setTimeout(function () { if (S.mkUndo && S.mkUndo.until <= Date.now() && pageTop().path === 'makro') { S.mkUndo = null; rerender(); } }, 9200); rerender();
+};
+ACT_E5.mkUndo = function () { var u = S.mkUndo; if (!u) return; S.mkUndo = null; e5ExtraDel(u.date, u.id); markSaved('extra', 'Cofnięto dodanie posiłku.', 4500); };
+ACT_E5.mkExtraDel = function (el) { e5ExtraDel(mkDate(), el.dataset.id); markSaved('extra', 'Usunięto dodatkowy posiłek.', 4500); };
+ACT_E5.mkFavNew = function () { S.favEdit = 'new'; S.drafts.makro = {}; rerender(); };
+ACT_E5.mkFavEdit = function (el) { S.favEdit = el.dataset.id; S.drafts.makro = {}; rerender(); };
+ACT_E5.mkFavCancel = function () { S.favEdit = null; S.drafts.makro = {}; rerender(); };
+ACT_E5.mkFavSave = function () {
+  var v = mkFvVals(); if (!v.name) return e5ShowErr('fvErr', 'Podaj nazwę.');
+  var old = e5FavById(v.id); if (old && old.note) v.note = old.note;
+  if (!e5FavSave(v)) return e5ShowErr('fvErr', 'Wpisz co najmniej jedną wartość (kalorie albo makro).');
+  S.favEdit = null; S.drafts.makro = {}; rerender(); markSaved('extra', 'Zapisano ulubiony posiłek: ' + v.name + '.', 5000);
+};
+ACT_E5.mkFavDel = function () { var id = S.favEdit; S.favEdit = null; S.drafts.makro = {}; e5FavDel(id); markSaved('extra', 'Usunięto ulubiony posiłek.', 5000); };
+ACT_E5.shakeYes = function () { var x = e5ShakeAnswer(true); if (x) { S.mkUndo = { date: todayStr(), id: x.id, text: 'Dodano: ' + x.name + ' (' + nfi(x.kcal) + ' kcal) do dzisiejszej sumy.', until: Date.now() + 9000 }; markSaved('shake', 'Dodano ' + x.name.toLowerCase() + ' do dzisiejszej sumy (Makro).', 7000); buzz(30); } };
+ACT_E5.shakeNo = function () { e5ShakeAnswer(false); markSaved('shake', 'W porządku, nie dodaję.', 3500); };
+ACT_E5.mkDel = function () {
+  var date = mkDate(); S.drafts.makro = {}; macroDel(date);
+  if (S.e5.macros[date]) { markSaved('macro', 'Usunięto wpis ręczny z ' + (date === todayStr() ? 'dziś' : dayFull(date)) + '. Dzień liczy się z planu.', 7000); return; } // the plan fills the day again: the Health Connect record is updated, not deleted
+  var hn = typeof hcDeleteFor === 'function' ? hcDeleteFor('nutrition', date) : ''; markSaved('macro', 'Usunięto wpis z ' + (date === todayStr() ? 'dziś' : dayFull(date)) + '.' + hn, hn ? 8000 : 6000);
+};
 
 // ====================== Profil: shortcuts ======================
 function e5ProfilLinksHtml() {
@@ -10349,6 +10795,7 @@ function rTrening() {
   var today = todayStr(), st = todayStatus(), strain = FC.dailyStrain(S.workouts, today, S.days), tb = FC.targetBand(st.scored ? st.color : null);
   var h = header('Obciążenie dnia') + '<div class="body">';
   if (S.flash && S.flash.to === 'trening') h += '<div class="note ok" role="status">' + esc(S.flash.text) + '</div>';
+  if (typeof mkShakeCardHtml === 'function') h += savedSlot('shake', 'note ok') + mkShakeCardHtml();
   h += resumeBanner() + pendingBanner();
   h += hrmaxPromptHtml(0);
   if (S.session) h += '<a href="#/' + sessionPath(S.session.type) + '" class="card tint-g"><span class="lbl">Trwa trening</span><span class="n" style="font-size:18px">' + WK_NAME[S.session.type] + ' – wróć do treningu</span></a>';
@@ -10678,7 +11125,7 @@ function rProfil() {
     hcSourceRowHtml() +
     '<div class="row" style="align-items:flex-start"><span class="dotp" style="background:#6E7A84;margin-top:7px;animation:none"></span><div class="grow"><b>intervals.icu</b><div class="xs mut">w przygotowaniu</div></div></div></div>';
   h += '<a href="#/bateria" class="card" data-bat="profil-link"><div class="row sp"><div><p class="lbl">Bateria opaski</p><span class="xs mut" data-bat="profil-verdict">' + esc(battVerdict().title) + '</span></div>' + ico('chev', 20) + '</div></a>';
-  h += hcCardHtml();
+  h += hcCardHtml() + hcWriteCardHtml();
   h += stepsSettingsHtml();
   h += e6ProfilHtml();
   h += e6bProfilHtml();
@@ -10748,11 +11195,12 @@ function curForm() { if (!S.form && S.pending) initForm(); return S.form; }
 function applyProfile(patch) {
   var p = Object.assign({ age: null, sex: null, hrMax: null, plannedWake: null }, S.profile || {}, patch);
   S.profile = FC.sanitizeProfile(p); persist('profile'); if (typeof e6SyncBedtime === 'function') e6SyncBedtime(); UI.onData();
+  if (typeof hcAfterSave === 'function') hcAfterSave(); // a changed height goes to Health Connect
 }
 function addWeight(kgRaw) {
   var w = FC.sanitizeWeight({ date: todayStr(), kg: kgRaw }); if (!w) return false;
   S.weights = S.weights.filter(function (x) { return x.date !== w.date; }).concat([w]).sort(function (a, b) { return a.date < b.date ? -1 : 1; });
-  persist('weights'); return true;
+  persist('weights'); if (typeof hcAfterSave === 'function') hcAfterSave(); return true;
 }
 function showMsg(id, text, cls) { var e = $(id); if (!e) return; e.textContent = text; e.hidden = !text; e.className = 'sm ' + (cls === 'err' ? 'err' : 'sub'); if (cls === 'ok') e.style.color = '#2CE8B5'; }
 var ACT = {
@@ -10868,7 +11316,7 @@ var ACT = {
   },
   pfResetHr: function () { S.pfDraft = null; S.pfHmTouched = false; markSaved('profile', 'Zapisano: tętno maks. wyliczone z wieku'); applyProfile({ hrMax: null, hrMaxSource: null, hrMaxDate: null }); },
   kgAdd: function () { var v = $('pfKg').value.trim(); if (!addWeight(v)) { var e = $('kgErr'); e.textContent = 'Podaj wagę w kg (20–400).'; e.hidden = false; return; } clearDraft('pfKg'); markSaved('weight', 'Zapisano ważenie: ' + nf(FC.sanitizeWeight({ date: todayStr(), kg: v }).kg, 1) + ' kg'); UI.onData(); },
-  kgDel: function (el) { S.weights = S.weights.filter(function (x) { return x.date !== el.dataset.d; }); persist('weights'); markSaved('weight', 'Usunięto ważenie z ' + ddmm(el.dataset.d) + '.' + el.dataset.d.slice(0, 4)); UI.onData(); },
+  kgDel: function (el) { S.weights = S.weights.filter(function (x) { return x.date !== el.dataset.d; }); persist('weights'); var hn = typeof hcDeleteFor === 'function' ? hcDeleteFor('weight', el.dataset.d) : ''; markSaved('weight', 'Usunięto ważenie z ' + ddmm(el.dataset.d) + '.' + el.dataset.d.slice(0, 4) + (hn ? '.' + hn : ''), hn ? 8000 : 4500); UI.onData(); },
   expAll: function () { var rt = !!($('expRoutes') && $('expRoutes').checked && !$('expRoutes').disabled); var xr = exportAll(rt); if (!xr.ok) { showMsg('bkMsg', 'Nie udało się zapisać kopii: ' + xr.err, 'err'); return; } showMsg('bkMsg', 'Zapisano w ' + xr.where + '. W pliku: ' + S.days.length + ' dni, ' + S.workouts.length + ' treningów, ' + S.weights.length + ' ważeń' + (rt ? ', z trasami GPS (' + gpsRouteCount() + ')' : (gpsRouteCount() ? '. Trasy GPS (' + gpsRouteCount() + ') pominięto – zostają tylko w telefonie' : '')) + '.', 'ok'); },
   impAll: function () { $('fileImport').click(); },
   whConnect: function () {
@@ -10956,7 +11404,7 @@ e6Start();
 e6bStart();
 hcStart();
 
-function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-27 06:20 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
+function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-27 07:59 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
 
 })();</script>
 </body>

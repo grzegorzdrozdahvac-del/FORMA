@@ -669,7 +669,7 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
         return ok()
     }
 
-    /** Result = event hcSyncResult {ok, data{stepsDaily, stepsHourly, weight, height, exercise, sleep, rhr, hrv, calDaily}, failed[]} or {ok:false, code, message}. */
+    /** Result = event hcSyncResult {ok, data{stepsDaily, stepsHourly, stepsRecs, weight, height, exercise, sleep, rhr, hrv, calDaily}, failed[]} or {ok:false, code, message}. */
     @JavascriptInterface
     fun hcSync(sinceIso: String): String {
         if (!HealthConnectManager.isAvailable(ctx)) return errCode("unavailable", "Health Connect nie jest dostępny.")
@@ -677,11 +677,19 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
         return ok()
     }
 
-    /** json {"records":[{kind: hrv|rhr|exercise|hr|sleep, cid, ver, ...}]}; result = event hcWriteResult. */
+    /** json {"records":[{kind: hrv|rhr|exercise|hr|sleep|bp|glucose|weight|height|kcal|distance|nutrition, cid, ver, ...}]}; result = event hcWriteResult. */
     @JavascriptInterface
     fun hcWrite(json: String): String {
         if (!HealthConnectManager.isAvailable(ctx)) return errCode("unavailable", "Health Connect nie jest dostępny.")
         HealthConnectManager.write(ctx, json)
+        return ok()
+    }
+
+    /** json {"records":[{kind: weight|nutrition|..., cid}]}: deletes our own records by clientRecordId; result = event hcDeleteResult. */
+    @JavascriptInterface
+    fun hcDelete(json: String): String {
+        if (!HealthConnectManager.isAvailable(ctx)) return errCode("unavailable", "Health Connect nie jest dostępny.")
+        HealthConnectManager.delete(ctx, json)
         return ok()
     }
 
