@@ -77,6 +77,10 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         const val S_WAIT_FLUSH = 3
         const val S_WAIT_ACK = 4
         const val S_WAIT_NEXT = 5
+        const val K_IDLE = 0
+        const val K_RANGE = 1
+        const val K_ACK = 2
+        const val OLD_BEFORE_UNIX = 1_640_995_200L // 2022-01-01: the stored backlog is from 2021
         const val LOG_LINES = 40
         const val NAME_PREFIX = "WHOOP"
 
@@ -174,6 +178,22 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     private var lastAckedTrim = -1L
     private var syncSummary = ""
 
+    // ---------- backlog skip + preview (no ACK) ----------
+    private var skipState = K_IDLE
+    private var skipTrim = -1L
+    private var skipAnchor = -1L
+    private var pvActive = false
+    private var pvAfterSkip = false
+    private var pvD = 0L
+    private var pvLog = 0L
+    private var pvOther = 0L
+    private var pvOld = 0L
+    private var pvGotAny = false
+    private val pvData = Range()
+    private val pvLogR = Range()
+    private val pvFirst = ArrayList<String>()
+    private val pvWatch = Runnable { previewTimeout() }
+
     // ---------- files ----------
     private var csv: FileLog? = null
     private var csvFile: File? = null
@@ -204,6 +224,9 @@ class WhoopExtDiagActivity : AppCompatActivity() {
     private lateinit var btnHistory: Button
     private lateinit var btnSync: Button
     private lateinit var btnSyncStop: Button
+    private lateinit var btnSkip: Button
+    private lateinit var btnCheck: Button
+    private lateinit var skipView: TextView
     private lateinit var btnSave: Button
     private lateinit var btnShare: Button
     private lateinit var btnArchiveRebuild: Button
@@ -388,6 +411,28 @@ class WhoopExtDiagActivity : AppCompatActivity() {
             btnSyncStop.visibility = View.GONE
         }
 
+        skipView = text("", 12f, TXT, mono = true)
+        btnSkip = button("Przeskocz zaległość (usuń stary dziennik)") { confirmSkip() }
+        btnCheck = button("Sprawdź nowe dane") { startPreview(false) }
+        if (WhoopExtProtocol.HISTORY_PULL_ENABLED) {
+            col.addView(
+                card(
+                    text("Zaległość w pamięci opaski (eksperyment)", 14f, TXT, bold = true),
+                    text(
+                        "Opaska trzyma ponad 37 tys. starych wpisów dziennika technicznego z 2021 r. (błędy układu baterii), które blokują " +
+                            "dostęp do świeżych danych. Przeskok próbuje je usunąć bez pobierania. Działanie nie jest opisane w żadnym " +
+                            "znanym źródle, więc może się nie udać. Nie da się go cofnąć.",
+                        12f, DIM
+                    ),
+                    skipView, btnSkip, btnCheck,
+                    text("Sprawdź nowe dane: jedna prośba o dane bez potwierdzania; nic nie jest usuwane. Użyj po nocy noszenia opaski.", 12f, DIM)
+                )
+            )
+        } else {
+            btnSkip.visibility = View.GONE
+            btnCheck.visibility = View.GONE
+        }
+
         archiveView = text("", 12f, TXT, mono = true)
         btnArchiveRebuild = button("Przelicz archiwum dzienne") { archiveRefresh(false) }
         btnArchiveSave = button("Zapisz archiwum w Pobranych/Forma") { archiveRefresh(true) }
@@ -435,8 +480,12 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         btnStart.isEnabled = ready && !streaming && !syncing && !waiting(0x03)
         btnStop.isEnabled = ready && streaming && !syncing && !waiting(0x03)
         btnHello.isEnabled = ready && !syncing && !waiting(WhoopExtProtocol.SafeCommand.GET_HELLO.id)
-        btnHistory.isEnabled = ready && !syncing && !waiting(WhoopExtProtocol.SafeCommand.REQUEST_HISTORY.id)
-        btnSync.isEnabled = ready && !syncing && !waiting(WhoopExtProtocol.SafeCommand.REQUEST_HISTORY.id)
+        val idleSkip = skipState == K_IDLE && !pvActive
+        val noHist = !waiting(WhoopExtProtocol.SafeCommand.REQUEST_HISTORY.id)
+        btnHistory.isEnabled = ready && !syncing && idleSkip && noHist
+        btnSync.isEnabled = ready && !syncing && idleSkip && noHist
+        btnSkip.isEnabled = ready && !syncing && idleSkip && noHist
+        btnCheck.isEnabled = ready && !syncing && idleSkip && noHist
         btnSyncStop.isEnabled = syncing
         btnSave.isEnabled = csvFile != null
         btnShare.isEnabled = savedRaw != null
@@ -790,6 +839,12 @@ class WhoopExtDiagActivity : AppCompatActivity() {
             syncSummary = "Połączenie przerwane: synchronizacja zatrzymana. Potwierdzone paczki: $batchesSession. Reszta zostaje w opasce."
             log(syncSummary)
         }
+        if (skipState != K_IDLE || pvActive) {
+            main.removeCallbacks(pvWatch)
+            skipState = K_IDLE
+            pvActive = false
+            setSkipText("Połączenie przerwane podczas przeskoku lub podglądu. Nic więcej nie wysłano.", BAD)
+        }
         pendingCmds.clear()
         ops.clear()
         opBusy = false
@@ -1027,6 +1082,15 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         cmdStatus("Brak odpowiedzi po 5 s: " + p.label, BAD)
         log("Brak odpowiedzi po 5 s na: " + p.label)
         if (p.cmdId == WhoopExtProtocol.CMD_BATCH_ACK && syncActive && syncState == S_WAIT_ACK) syncAfterAck(false)
+        if (p.cmdId == WhoopExtProtocol.SafeCommand.GET_DATA_RANGE.id && skipState == K_RANGE) {
+            skipFail("Opaska nie podała zakresu – przeskok niemożliwy (brak odpowiedzi po 5 s). Nic nie zmieniono.")
+        }
+        if (p.cmdId == WhoopExtProtocol.CMD_BATCH_ACK && skipState == K_ACK) {
+            skipFail(
+                "Brak odpowiedzi opaski na przeskok po 5 s. Niczego więcej nie wysłano i nie ponawiam. " +
+                    "Nie wiadomo, czy opaska to przyjęła: użyj „Sprawdź nowe dane”."
+            )
+        }
         updateButtons()
     }
 
@@ -1048,6 +1112,11 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         log("Odpowiedź: " + d.info)
         val c = d.cmd
         if (c == WhoopExtProtocol.CMD_BATCH_ACK && syncActive && syncState == S_WAIT_ACK) syncAfterAck(true)
+        if (c == WhoopExtProtocol.SafeCommand.GET_DATA_RANGE.id && skipState == K_RANGE) onRangeResponse(d)
+        if (c == WhoopExtProtocol.CMD_BATCH_ACK && skipState == K_ACK) onSkipAckResponse(d)
+        if (c == WhoopExtProtocol.SafeCommand.REQUEST_HISTORY.id && pvActive && st != 2) {
+            previewFinish("Opaska odrzuciła prośbę o dane (status $st). Nic nie zmieniono.", false)
+        }
         if (c == WhoopExtProtocol.SafeCommand.REQUEST_HISTORY.id && syncActive && st != 2) {
             finishSync("Opaska odrzuciła prośbę o dane (status $st). Nic nie zmieniono.", false)
         }
@@ -1114,6 +1183,7 @@ class WhoopExtDiagActivity : AppCompatActivity() {
             log("Pierwszy pakiet typu: " + d.kind + " (typ 0x" + Integer.toHexString(payload[0].toInt() and 0xFF) + ", " + payload.size + " B) " + d.info)
         }
         val now = System.currentTimeMillis()
+        if (pvActive) previewNote(d, payload)
         when (d.kind) {
             "żywe" -> {
                 if (d.hr != null) { hr = d.hr; hrSource = " (na żywo)" }
@@ -1392,6 +1462,203 @@ class WhoopExtDiagActivity : AppCompatActivity() {
         setStatus(msg, if (ok) GOOD else BAD)
         updateButtons()
         archiveRefresh(true)
+    }
+
+    // =====================================================================================================
+    // backlog skip: GET_DATA_RANGE (0x22, read-only) -> check the numbers against our own last ACK -> ONE batch ACK (0x17) whose trim is the
+    // band's newest record index -> wait for its 0x24 status -> ONE 0x16 preview WITHOUT ACK. No retries, no guessed values, never 0x19.
+    // =====================================================================================================
+    private fun setSkipText(msg: String, color: Int = TXT) {
+        if (destroyed) return
+        skipView.text = msg
+        skipView.setTextColor(color)
+        log(msg)
+    }
+
+    private fun confirmSkip() {
+        if (!ready || syncActive || skipState != K_IDLE || pvActive) return
+        AlertDialog.Builder(this)
+            .setTitle("Przeskoczyć zaległość?")
+            .setMessage(
+                "Forma poprosi opaskę o zakres zapisanych danych, a potem potwierdzi odbiór wszystkiego, co w niej leży, BEZ pobierania. " +
+                    "To jest to samo potwierdzenie, które normalnie zwalnia miejsce po pobraniu paczki.\n\n" +
+                    "Stare wpisy (dziennik techniczny z 2021 r.) zostaną usunięte z opaski na stałe. Nie da się ich potem pobrać ani cofnąć. " +
+                    "To eksperyment: nie mamy pewności, że opaska zareaguje tak, jak oczekujemy."
+            )
+            .setPositiveButton("Dalej") { _, _ -> confirmSkipSecond() }
+            .setNegativeButton("Anuluj", null)
+            .show()
+    }
+
+    private fun confirmSkipSecond() {
+        AlertDialog.Builder(this)
+            .setTitle("Ostatnie potwierdzenie")
+            .setMessage(
+                "Naprawdę usunąć stary dziennik z opaski na stałe, bez pobierania? Tej operacji nie można cofnąć. " +
+                    "Jeśli opaska poda niezrozumiały zakres, Forma niczego nie wyśle."
+            )
+            .setPositiveButton("Tak, usuń na stałe") { _, _ -> beginSkip() }
+            .setNegativeButton("Nie, anuluj", null)
+            .show()
+    }
+
+    private fun beginSkip() {
+        if (!ready || syncActive || skipState != K_IDLE || pvActive) return
+        skipAnchor = sp.getLong("last_trim", -1L)
+        skipTrim = -1L
+        skipState = K_RANGE
+        setSkipText("Pytam opaskę o zakres danych (polecenie tylko do odczytu)…", WARN)
+        sendSafe(WhoopExtProtocol.SafeCommand.GET_DATA_RANGE, true)
+        updateButtons()
+    }
+
+    private fun skipFail(msg: String) {
+        skipState = K_IDLE
+        skipTrim = -1L
+        setSkipText(msg, BAD)
+        updateButtons()
+    }
+
+    private fun onRangeResponse(d: WhoopExtProtocol.Decoded) {
+        val raw = d.raw
+        if (raw == null) {
+            skipFail("Opaska nie podała zakresu – przeskok niemożliwy (pusta odpowiedź). Nic nie zmieniono.")
+            return
+        }
+        val res = WhoopExtProtocol.parseDataRange(raw, skipAnchor)
+        csvAppend("NOTE", "-", "zakres status=" + d.status + " ostatnie_potwierdzenie=" + skipAnchor + " liczby: " + res.u32s)
+        val r = res.range
+        if (r == null) {
+            skipFail("Opaska nie podała zakresu – przeskok niemożliwy (" + res.reason + "). Odpowiedź zapisano w pliku CSV. Nic nie zmieniono.")
+            return
+        }
+        csvAppend("NOTE", "-", "zakres rozpoznany: ostatnio_zsynchronizowane=" + r.lastSynced + " najnowszy=" + r.newest + " przesuniecie=" + r.offset)
+        if (r.newest - r.lastSynced < 24L) {
+            skipFail("Zakres: ostatnio potwierdzone " + r.lastSynced + ", najnowszy " + r.newest + ". Nie ma czego przeskakiwać. Nic nie wysłano.")
+            return
+        }
+        setSkipText(
+            "Zakres z opaski: ostatnio potwierdzone " + r.lastSynced + ", najnowszy " + r.newest +
+                " (zaległość " + (r.newest - r.lastSynced) + "). Zapisuję plik i wysyłam jedno potwierdzenie…", WARN
+        )
+        val rawLog = csv
+        if (rawLog == null) {
+            skipFail("Brak pliku na surowe pakiety. Nic nie wysłano.")
+            return
+        }
+        val newest = r.newest
+        rawLog.syncDisk { ok ->
+            if (!ok) skipFail("Zapis pliku nie powiódł się. Nic nie wysłano.") else sendSkipAck(newest)
+        }
+    }
+
+    /** The only place that builds the skip ACK. Runs once, after the range check and after the CSV was flushed and fsynced. */
+    private fun sendSkipAck(trim: Long) {
+        val g = gatt
+        val ch = cmdChar
+        if (skipState != K_RANGE || g == null || ch == null || !ready) return
+        val s = nextSeq()
+        val bytes = WhoopExtProtocol.buildSkipAck(trim, s)
+        if (bytes == null) {
+            skipFail("Liczba z opaski poza dozwolonym zakresem. Nic nie wysłano.")
+            return
+        }
+        skipTrim = trim
+        skipState = K_ACK
+        csvAppend("TX", WhoopExtProtocol.CH_CMD_TO_STRAP, WhoopExtProtocol.hex(bytes))
+        trackCmd("potwierdzenie z przeskokiem " + trim, WhoopExtProtocol.CMD_BATCH_ACK, s)
+        enqueue { writeRaw(g, ch, bytes) }
+        updateButtons()
+    }
+
+    private fun onSkipAckResponse(d: WhoopExtProtocol.Decoded) {
+        val st = d.status
+        if (st == 1) {
+            sp.edit().putLong("last_trim", skipTrim).apply()
+            lastAckedTrim = skipTrim
+            skipState = K_IDLE
+            setSkipText("Opaska przyjęła potwierdzenie z przeskokiem (status 1). Sprawdzam, co teraz jest w pamięci (bez potwierdzania)…", GOOD)
+            startPreview(true)
+        } else {
+            skipFail("Opaska odpowiedziała na przeskok statusem $st (oczekiwano 1). Zatrzymano; niczego więcej nie wysłano i nie ponawiam.")
+        }
+    }
+
+    // ---------- preview: one 0x16 without ACK ----------
+    private fun startPreview(afterSkip: Boolean) {
+        if (!ready || syncActive || pvActive || (skipState != K_IDLE)) return
+        pvActive = true
+        pvAfterSkip = afterSkip
+        pvD = 0L; pvLog = 0L; pvOther = 0L; pvOld = 0L
+        pvGotAny = false
+        pvData.reset(); pvLogR.reset(); pvFirst.clear()
+        if (!afterSkip) setSkipText("Pytam o dane z pamięci (bez potwierdzania)…", WARN)
+        sendSafe(WhoopExtProtocol.SafeCommand.REQUEST_HISTORY, true)
+        main.removeCallbacks(pvWatch)
+        main.postDelayed(pvWatch, 10_000L)
+        updateButtons()
+    }
+
+    private fun previewNote(d: WhoopExtProtocol.Decoded, payload: ByteArray) {
+        val k = d.kind
+        if (k == "żywe" || k == "odpowiedź") return
+        pvGotAny = true
+        main.removeCallbacks(pvWatch)
+        main.postDelayed(pvWatch, 8_000L)
+        val t = d.epoch
+        val type = "0x" + String.format(Locale.US, "%02X", payload[0].toInt() and 0xFF)
+        when (k) {
+            "pamięć" -> {
+                pvD++
+                if (t != null) { pvData.add(t); if (t in 1L until OLD_BEFORE_UNIX && t >= WhoopExtProtocol.UNIX_MIN) pvOld++ }
+            }
+            "dziennik" -> {
+                pvLog++
+                if (t != null) { pvLogR.add(t); if (t in WhoopExtProtocol.UNIX_MIN until OLD_BEFORE_UNIX) pvOld++ }
+            }
+            "synchronizacja" -> {
+                if (d.metaSub == 2) {
+                    previewFinish(null, true)
+                    return
+                }
+            }
+            else -> pvOther++
+        }
+        if (pvFirst.size < 6) pvFirst.add(type + " " + k + (if (t != null) " " + fmtTs(t) else ""))
+    }
+
+    private fun previewTimeout() {
+        if (!pvActive) return
+        previewFinish(null, true)
+    }
+
+    private fun previewFinish(msg: String?, ok: Boolean) {
+        if (!pvActive) return
+        pvActive = false
+        main.removeCallbacks(pvWatch)
+        val sb = StringBuilder()
+        if (msg != null) {
+            sb.append(msg)
+        } else {
+            sb.append("Podgląd (bez potwierdzania): dane czujników 0x2F: ").append(pvD).append(", dziennik 0x32: ").append(pvLog)
+                .append(", inne: ").append(pvOther).append('\n')
+            if (pvData.has()) sb.append("Czas 0x2F: ").append(fmtTs(pvData.min)).append(" – ").append(fmtTs(pvData.max)).append('\n')
+            if (pvLogR.has()) sb.append("Czas 0x32: ").append(fmtTs(pvLogR.min)).append(" – ").append(fmtTs(pvLogR.max)).append('\n')
+            if (pvFirst.isNotEmpty()) sb.append("Pierwsze rekordy: ").append(pvFirst.joinToString("; ")).append('\n')
+            if (!pvGotAny) {
+                sb.append("Opaska nie przysłała żadnych rekordów: pamięć jest pusta albo opaska czeka na nowe dane.")
+            } else if (pvD > 0) {
+                sb.append("Są dane czujników 0x2F: to coś więcej niż stary dziennik.")
+            } else if (pvOld > 0) {
+                sb.append("Nadal widać stare wpisy z 2021 r.")
+                if (pvAfterSkip) sb.append(" Przeskok nie zadziałał (albo opaska odtworzyła je).")
+            } else {
+                sb.append("Brak danych czujników 0x2F; widać tylko wpisy dziennika.")
+            }
+        }
+        csvAppend("NOTE", "-", "podglad 0x2F=" + pvD + " 0x32=" + pvLog + " inne=" + pvOther + " stare2021=" + pvOld)
+        setSkipText(sb.toString(), if (ok) TXT else BAD)
+        updateButtons()
     }
 
     // =====================================================================================================

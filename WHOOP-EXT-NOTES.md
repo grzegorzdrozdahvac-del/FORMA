@@ -65,7 +65,7 @@ Wymuszone typem: `WhoopExtProtocol.SafeCommand` to enum z 4 pozycjami plus jedno
 |---|---|---|---|
 | Start odczytu na żywo | 0x03 / 0x01 | SAFE-READ (przełącznik strumienia) | Odpowiedź 0x24, status 2; potem pakiety 0x28 co ok. 1 s |
 | Stop | 0x03 / 0x00 | SAFE-READ | Odpowiedź 0x24, status 2 |
-| Informacje o opasce (HELLO) | 0x23 / 0x00 | SAFE-READ (nowe, niesprawdzone na opasce) | Jeszcze nieprzetestowane. Zastępuje baterię 0x1A |
+| Informacje o opasce (HELLO) | 0x23 / 0x00 | SAFE-READ | Sprawdzone na opasce: BRAK odpowiedzi (3 razy w 3 sesjach). Przycisk zostaje, ale nie liczymy na niego |
 | Prośba o dane z pamięci | 0x16 / 0x00 | SAFE-READ (bez ACK nic się nie zwalnia) | Odpowiedź 0x24 status 2 (dane `0b 00 00`), potem 0x31, 0x32, 0x31 koniec paczki. Bez ACK opaska powtarza tę samą paczkę |
 | Potwierdzenie paczki (ACK) | 0x17 / patrz 8 | RYZYKOWNE, tylko z bramki synchronizacji | Zgoda użytkownika 2026-11-27: zwalnia pamięć opaski. Budowane wyłącznie po zapisie i fsync paczki |
 | ~~Odczyt baterii~~ | 0x1A | usunięte | Brak odpowiedzi w 9 próbach, więc ID nie działa na tej opasce; inne źródła podają to samo ID (patrz 9) |
@@ -159,3 +159,32 @@ Plik jest przeliczany w całości z JSONL (przycisk „Przelicz archiwum dzienne
 Źródła porównane: post/OpenStrap (czas `[7..10]`, HR `[17]`), whoopsie (R10: czas ramka[11..14] czyli `[7..10]`, HR ramka[21] czyli `[17]`), zgodne w trzech miejscach. Temperatura wg whoopsie i AStrasler NIE leży w rekordzie 0x2F, tylko w zdarzeniu 0x11 (temperatura) i 0x03 (bateria); OpenStrap podaje bajt 70 / 4. Pole temperatury z rekordu pozostaje więc EMPIRYCZNE i może być puste; wartość ze zdarzenia jest osobnym źródłem. Opaska użytkownika nie zwróciła jeszcze żadnego rekordu 0x2F, więc offsety czujników nadal nie są potwierdzone na jej oprogramowaniu.
 
 Dodatkowe źródła tej aktualizacji: AStrasler/whoop4-ble (MIT), zordhalo/whoopsie-protocol (bez licencji w repo; tylko fakty), OpenStrap/protocol PR 63 (battery: gen4 u16 LE deci-procent), ZHOOP (zulusierra.co: opis blokowanych poleceń 25, 29, 32, 36-38, 45, 99). Nie otwarto: ujix/noop docs (PROTOCOL_WHOOP4.md, PROTOCOL_SENSORS.md), rusheelraj.com (robots.txt).
+
+## 12. Przeskok zaległości (eksperyment) i "Sprawdź nowe dane"
+
+Stan wyjściowy (trzeci plik CSV, ok. 1 h synchronizacji): 245 paczek potwierdzonych (status 1), 37 136 rekordów, wszystkie to dziennik 0x32 (99,5% to błędy LC709203), 0 rekordów 0x2F, czas wpisów 2021-12-25 03:59 – 18:48, numer paczki rośnie o 0x18 (24) na paczkę (0x014598 -> 0x01F988). Pierwsze 20 potwierdzeń szło z zerowym ogonem (00000000), kolejne z ogonem opaski (38000000); oba warianty dają status 1.
+
+### Polecenie zakresu: GET_DATA_RANGE
+- Kod 0x22, jeden bajt argumentu 0x00 (goose PR 26: Gen4 wymaga argumentu). Źródła: zordhalo/whoopsie-protocol ("zakres zapisanych danych", przykład ramki), AStrasler/whoop4-ble ("zwraca bieżące przesunięcie trim i zakres paczek"), b-nnett/goose PR 26. Wszystkie trzy opisują je jako odczyt. Nie ma w nich opisanego układu odpowiedzi. Goose wspomina tylko, że "last_synced" jest w okolicy payload[10..14] i że istnieje druga wartość (page_current), np. 34274 i 61458 u nich.
+- Ramka dla seq 0x02: aa0800a823022200824df537 (zgodna z przykładem whoopsie, CRC przeliczone naszym kodem). Seq 0x41: aa0800a8234122001b7e2945.
+- Pewność: kod i ramka wysoka; układ odpowiedzi niska; zachowanie opaski po potwierdzeniu "z wyprzedzeniem" nieznane (żadne źródło go nie opisuje; 0x21 SET_READ_POINTER i 0x19 FORCE_TRIM są wyłączone na stałe).
+- Odpowiedź nie jest czytana wg założonego układu. Aplikacja szuka w danych dwóch sąsiednich liczb u32 LE: jednej równej naszemu ostatniemu potwierdzonemu numerowi (do +48) i drugiej większej (< 0x10000000). Większa = najnowszy rekord. Gdy nie ma dokładnie jednej takiej pary, przeskok się nie odbywa i pokazuje się "Opaska nie podała zakresu – przeskok niemożliwy". Wszystkie liczby z odpowiedzi trafiają do CSV (wiersze NOTE).
+
+### Przebieg przycisku "Przeskocz zaległość (usuń stary dziennik)"
+1. Dwa okna z ostrzeżeniem o nieodwracalności.
+2. 0x22 (odczyt zakresu). Brak odpowiedzi lub nierozpoznany układ: stop, nic nie zmieniono.
+3. Zakres do dziennika i CSV (fsync), potem JEDNO potwierdzenie 0x17 z numerem = najnowszy z zakresu, zerowy ogon: payload 23 seq 17 01 <trim u32 LE> 00000000. Przykład (trim 129416, seq 0x50): aa1000572350170188f901000000000051aea904.
+4. Czeka na 0x24 dla 0x17. Status inny niż 1 lub brak odpowiedzi po 5 s: stop, bez ponawiania, bez zgadywania.
+5. Status 1: jedna prośba 0x16 BEZ potwierdzenia ("podgląd"): liczba rekordów 0x2F/0x32, zakresy czasu, pierwsze rekordy. Wpisy sprzed 2022 r. po przeskoku oznaczają, że przeskok nie zadziałał.
+- Nigdy nie wysyłamy 0x19, 0x21 ani żadnego polecenia spoza listy. Walidacja kodu: sekcja 7 plus testy ramek 0x22 i 0x17 z dowolnym numerem (trim poza 1..0x0FFFFFFF jest odrzucany).
+
+### "Sprawdź nowe dane"
+Jedno 0x16 bez potwierdzenia, zlicza 0x2F i 0x32 i pokazuje najnowsze czasy. Bezpieczne, można powtarzać (dane zostają w opasce).
+
+### Kroki dla użytkownika
+1. Połącz z opaską (Forma zwolni własne połączenie), poczekaj na "gotowe".
+2. Dół ekranu: "Przeskocz zaległość (usuń stary dziennik)", potwierdź dwa okna.
+3. Przeczytaj wynik w ramce. Jeśli "przeskok niemożliwy" lub status inny niż 1, nic się nie stało, wyślij plik CSV.
+4. Noś opaskę noc, rano "Sprawdź nowe dane". Jeśli są dane 0x2F: "Synchronizuj pamięć opaski".
+5. Odeślij surowy plik CSV (zawiera zakres z opaski w wierszach NOTE).
+

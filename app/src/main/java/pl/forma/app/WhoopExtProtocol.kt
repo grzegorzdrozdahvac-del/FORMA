@@ -70,6 +70,12 @@ object WhoopExtProtocol {
          * Replaces the battery command 0x1A, which the user's band never answered (9 tries).
          */
         GET_HELLO(0x23, 0x00, "odczyt informacji o opasce (HELLO)"),
+        /**
+         * 0x22 value 0: GET_DATA_RANGE, "query stored data range / returns current trim offset and batch range" (zordhalo/whoopsie-protocol,
+         * AStrasler/whoop4-ble, b-nnett/goose PR 26: gen4 needs one 0x00 argument byte). Read-only per all three. Request frame example from
+         * whoopsie, seq 2: aa0800a823022200824df537 (CRC verified by our own code). The reply layout is NOT documented: see parseDataRange().
+         */
+        GET_DATA_RANGE(0x22, 0x00, "odczyt zakresu danych w pamięci"),
         /** 0x16 value 0: ask the band to send its stored records (SEND_HISTORICAL_DATA). Answered by 0x24 (status 2), then 0x31 / 0x2F / 0x32 packets. */
         REQUEST_HISTORY(0x16, 0x00, "prośba o dane z pamięci")
     }
@@ -129,6 +135,57 @@ object WhoopExtProtocol {
             for (i in 0 until 4) payload[8 + i] = end.tail[4 + i]
         }
         return frame(payload)
+    }
+
+    // ---------- skip of the stored backlog ----------
+    /**
+     * ACK for a trim value that did not come from a batch-end packet (used once, to fast-forward over an old backlog).
+     * Same 20-byte frame as buildBatchAck with zero trailing bytes (the zero-tail form was accepted by the band 245+ times, status 1).
+     * Refuses a trim outside 1..0x0FFFFFFF.
+     */
+    fun buildSkipAck(trim: Long, seq: Int): ByteArray? {
+        if (trim < 1L || trim > 0x0FFFFFFFL) return null
+        return buildBatchAck(BatchEnd(0, 0L, trim, ByteArray(8)), seq, false)
+    }
+
+    class DataRange(val lastSynced: Long, val newest: Long, val offset: Int)
+
+    /** reason is empty on success. u32s lists every little-endian u32 of the reply data for the log / CSV. */
+    class RangeResult(val range: DataRange?, val reason: String, val u32s: String)
+
+    /**
+     * GET_DATA_RANGE reply (type 0x24, cmd 0x22): [1]=counter [2]=0x22 [3]=seq echo [4]=status [5..]=data. The layout of the data is NOT
+     * documented anywhere we could read (goose PR 26 only says "last_synced" sits near payload[10..14] and a "page_current" value exists,
+     * e.g. 34274 and 61458 on their band). So the layout is identified from the band's own numbers instead of being assumed:
+     * we look for an adjacent pair of u32 values (a, b) where ONE equals our last acknowledged trim (anchor .. anchor + 48, the band's
+     * "last synced" pointer) and the OTHER is larger and below 0x10000000: that larger one is the newest record index.
+     * Success only when exactly one such pair (one distinct newest value) exists; otherwise the caller must not skip.
+     */
+    fun parseDataRange(resp: ByteArray, anchor: Long): RangeResult {
+        return try {
+            val sb = StringBuilder()
+            var o = 5
+            while (o + 4 <= resp.size) {
+                sb.append('[').append(o).append("]=").append(u32le(resp, o)).append(' ')
+                o += 1
+            }
+            if (anchor < 0L) return RangeResult(null, "brak punktu odniesienia (nie znamy ostatniego potwierdzonego numeru paczki)", sb.toString())
+            val found = ArrayList<DataRange>()
+            var i = 5
+            while (i + 8 <= resp.size) {
+                val a = u32le(resp, i)
+                val b = u32le(resp, i + 4)
+                if (a >= anchor && a <= anchor + 48L && b > a && b < 0x10000000L) found.add(DataRange(a, b, i))
+                if (b >= anchor && b <= anchor + 48L && a > b && a < 0x10000000L) found.add(DataRange(b, a, i))
+                i += 1
+            }
+            if (found.isEmpty()) return RangeResult(null, "w odpowiedzi nie ma pary liczb pasującej do ostatniego potwierdzenia ($anchor)", sb.toString())
+            var newest = found[0].newest
+            for (r in found) if (r.newest != newest) return RangeResult(null, "odpowiedź niejednoznaczna", sb.toString())
+            RangeResult(found[0], "", sb.toString())
+        } catch (t: Throwable) {
+            RangeResult(null, "błąd analizy odpowiedzi", "")
+        }
     }
 
     // ---------- band clock -> phone clock ----------
@@ -305,6 +362,7 @@ object WhoopExtProtocol {
         val text: String? = null,
         val recCounter: Long? = null,
         val eventId: Int? = null,
+        val raw: ByteArray? = null,
         val info: String = ""
     )
 
@@ -457,7 +515,7 @@ object WhoopExtProtocol {
             }
             info += "; HELLO " + p.size + " B, kandydaci bateria u32/10:" + cands
         }
-        return Decoded("odpowiedź", cmd = cmd, seqEcho = echo, status = st, info = info)
+        return Decoded("odpowiedź", cmd = cmd, seqEcho = echo, status = st, raw = p.copyOf(), info = info)
     }
 
     /**
