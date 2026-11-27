@@ -134,4 +134,30 @@ object Prefs {
     fun clearBed(ctx: Context) {
         sp(ctx).edit().remove("bed_at").apply()
     }
+
+    // ---------- habit prompts (Etap 6b): plan from the web app, answers from the notification buttons ----------
+    fun habitPlan(ctx: Context): String = sp(ctx).getString("habit_plan", "[]") ?: "[]"
+    fun setHabitPlan(ctx: Context, json: String) { sp(ctx).edit().putString("habit_plan", json).apply() }
+    fun habitFired(ctx: Context): String = sp(ctx).getString("habit_fired", "") ?: ""
+    fun setHabitFired(ctx: Context, v: String) { sp(ctx).edit().putString("habit_fired", v).apply() }
+
+    @Synchronized
+    fun addHabitAnswer(ctx: Context, act: String, date: String, ans: String) {
+        val arr = try { org.json.JSONArray(sp(ctx).getString("habit_answers", "[]")) } catch (e: Exception) { org.json.JSONArray() }
+        val o = org.json.JSONObject()
+        o.put("act", act)
+        o.put("date", date)
+        o.put("ans", ans)
+        o.put("at", System.currentTimeMillis())
+        arr.put(o)
+        sp(ctx).edit().putString("habit_answers", arr.toString()).apply()
+    }
+
+    /** Returns the queued answers and clears the queue. */
+    @Synchronized
+    fun takeHabitAnswers(ctx: Context): String {
+        val v = sp(ctx).getString("habit_answers", "[]") ?: "[]"
+        sp(ctx).edit().remove("habit_answers").apply()
+        return v
+    }
 }

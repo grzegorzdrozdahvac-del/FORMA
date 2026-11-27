@@ -102,6 +102,7 @@ class StepAlarmReceiver : BroadcastReceiver() {
             val judged = StepCounter.hourStart(now - 10 * 60_000L)
             val got = StepCounter.sampleOnce(ctx, now - 10 * 60_000L, 4_000L)
             StepCounter.compact(ctx)
+            StepCounter.compactMinutes(ctx)
             if (got || StepCounter.currentTotal(ctx) >= 0L) {
                 val last = StepCounter.stepsInHour(ctx, judged)
                 if (Nudge.due(ctx, now, last)) Nudge.fire(ctx, now)

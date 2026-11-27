@@ -18,6 +18,7 @@ object Notifications {
     const val ALERT_ID = 4004
     const val REMINDER_ID = 4005
     const val BEDTIME_ID = 4006
+    const val HABIT_ID = 4007
 
     fun ensureChannels(ctx: Context) {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -112,6 +113,39 @@ object Notifications {
             val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.notify(id, n)
         } catch (e: Exception) { /* notifications may be blocked */ }
+    }
+
+    /** "Zwykle o tej porze siłownia – byłeś?" with the actions "Tak, zapisz" and "Nie" (answers go to Prefs through HabitReceiver). */
+    fun habit(ctx: Context, act: String, date: String, text: String) {
+        ensureChannels(ctx)
+        val yes = Intent(ctx, HabitReceiver::class.java).setAction(HabitReceiver.ACTION_YES)
+            .putExtra(HabitReceiver.X_ACT, act).putExtra(HabitReceiver.X_DATE, date)
+        val no = Intent(ctx, HabitReceiver::class.java).setAction(HabitReceiver.ACTION_NO)
+            .putExtra(HabitReceiver.X_ACT, act).putExtra(HabitReceiver.X_DATE, date)
+        val rc = 70 + (act + date).hashCode() % 1000
+        val yesPi = PendingIntent.getBroadcast(ctx, rc * 2, yes, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val noPi = PendingIntent.getBroadcast(ctx, rc * 2 + 1, no, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = NotificationCompat.Builder(ctx, CH_NUDGE)
+            .setSmallIcon(R.drawable.ic_stat_forma)
+            .setContentTitle("Forma")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .setContentIntent(openApp(ctx, 6, "#/dzis"))
+            .addAction(0, "Tak, zapisz", yesPi)
+            .addAction(0, "Nie", noPi)
+            .build()
+        try {
+            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(HABIT_ID, n)
+        } catch (e: Exception) { /* notifications may be blocked */ }
+    }
+
+    fun cancelHabit(ctx: Context) {
+        try {
+            (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(HABIT_ID)
+        } catch (e: Exception) { /* ignore */ }
     }
 
     /** "Godzina bez ruchu" with the actions "Za 30 min" and "OK". */

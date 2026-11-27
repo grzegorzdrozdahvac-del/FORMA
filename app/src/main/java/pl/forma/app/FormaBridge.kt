@@ -1,18 +1,22 @@
 package pl.forma.app
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.MediaStore
 import android.provider.Settings
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -53,6 +57,80 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
             }
         } catch (e: Exception) {
             // ignore: haptics are optional
+        }
+    }
+
+    // ---------- saving files (backup, CSV): the WebView has no DownloadListener, so a Blob link does nothing here ----------
+    /** Writes a text file to Pobrane/Forma (MediaStore, Android 10+) or the app's Downloads folder (older). Returns { ok, where, uri } or { ok:false, error }. */
+    @JavascriptInterface
+    fun saveFile(name: String, text: String, mime: String): String {
+        return try {
+            val safe: String = name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80)
+            if (safe.isEmpty()) return err("Nieprawidłowa nazwa pliku.")
+            val bytes: ByteArray = text.toByteArray(Charsets.UTF_8)
+            val type: String = mime.substringBefore(";").ifEmpty { "application/octet-stream" }
+            val o = JSONObject()
+            if (Build.VERSION.SDK_INT >= 29) {
+                val uri: Uri = saveToDownloads(safe, type, bytes) ?: return err("Nie udało się zapisać pliku w Pobranych.")
+                o.put("ok", true)
+                o.put("where", "Pobrane/Forma/" + safe)
+                o.put("uri", uri.toString())
+            } else {
+                val dir: File = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return err("Brak miejsca do zapisu pliku.")
+                dir.mkdirs()
+                val f = File(dir, safe)
+                f.writeBytes(bytes)
+                o.put("ok", true)
+                o.put("where", f.absolutePath)
+            }
+            o.toString()
+        } catch (e: Exception) {
+            err("Zapis pliku nieudany: " + e.javaClass.simpleName)
+        }
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private fun saveToDownloads(name: String, type: String, bytes: ByteArray): Uri? {
+        val values = ContentValues()
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+        values.put(MediaStore.MediaColumns.MIME_TYPE, type)
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Forma")
+        values.put(MediaStore.MediaColumns.IS_PENDING, 1)
+        val resolver = ctx.contentResolver
+        val uri: Uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+        val out = resolver.openOutputStream(uri)
+        if (out == null) {
+            resolver.delete(uri, null, null)
+            return null
+        }
+        out.use { it.write(bytes) }
+        val done = ContentValues()
+        done.put(MediaStore.MediaColumns.IS_PENDING, 0)
+        resolver.update(uri, done, null, null)
+        return uri
+    }
+
+    /** Share sheet for a file saved by saveFile (content:// URI only). */
+    @JavascriptInterface
+    fun shareFile(uri: String, mime: String): String {
+        return try {
+            val u: Uri = Uri.parse(uri)
+            if (u.scheme != "content") return err("Nieprawidłowy plik.")
+            val type: String = mime.substringBefore(";").ifEmpty { "*/*" }
+            activity.runOnUiThread {
+                try {
+                    val i = Intent(Intent.ACTION_SEND)
+                    i.type = type
+                    i.putExtra(Intent.EXTRA_STREAM, u)
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    activity.startActivity(Intent.createChooser(i, "Udostępnij plik"))
+                } catch (e: Exception) {
+                    // no share target: the file is saved anyway
+                }
+            }
+            ok()
+        } catch (e: Exception) {
+            err("Nie udało się otworzyć udostępniania.")
         }
     }
 
@@ -272,6 +350,27 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
     }
 
     /** { available, permission, tracking, hourly:[{t,steps}], daily:[{date,steps}] } from the local day fromIso. */
+    /** { minutes:[[epochMinuteStartMs, steps], ...] } since the local day fromIso (for walk detection). */
+    @JavascriptInterface
+    fun getStepMinutes(fromIso: String): String = StepCounter.minutesJson(ctx, fromIso).toString()
+
+    /** json: [{act,date,at,text}] - prompts the web app wants as notifications; arms the next one. */
+    @JavascriptInterface
+    fun setHabitPlan(json: String): String {
+        return try {
+            JSONArray(json) // validates
+            Prefs.setHabitPlan(ctx, json)
+            HabitReceiver.armNext(ctx)
+            "{\"ok\":true}"
+        } catch (e: Exception) {
+            err("Nieprawidłowy plan podpowiedzi.")
+        }
+    }
+
+    /** Answers given on the notification buttons since the last call: [{act,date,ans,at}]; the queue is cleared. */
+    @JavascriptInterface
+    fun getHabitAnswers(): String = Prefs.takeHabitAnswers(ctx)
+
     @JavascriptInterface
     fun getSteps(fromIso: String): String = StepCounter.toJson(ctx, fromIso).toString()
 

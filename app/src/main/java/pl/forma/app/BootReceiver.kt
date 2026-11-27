@@ -24,6 +24,7 @@ class BootReceiver : BroadcastReceiver() {
                 try { StepAlarmReceiver.applySettings(ctx) } catch (e: Exception) { /* keep going */ }
                 try { ReminderReceiver.rearm(ctx) } catch (e: Exception) { /* keep going */ }
                 try { BedtimeReceiver.rearm(ctx) } catch (e: Exception) { /* keep going */ }
+                try { HabitReceiver.armNext(ctx) } catch (e: Exception) { /* keep going */ }
                 try { handleNight(ctx, action == Intent.ACTION_BOOT_COMPLETED) } catch (e: Exception) { /* keep going */ }
             } finally {
                 pending?.finish()

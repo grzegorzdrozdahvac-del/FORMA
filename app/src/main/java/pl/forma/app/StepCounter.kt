@@ -10,6 +10,7 @@ import android.hardware.SensorManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -29,6 +30,8 @@ import java.util.concurrent.TimeUnit
  */
 object StepCounter {
     private const val FILE = "steps.csv"
+    private const val FILE_MIN = "steps_min.csv"
+    private const val MIN_MS = 60_000L
     private const val FLUSH_MS = 5 * 60_000L
     private const val HOUR_MS = 3_600_000L
 
@@ -38,13 +41,17 @@ object StepCounter {
     private var pendHour = 0L
     private var pendSteps = 0L
     private var lastFlush = 0L
+    private val minBuf = TreeMap<Long, Long>() // epoch minute start -> steps, written to steps_min.csv on flush
 
     private val listener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent?) {
             val e = event ?: return
             val c = appCtx ?: return
             if (e.values.isEmpty()) return
-            onTotal(c, e.values[0].toLong(), System.currentTimeMillis())
+            // the sensor batches events: the event's own timestamp gives the real minute
+            val now = System.currentTimeMillis()
+            val at = now - (SystemClock.elapsedRealtimeNanos() - e.timestamp) / 1_000_000L
+            onTotal(c, e.values[0].toLong(), if (at in (now - 6L * HOUR_MS)..now) at else now, true)
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -93,7 +100,7 @@ object StepCounter {
     fun flush(ctx: Context) { flushLocked(ctx.applicationContext) }
 
     @Synchronized
-    private fun onTotal(ctx: Context, total: Long, atMs: Long) {
+    private fun onTotal(ctx: Context, total: Long, atMs: Long, minutes: Boolean) {
         if (lastTotal < 0L) lastTotal = Prefs.stepsLastTotal(ctx)
         if (lastTotal < 0L) { // first reading ever: only a baseline
             lastTotal = total
@@ -106,6 +113,7 @@ object StepCounter {
         if (pendSteps > 0L && hour != pendHour) flushLocked(ctx) // persists the previous total
         lastTotal = total
         if (delta <= 0L) return
+        if (minutes) { val m = atMs - atMs % MIN_MS; minBuf[m] = (minBuf[m] ?: 0L) + delta }
         pendHour = hour
         pendSteps += delta
         if (atMs - lastFlush >= FLUSH_MS) flushLocked(ctx)
@@ -116,6 +124,12 @@ object StepCounter {
             if (pendSteps > 0L) {
                 File(ctx.filesDir, FILE).appendText(pendHour.toString() + "," + pendSteps + "\n")
                 pendSteps = 0L
+            }
+            if (minBuf.isNotEmpty()) {
+                val sb = StringBuilder()
+                for ((t, n) in minBuf) sb.append(t).append(',').append(n).append('\n')
+                File(ctx.filesDir, FILE_MIN).appendText(sb.toString())
+                minBuf.clear()
             }
             lastFlush = System.currentTimeMillis()
             if (lastTotal >= 0L) Prefs.setStepsLastTotal(ctx, lastTotal)
@@ -137,7 +151,7 @@ object StepCounter {
                 val e = event ?: return
                 if (got || e.values.isEmpty()) return
                 got = true
-                onTotal(app, e.values[0].toLong(), atMs)
+                onTotal(app, e.values[0].toLong(), atMs, false) // atMs is only the hour bucket here, not a real time
                 latch.countDown()
             }
 
@@ -185,6 +199,65 @@ object StepCounter {
 
     /** Steps recorded in the given local hour. */
     fun stepsInHour(ctx: Context, hourStartMs: Long): Long = readHourly(ctx, hourStartMs)[hourStartMs] ?: 0L
+
+    /** { minutes:[[epochMinuteStartMs, steps], ...] } since fromIso (local day yyyy-MM-dd). Used by the web app to detect walks. */
+    @Synchronized
+    fun minutesJson(ctx: Context, fromIso: String): JSONObject {
+        val app = ctx.applicationContext
+        flushLocked(app)
+        val fromMs: Long = try {
+            LocalDate.parse(fromIso).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        } catch (e: Exception) {
+            System.currentTimeMillis() - 3L * 24L * HOUR_MS
+        }
+        val agg = TreeMap<Long, Long>()
+        val f = File(app.filesDir, FILE_MIN)
+        if (f.exists()) {
+            try {
+                f.forEachLine { line ->
+                    val p = line.split(",")
+                    if (p.size == 2) {
+                        val t = p[0].trim().toLongOrNull()
+                        val n = p[1].trim().toLongOrNull()
+                        if (t != null && n != null && n > 0L && t >= fromMs) agg[t] = (agg[t] ?: 0L) + n
+                    }
+                }
+            } catch (e: Exception) {
+                // unreadable file: return what we have
+            }
+        }
+        val arr = JSONArray()
+        for ((t, n) in agg) {
+            val a = JSONArray()
+            a.put(t)
+            a.put(n)
+            arr.put(a)
+        }
+        val o = JSONObject()
+        o.put("minutes", arr)
+        return o
+    }
+
+    /** Drops minute data older than 14 days once the file grows. */
+    @Synchronized
+    fun compactMinutes(ctx: Context) {
+        val app = ctx.applicationContext
+        val f = File(app.filesDir, FILE_MIN)
+        if (!f.exists() || f.length() < 200_000L) return
+        val keep = minutesJson(app, LocalDate.now().minusDays(14).toString()).getJSONArray("minutes")
+        try {
+            val sb = StringBuilder()
+            for (k in 0 until keep.length()) {
+                val a = keep.getJSONArray(k)
+                sb.append(a.getLong(0)).append(',').append(a.getLong(1)).append('\n')
+            }
+            val tmp = File(app.filesDir, "steps_min.tmp")
+            tmp.writeText(sb.toString())
+            if (!tmp.renameTo(f)) tmp.delete()
+        } catch (e: Exception) {
+            // keep the old file
+        }
+    }
 
     /** Rewrites the file with one line per hour and drops data older than 120 days. */
     @Synchronized
