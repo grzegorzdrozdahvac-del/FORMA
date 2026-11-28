@@ -43,6 +43,10 @@
     <uses-permission android:name="android.permission.health.READ_HEART_RATE_VARIABILITY" />
     <uses-permission android:name="android.permission.health.READ_ACTIVE_CALORIES_BURNED" />
     <uses-permission android:name="android.permission.health.READ_TOTAL_CALORIES_BURNED" />
+    <uses-permission android:name="android.permission.health.READ_BODY_TEMPERATURE" />
+    <uses-permission android:name="android.permission.health.READ_RESPIRATORY_RATE" />
+    <uses-permission android:name="android.permission.health.READ_OXYGEN_SATURATION" />
+    <uses-permission android:name="android.permission.health.READ_VO2_MAX" />
     <!-- Health Connect: write -->
     <uses-permission android:name="android.permission.health.WRITE_HEART_RATE_VARIABILITY" />
     <uses-permission android:name="android.permission.health.WRITE_RESTING_HEART_RATE" />
@@ -142,6 +146,10 @@
 
         <receiver
             android:name=".HabitReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".EffortReceiver"
             android:exported="false" />
 
         <!-- Boot / app update: re-arms step alarm, nudges, tip reminder, wake alarm. System broadcasts reach a non-exported receiver, so exported=false is the correct (and documented) pattern. -->

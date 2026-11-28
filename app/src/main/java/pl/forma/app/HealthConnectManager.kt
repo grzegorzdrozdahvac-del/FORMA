@@ -14,6 +14,10 @@ import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
 import androidx.health.connect.client.records.HeightRecord
 import androidx.health.connect.client.records.NutritionRecord
+import androidx.health.connect.client.records.BodyTemperatureRecord
+import androidx.health.connect.client.records.OxygenSaturationRecord
+import androidx.health.connect.client.records.RespiratoryRateRecord
+import androidx.health.connect.client.records.Vo2MaxRecord
 import androidx.health.connect.client.records.Record
 import androidx.health.connect.client.records.RestingHeartRateRecord
 import androidx.health.connect.client.records.SleepSessionRecord
@@ -65,7 +69,9 @@ object HealthConnectManager {
     val READ_PERMISSIONS: Set<String> = setOf(
         P + "READ_STEPS", P + "READ_WEIGHT", P + "READ_HEIGHT", P + "READ_EXERCISE", P + "READ_SLEEP",
         P + "READ_HEART_RATE", P + "READ_RESTING_HEART_RATE", P + "READ_HEART_RATE_VARIABILITY",
-        P + "READ_ACTIVE_CALORIES_BURNED", P + "READ_TOTAL_CALORIES_BURNED"
+        P + "READ_ACTIVE_CALORIES_BURNED", P + "READ_TOTAL_CALORIES_BURNED",
+        // Etap 9B (another band), optional on the web side: a refusal never makes the connection "partial"
+        P + "READ_BODY_TEMPERATURE", P + "READ_RESPIRATORY_RATE", P + "READ_OXYGEN_SATURATION", P + "READ_VO2_MAX"
     )
     val WRITE_PERMISSIONS: Set<String> = setOf(
         P + "WRITE_HEART_RATE_VARIABILITY", P + "WRITE_RESTING_HEART_RATE", P + "WRITE_EXERCISE", P + "WRITE_HEART_RATE", P + "WRITE_SLEEP",
@@ -435,6 +441,61 @@ object HealthConnectManager {
         return out
     }
 
+    // ---- Etap 9B: optional signals of another band. alpha07 has no SkinTemperatureRecord (added in alpha10), so BodyTemperatureRecord is read;
+    // ---- a band that writes skin temperature will appear here once the library is raised. Each list is capped at the newest MAX_OPT rows.
+    private const val MAX_OPT = 4000
+
+    private suspend fun bodyTemp(c: HealthConnectClient, r: Range): JSONArray {
+        val out = JSONArray()
+        val all = readAll(c, BodyTemperatureRecord::class, r.instants)
+        for (x in all.takeLast(MAX_OPT)) {
+            val o = JSONObject()
+            o.put("t", x.time.toEpochMilli())
+            o.put("c", x.temperature.inCelsius)
+            o.put("origin", x.metadata.dataOrigin.packageName)
+            out.put(o)
+        }
+        return out
+    }
+
+    private suspend fun respRate(c: HealthConnectClient, r: Range): JSONArray {
+        val out = JSONArray()
+        for (x in readAll(c, RespiratoryRateRecord::class, r.instants).takeLast(MAX_OPT)) {
+            val o = JSONObject()
+            o.put("t", x.time.toEpochMilli())
+            o.put("rate", x.rate)
+            o.put("origin", x.metadata.dataOrigin.packageName)
+            out.put(o)
+        }
+        return out
+    }
+
+    private suspend fun spo2(c: HealthConnectClient, r: Range): JSONArray {
+        val out = JSONArray()
+        for (x in readAll(c, OxygenSaturationRecord::class, r.instants).takeLast(MAX_OPT)) {
+            val o = JSONObject()
+            o.put("t", x.time.toEpochMilli())
+            o.put("pct", x.percentage.value)
+            o.put("origin", x.metadata.dataOrigin.packageName)
+            out.put(o)
+        }
+        return out
+    }
+
+    /** VO2max changes slowly: the last 180 days are asked for (the web store keeps them that long). */
+    private suspend fun vo2max(c: HealthConnectClient, r: Range): JSONArray {
+        val out = JSONArray()
+        val from = r.now.minus(Duration.ofDays(180))
+        for (x in readAll(c, Vo2MaxRecord::class, TimeRangeFilter.between(from, r.now)).takeLast(200)) {
+            val o = JSONObject()
+            o.put("t", x.time.toEpochMilli())
+            o.put("v", x.vo2MillilitersPerMinuteKilogram)
+            o.put("origin", x.metadata.dataOrigin.packageName)
+            out.put(o)
+        }
+        return out
+    }
+
     /** Active and total kilocalories per local day. Two separate aggregates so one missing permission does not hide the other. */
     private suspend fun calories(c: HealthConnectClient, r: Range, active: Boolean, total: Boolean, failed: JSONArray): JSONArray {
         val byDate = java.util.TreeMap<String, JSONObject>()
@@ -533,6 +594,11 @@ object HealthConnectManager {
                     data.put("sleep", if (has(granted, "READ_SLEEP")) { section("sleep", failed) { sleeps(c, r) } } else { JSONArray() })
                     data.put("rhr", if (has(granted, "READ_RESTING_HEART_RATE")) { section("rhr", failed) { restingHr(c, r) } } else { JSONArray() })
                     data.put("hrv", if (has(granted, "READ_HEART_RATE_VARIABILITY")) { section("hrv", failed) { hrv(c, r) } } else { JSONArray() })
+                    // Etap 9B: optional groups; a failing or refused one only lands in "failed" / stays empty
+                    data.put("temp", if (has(granted, "READ_BODY_TEMPERATURE")) { section("temp", failed) { bodyTemp(c, r) } } else { JSONArray() })
+                    data.put("resp", if (has(granted, "READ_RESPIRATORY_RATE")) { section("resp", failed) { respRate(c, r) } } else { JSONArray() })
+                    data.put("spo2", if (has(granted, "READ_OXYGEN_SATURATION")) { section("spo2", failed) { spo2(c, r) } } else { JSONArray() })
+                    data.put("vo2", if (has(granted, "READ_VO2_MAX")) { section("vo2", failed) { vo2max(c, r) } } else { JSONArray() })
                     val ka = has(granted, "READ_ACTIVE_CALORIES_BURNED")
                     val kt = has(granted, "READ_TOTAL_CALORIES_BURNED")
                     data.put("calDaily", if (ka || kt) { section("kcal", failed) { calories(c, r, ka, kt, failed) } } else { JSONArray() })
@@ -661,7 +727,7 @@ object HealthConnectManager {
                 val end = Instant.ofEpochMilli(j.getLong("end"))
                 if (!end.isAfter(start)) null
                 else SleepSessionRecord(
-                    startTime = start, startZoneOffset = off, endTime = end, endZoneOffset = off, title = "Sen (Forma)", metadata = md
+                    startTime = start, startZoneOffset = off, endTime = end, endZoneOffset = off, title = j.optString("title", "").ifEmpty { "Sen (Forma)" }, metadata = md
                 )
             }
             "bp" -> {

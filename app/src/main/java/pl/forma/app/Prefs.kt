@@ -160,4 +160,29 @@ object Prefs {
         sp(ctx).edit().remove("habit_answers").apply()
         return v
     }
+
+    // ---------- Etap 9: all-day mode and answers to "Wykryto wysiłek" notifications ----------
+    fun allDayOn(ctx: Context): Boolean = sp(ctx).getBoolean("allday_on", false)
+    /** Epoch ms when the mode switches itself off (the 24 h test); 0 = no limit. */
+    fun allDayUntil(ctx: Context): Long = sp(ctx).getLong("allday_until", 0L)
+    fun setAllDay(ctx: Context, on: Boolean, until: Long) { sp(ctx).edit().putBoolean("allday_on", on).putLong("allday_until", if (on) until else 0L).apply() }
+
+    @Synchronized
+    fun addEffortAnswer(ctx: Context, id: String, act: String) {
+        val arr = try { org.json.JSONArray(sp(ctx).getString("effort_answers", "[]")) } catch (e: Exception) { org.json.JSONArray() }
+        val o = org.json.JSONObject()
+        o.put("id", id)
+        o.put("act", act)
+        o.put("at", System.currentTimeMillis())
+        arr.put(o)
+        sp(ctx).edit().putString("effort_answers", arr.toString()).apply()
+    }
+
+    /** Returns the queued answers [{id,act,at}] and clears the queue. */
+    @Synchronized
+    fun takeEffortAnswers(ctx: Context): String {
+        val v = sp(ctx).getString("effort_answers", "[]") ?: "[]"
+        sp(ctx).edit().remove("effort_answers").apply()
+        return v
+    }
 }

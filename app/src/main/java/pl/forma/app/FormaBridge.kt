@@ -533,9 +533,73 @@ class FormaBridge(private val activity: MainActivity, private val webView: WebVi
     fun setLiveUse(mode: String): String {
         val high = mode == "session" || mode == "diag"
         BleManager.setLiveUse(high)
-        if (mode == "session" && BleManager.hasConnectPermission()) LiveService.start(ctx) else LiveService.stop()
+        LiveService.sessionUse = mode == "session" && BleManager.hasConnectPermission()
+        if (LiveService.sessionUse) LiveService.start(ctx) else LiveService.stop() // stop() is a no-op while all-day mode is on
         return ok()
     }
+
+    // ---------- Etap 9: all-day mode (tętno przez cały dzień), wykrywanie wysiłku ----------
+
+    /** on = true: the band stays connected all day and every HR sample is logged; until = epoch ms for the 24 h test ("" = no limit). */
+    @JavascriptInterface
+    fun setAllDay(on: Boolean, until: String): String {
+        return try {
+            if (on) {
+                if (!BleManager.hasConnectPermission()) return err("Brak uprawnienia Bluetooth (urządzenia w pobliżu).")
+                if (Prefs.preferredId(ctx) == null) return err("Najpierw połącz opaskę w Profilu.")
+                LiveService.startAllDay(ctx, until.toLongOrNull() ?: 0L)
+            } else {
+                LiveService.stopAllDay(ctx)
+            }
+            ok()
+        } catch (e: Exception) {
+            err("Nie udało się zmienić trybu całodniowego.")
+        }
+    }
+
+    /** { on, until, connected, samples, lastHrAt } */
+    @JavascriptInterface
+    fun getAllDayStatus(): String {
+        val o = JSONObject()
+        o.put("on", Prefs.allDayOn(ctx))
+        o.put("until", Prefs.allDayUntil(ctx))
+        o.put("connected", BleManager.isConnected())
+        o.put("samples", HrLog.samples)
+        o.put("lastHrAt", HrLog.lastHrAt)
+        return o.toString()
+    }
+
+    /** { minutes: [[t, avg, max, min, rr, n, steps|null], ...] } since the local day fromIso. */
+    @JavascriptInterface
+    fun getHrMinutes(fromIso: String): String = HrLog.minutesJson(ctx, fromIso).toString()
+
+    /** Deletes the all-day heart-rate log and the phone battery log (after "Usuń dane"). */
+    @JavascriptInterface
+    fun clearHrLog(): String {
+        HrLog.clear(ctx)
+        return ok()
+    }
+
+    /** [[t, level, charging], ...] - phone battery log (every 5 min while the mode runs). */
+    @JavascriptInterface
+    fun getPhoneBattery(): String = HrLog.phoneBatteryJson(ctx).toString()
+
+    /** Notification "Wykryto wysiłek ..." with the first two guesses as buttons. choicesJson: [{k,l}, ...] */
+    @JavascriptInterface
+    fun notifyEffort(id: String, text: String, choicesJson: String): String {
+        Notifications.effort(ctx, id, text, choicesJson)
+        return ok()
+    }
+
+    @JavascriptInterface
+    fun cancelEffort(): String {
+        Notifications.cancelEffort(ctx)
+        return ok()
+    }
+
+    /** Answers given on the notification buttons since the last call: [{id,act,at}]; the queue is cleared. */
+    @JavascriptInterface
+    fun getEffortAnswers(): String = Prefs.takeEffortAnswers(ctx)
 
     @JavascriptInterface
     fun getState(): String {

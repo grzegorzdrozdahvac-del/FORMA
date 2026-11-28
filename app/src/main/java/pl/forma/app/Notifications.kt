@@ -19,6 +19,7 @@ object Notifications {
     const val REMINDER_ID = 4005
     const val BEDTIME_ID = 4006
     const val HABIT_ID = 4007
+    const val EFFORT_ID = 4008
 
     fun ensureChannels(ctx: Context) {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -58,11 +59,12 @@ object Notifications {
 
     /** Foreground notification of LiveService (morning measurement, workout). */
     fun live(ctx: Context, connected: Boolean): Notification {
+        val allDay = Prefs.allDayOn(ctx)
         val title = if (connected) "Forma – połączono z opaską" else "Forma – łączenie z opaską…"
         return NotificationCompat.Builder(ctx, CH_LIVE)
             .setSmallIcon(R.drawable.ic_stat_forma)
             .setContentTitle(title)
-            .setContentText("Trwa pomiar lub trening. Powiadomienie zniknie po zakończeniu.")
+            .setContentText(if (allDay) "Tryb całodniowy: zapisuję tętno przez cały dzień. Wyłączysz go w Profilu." else "Trwa pomiar lub trening. Powiadomienie zniknie po zakończeniu.")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openApp(ctx, 4, null))
@@ -140,6 +142,46 @@ object Notifications {
             val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.notify(HABIT_ID, n)
         } catch (e: Exception) { /* notifications may be blocked */ }
+    }
+
+    /**
+     * Etap 9: "Wykryto wysiłek 16:10-17:05, śr. 128/min - to była:" with up to two guesses as buttons (the web app sends them best first).
+     * Tapping a button queues the answer in Prefs through EffortReceiver; the notification body opens the Dziś card (the third choice "Inne").
+     * choicesJson: [{k:"gym",l:"Siłownia"}, ...]
+     */
+    fun effort(ctx: Context, id: String, text: String, choicesJson: String) {
+        ensureChannels(ctx)
+        val b = NotificationCompat.Builder(ctx, CH_NUDGE)
+            .setSmallIcon(R.drawable.ic_stat_forma)
+            .setContentTitle("Forma")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .setContentIntent(openApp(ctx, 8, "#/dzis"))
+        try {
+            val arr = org.json.JSONArray(choicesJson)
+            for (k in 0 until minOf(arr.length(), 2)) {
+                val o = arr.getJSONObject(k)
+                val act = o.optString("k")
+                val label = o.optString("l")
+                if (act.isEmpty() || label.isEmpty()) continue
+                val i = Intent(ctx, EffortReceiver::class.java).setAction(EffortReceiver.ACTION_ANSWER)
+                    .putExtra(EffortReceiver.X_ID, id).putExtra(EffortReceiver.X_ACT, act)
+                val pi = PendingIntent.getBroadcast(ctx, 9000 + (id + act).hashCode().and(0x7fff), i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                b.addAction(0, label, pi)
+            }
+        } catch (e: Exception) { /* no buttons: the body still opens the card */ }
+        try {
+            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(EFFORT_ID, b.build())
+        } catch (e: Exception) { /* notifications may be blocked */ }
+    }
+
+    fun cancelEffort(ctx: Context) {
+        try {
+            (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(EFFORT_ID)
+        } catch (e: Exception) { /* ignore */ }
     }
 
     fun cancelHabit(ctx: Context) {

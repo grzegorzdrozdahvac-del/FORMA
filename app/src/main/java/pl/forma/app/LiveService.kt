@@ -30,6 +30,39 @@ class LiveService : Service() {
         @Volatile var running = false
         @Volatile var instance: LiveService? = null
 
+        /** Etap 9: all-day mode is on - the service stays up (setLiveUse("off") must not end it) and logs every heart-rate sample. */
+        @Volatile var keepAlive = false
+        /** true while the web app holds a live session (morning measurement / workout) on this service. */
+        @Volatile var sessionUse = false
+        private const val TICK_MS = 60_000L
+
+        /** All-day mode on: the band stays connected (BleManager reconnects by itself), HR is logged to HrLog. */
+        fun startAllDay(ctx: Context, until: Long) {
+            Prefs.setAllDay(ctx, true, until)
+            keepAlive = true
+            HrLog.logPhoneBattery(ctx, true)
+            start(ctx)
+            instance?.armAllDay()
+        }
+
+        /** All-day mode off: ends the service unless a live session still needs it. */
+        fun stopAllDay(ctx: Context) {
+            Prefs.setAllDay(ctx, false, 0L)
+            keepAlive = false
+            HrLog.logPhoneBattery(ctx, true)
+            if (!sessionUse) stop()
+            else instance?.updateNotification()
+        }
+
+        /** After a reboot / app update: back to all-day mode if it was on and has not expired. */
+        fun resumeAllDay(ctx: Context) {
+            if (!Prefs.allDayOn(ctx)) return
+            val until = Prefs.allDayUntil(ctx)
+            if (until > 0L && System.currentTimeMillis() >= until) { Prefs.setAllDay(ctx, false, 0L); return }
+            keepAlive = true
+            start(ctx)
+        }
+
         fun start(ctx: Context) {
             if (running) return
             running = true
@@ -46,6 +79,7 @@ class LiveService : Service() {
          * "did not then call startForeground". If the service has not started yet, onStartCommand sees running == false and ends itself.
          */
         fun stop() {
+            if (keepAlive) return
             if (!running) return
             running = false
             Handler(Looper.getMainLooper()).post { instance?.finishSelf() }
@@ -57,6 +91,33 @@ class LiveService : Service() {
 
     private val listener = object : BleManager.Listener {
         override fun onState(state: String, name: String?) { updateNotification() }
+        override fun onHr(sample: HrSample) {
+            if (keepAlive) HrLog.add(this@LiveService, sample.hr, sample.rr, sample.t)
+        }
+    }
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val tick = object : Runnable {
+        override fun run() {
+            if (finished) return
+            if (keepAlive) {
+                val until = Prefs.allDayUntil(this@LiveService)
+                if (until > 0L && System.currentTimeMillis() >= until) {
+                    // the 24 h test is over: switch the mode off by itself (the web app sees it in getAllDayStatus)
+                    stopAllDay(this@LiveService)
+                    return
+                }
+                HrLog.logPhoneBattery(this@LiveService)
+                HrLog.flush(this@LiveService)
+                if (!BleManager.isConnected()) BleManager.connectPreferred()
+                handler.postDelayed(this, TICK_MS)
+            }
+        }
+    }
+
+    fun armAllDay() {
+        handler.removeCallbacks(tick)
+        if (keepAlive) handler.postDelayed(tick, TICK_MS)
     }
 
     override fun onCreate() {
@@ -69,13 +130,18 @@ class LiveService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!running && intent == null && Prefs.allDayOn(this)) {
+            // restarted by the system after the process was killed: all-day mode is still wanted
+            val until = Prefs.allDayUntil(this)
+            if (until == 0L || System.currentTimeMillis() < until) { running = true; keepAlive = true }
+        }
         val ok = startForegroundSafe(Notifications.live(this, BleManager.isConnected()))
         if (!ok || !running) {
             running = false
             finishSelf()
             return START_NOT_STICKY
         }
-        if (wakeLock == null) {
+        if (wakeLock == null && !keepAlive) {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "forma:live")
             wl.setReferenceCounted(false)
@@ -83,6 +149,11 @@ class LiveService : Service() {
             wakeLock = wl
         }
         BleManager.addListener(listener)
+        if (keepAlive) {
+            if (!BleManager.isConnected()) BleManager.connectPreferred()
+            armAllDay()
+            return START_STICKY
+        }
         return START_NOT_STICKY
     }
 
@@ -100,7 +171,7 @@ class LiveService : Service() {
         }
     }
 
-    private fun updateNotification() {
+    fun updateNotification() {
         if (finished) return
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -111,6 +182,8 @@ class LiveService : Service() {
     fun finishSelf() {
         if (finished) return
         finished = true
+        handler.removeCallbacks(tick)
+        HrLog.flush(this)
         BleManager.removeListener(listener)
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
