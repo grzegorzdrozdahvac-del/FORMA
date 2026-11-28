@@ -9231,12 +9231,15 @@ function dzisPrimary(st, pc, needMorning, nightTop, now) {
       '<p class="err" id="obErr" hidden></p><button class="btn pri full" data-act="obSave">Zapisz</button></div>' };
   }
   if (nightTop) return { k: 'night', h: nightBlock() };
+  var hNow = new Date().getHours();
+  if (needMorning && hNow >= 20 && NATIVE) { var nbE = nightBlock(); if (nbE) return { k: 'night', h: nbE }; } // evening: starting the night beats a missed morning measurement
   if (needMorning) {
     var h = '<button class="btn pri big" data-act="measure" data-d="morning"' + (S.connected ? '' : ' disabled') + '>Poranny pomiar (2 min)</button>';
     if (!S.connected) h += '<div class="card js-conn"><p class="lbl">Opaska</p>' + connHtml() + '</div>';
     else if (st.hasRecord) h += '<p class="xs mut" style="margin:0">Zapisze się obok wyniku nocy – nic nie zostanie zastąpione.</p>';
     return { k: 'morning', h: '<div class="col" style="gap:8px">' + h + '</div>' };
   }
+  if (NATIVE && nightHasResult()) return { k: 'night', h: nightBlock() };
   if (now.getHours() >= 20) {
     if (NATIVE) { var nb = nightBlock(); if (nb) return { k: 'night', h: nb }; }
     return { k: 'bed', h: e6SleepCardHtml(0) };
@@ -9254,7 +9257,7 @@ function rDzis() {
   var line = dzisStatusLine(st), now = new Date(), tp = e6Tonight();
   S.e6bu.day = null; // Dziś always edits today's journal
   var h = header('Dziś', { gear: true, full: true }) + '<div class="body">';
-  var nightTop = NATIVE && (S.night.crunching || (S.night.st && S.night.st.running) || nightHasResult());
+  var nightTop = NATIVE && (S.night.crunching || (S.night.st && S.night.st.running)); // running night first; a finished night's result waits until the morning measurement is done
   // own 2-min morning measurement: until it is done, whatever the night record says (a night record never replaces it)
   var needMorning = pc.complete && (!st.hasRecord || ((st.rec.source === 'noc' || st.rec.source === 'whoop') && !st.rec.secondary));
   var pr = dzisPrimary(st, pc, needMorning, nightTop, now);
@@ -9298,7 +9301,7 @@ function rDzis() {
     '<div class="col" style="gap:12px;margin-top:8px">' + jrnEditorHtml(jd) + '<a href="#/dziennik" class="row sp sm" style="min-height:44px;color:#2CE8B5">Dziennik, własne wpisy i historia' + ico('chev', 16) + '</a></div></details>';
   // ---- 6. "Więcej"
   h += '<div class="col" data-blk="more" style="gap:8px"><p class="lbl" style="margin:0">Więcej</p><div class="g2">' +
-    [['podsumowanie', 'Dziś w skrócie'], ['raport', 'Raport tygodnia'], ['regeneracja', 'Regeneracja'], ['sen', 'Sen'], ['kalorie', 'Kalorie'], ['dziennik', 'Dziennik']].map(function (x) { return '<a class="btn" href="#/' + x[0] + '">' + x[1] + '</a>'; }).join('') + '</div></div>';
+    [['pomiar', 'Pomiar poranny'], ['podsumowanie', 'Dziś w skrócie'], ['raport', 'Raport tygodnia'], ['regeneracja', 'Regeneracja'], ['sen', 'Sen'], ['kalorie', 'Kalorie'], ['dziennik', 'Dziennik']].map(function (x) { return '<a class="btn" href="#/' + x[0] + '">' + x[1] + '</a>'; }).join('') + '</div></div>';
   return h + '</div>';
 }
 ROUTES.dzis = { tab: 'dzis', depth: 0, render: rDzis, mount: function (el) { renderBattery(); }, tick: function (el) {
@@ -11654,7 +11657,7 @@ function rSen() {
   var tp = e6Tonight();
   h += '<div class="card fu" data-sen="wake"><p class="row lbl" style="gap:6px">' + ico('moon', 16) + 'Pora spać</p><div class="row sp"><span class="grow"><span class="xs sub">Do łóżka do</span><br><span class="n" style="font-size:30px">' + esc(tp.bed || '—') + '</span><br><span class="xs mut">potrzeba ok. ' + FC.fmtDur(tp.needH) + ' snu</span></span>' +
     '<label class="xs sub">Pobudka<input class="inp num" type="time" lang="pl" data-in="wake" data-keep="1" value="' + esc(plannedWake()) + '" aria-label="Planowana pobudka"></label></div>' + savedSlot('wake') + '</div>';
-  if (NATIVE && !(S.night.crunching || (S.night.st && S.night.st.running) || nightHasResult())) h += nightBlock(); // the night card's home (on Dziś it is the primary card in the evening / while a night runs)
+  if (NATIVE && !(S.night.crunching || (S.night.st && S.night.st.running))) h += nightBlock(); // the night card's home (on Dziś it is the primary card in the evening / while a night runs)
   if (!sl) h += emptyCard('Brak danych o śnie', 'Godziny snu wpisujesz w porannym formularzu: „Zasnąłem o” i „Obudziłem się o”.', '<button class="btn pri full" data-act="measure"' + (S.connected ? '' : ' disabled') + '>Poranny pomiar (2 min)</button>', 'sleep');
   else {
     h += '<div class="card fu"><div class="row sp"><div><p class="lbl">Godziny snu</p><div class="n" style="font-size:36px;line-height:1.15;white-space:nowrap">' + FC.fmtDur(sl.durH) + '</div><div class="sub">z ' + FC.fmtDur(sl.needH) + ' potrzeby</div></div>' +
@@ -12352,7 +12355,7 @@ e6Start();
 e6bStart();
 hcStart();
 
-function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-27 14:00 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
+function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-28 06:41 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
 
 })();</script>
 </body>
