@@ -5504,6 +5504,386 @@ canvas{display:block;width:100%;height:200px}
   else root.E6bCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
+<script>/* Forma Etap 8 - "Wiek kondycyjny": transparent points -> years. Pure logic, no DOM, no storage.
+   Browser: window.AgeCore (needs window.HrvCore, window.FormaCore). Node: require('./age-core.js').
+
+   WHAT THIS IS. An ESTIMATE of how the user's measurable habits and physiology compare with typical men (women: approximations) of the
+   calendar age. It is NOT a diagnosis and NOT a validated clinical "biological age". Every component returns years: + = older than the
+   calendar age, - = younger. Total = calendar age + sum of the components (clamped to +-12 years).
+
+   CONVERTING RISK TO YEARS (used for steps, activity, sleep, BMI, resting HR). Adult all-cause mortality roughly doubles every ~8 years
+   of age (Gompertz law; mortality-rate doubling time 8-9 y). So a relative risk RR corresponds to  11.5 * ln(RR)  years of age
+   (= 8 / ln 2). Example: RR 1.09 per +10 bpm resting HR (Zhang 2016, CMAJ meta-analysis) -> ~1.0 year per 10 bpm.
+   Components are measured against a "typical" reference (not against the optimum), so a typical person scores ~0 years.
+
+   SOURCES (what each curve is based on; the exact numbers marked "own" are our own rounded heuristics, not published cut-offs):
+   - VO2max: HUNT3 Fitness Study reference means for men (Aspenes et al. 2011; NTNU CERG "Fitness numbers"): 20-29 y 54, 30-39 49, 40-49 47,
+     50-59 42, 60-69 39, 70+ 34 ml/kg/min. "Fitness age" (Nes et al. 2013, PLoS ONE "Fitness age" idea) = age of the average person with the
+     same VO2max -> we interpolate between the decade mid-points. Women: 0.85 x men (approximation, own). Estimate from heart rates:
+     Uth et al. 2004 (Eur J Appl Physiol): VO2max = 15.3 x HRmax / HRrest (validated for trained people; typical error ~ +-6.5 ml/kg/min; it needs a
+     real HRmax - a formula HRmax makes it noticeably less reliable). Cross-check from GPS runs: ACSM running equation VO2 = 3.5 + 0.2 x speed(m/min)
+     with %HRR ~ %VO2R (Swain & Leutholtz 1997): VO2max = 3.5 + 0.2 v / %HRR (flat ground, average HR of the run -> a rough number).
+     Kodama et al. 2009 (JAMA): +1 MET (3.5 ml/kg/min) ~ 13% lower all-cause mortality (consistent with ~1.5 y per MET on the mortality scale; the HUNT
+     fitness-age scale is steeper, ~7 y per MET, so VO2max is capped at +-8 y and the difference is shrunk x0.7 because the heart-rate estimate is noisy). Note: HUNT is a healthy-volunteer
+     sample and Uth with an age-formula HRmax reads a few ml low, so a typical resting HR of 66 gives a few years 'older' - the tool compares you with a healthy, fairly active population.
+   - Resting HR: Zhang 2016 (CMAJ 188:E53), RR 1.09 all-cause per +10 bpm. Reference "typical" 66 bpm (men), 70 (women), own. When VO2max already comes
+     from RHR (Uth), RHR is counted at half weight to avoid counting the same signal twice.
+   - HRV: lnRMSSD vs age. Population RMSSD falls with age (Umetani et al. 1998; Voss et al. 2015; Nunan et al. 2010 mean short-term RMSSD ~42 ms).
+     Reference (own fit): lnRMSSD_ref(age) = ln(52) - 0.0145 x (age - 20)  (~35 ms at 47). Absolute HRV depends strongly on the device, posture and
+     the person, so the contribution is damped (x0.15) and capped at +-3 y.
+   - Steps: Saint-Maurice 2020 (JAMA: 8000 vs 4000 steps/d, HR 0.49), Paluch 2022 (Lancet Public Health meta-analysis: risk plateaus at ~8-10 000 steps/d
+     under 60 y, ~6-8 000 above). ln(RR) nodes (own, softened vs the crude HR): 2000 .69, 4000 .41, 6000 .18, 8000 .03, 10000 0. Reference 6000 steps/d.
+   - Weekly activity: Arem et al. 2015 (JAMA Intern Med): 150-300 min/week moderate activity HR ~0.69 vs none, ~0.80 at 1-2 x below the guideline; WHO 2020:
+     150-300 min moderate or 75-150 min vigorous. We count minutes in zones 2-3 + 2 x minutes in zones 4-5 (vigorous counts double, as WHO). ln(RR) nodes
+     (own): 0 min .37, 75 min .22, 150 min 0. Reference 100 min/week.
+   - Sleep duration: Cappuccio et al. 2010 (Sleep meta-analysis): short sleep RR 1.12, long sleep RR 1.30 for mortality; optimum ~7-8 h. U-curve nodes (own):
+     5 h .17, 6 h .11, 7 h 0, 8 h 0, 9 h .10, 10 h .26. Reference 6.75 h.
+   - Sleep regularity: Windred et al. 2024 (Sleep, UK Biobank) - irregular sleep timing predicts higher mortality (direction only; the numbers below are
+     our own heuristic): SD of bedtime <= 30 min -0.5 y, 45 min 0, 60 min +0.5, 90 min +1.5, >= 120 min +2.5.
+   - BMI: Global BMI Mortality Collaboration 2016 (Lancet): lowest mortality at 22.5-25, HR ~1.07 at 25-27.5, 1.20 at 27.5-30, 1.45 at 30-35. Weighted x0.7
+     because BMI cannot tell muscle from fat (a strength-training user is systematically over-rated).
+   Weights and caps are listed in COMP below. */
+(function (root) {
+  'use strict';
+  var H = (typeof module !== 'undefined' && module.exports) ? require('./hrv-core.js') : root.HrvCore;
+  var F = (typeof module !== 'undefined' && module.exports) ? require('./forma-core.js') : root.FormaCore;
+  function fin(v) { return typeof v === 'number' && isFinite(v); }
+  function clamp(x, a, b) { return Math.min(b, Math.max(a, x)); }
+  function mean(a) { if (!a.length) return NaN; var s = 0; a.forEach(function (v) { s += v; }); return s / a.length; }
+  function sd(a) { if (a.length < 2) return NaN; var m = mean(a), s = 0; a.forEach(function (v) { s += (v - m) * (v - m); }); return Math.sqrt(s / (a.length - 1)); }
+  function median(a) { if (!a.length) return NaN; var b = a.slice().sort(function (x, y) { return x - y; }), k = b.length >> 1; return b.length % 2 ? b[k] : (b[k - 1] + b[k]) / 2; }
+  function r1(x) { return Math.round(x * 10) / 10; }
+  var YPL = 8 / Math.LN2; // years per unit of ln(RR)
+  var NEED_DAYS = 28, WIN = 30, MAX_TOTAL = 12, CONF_MAX = 0.9;
+
+  // piecewise-linear interpolation over [[x, y], ...] sorted by x; clamped at both ends
+  function interp(nodes, x) {
+    if (x <= nodes[0][0]) return nodes[0][1];
+    for (var i = 1; i < nodes.length; i++) if (x <= nodes[i][0]) { var a = nodes[i - 1], b = nodes[i]; return a[1] + (b[1] - a[1]) * (x - a[0]) / (b[0] - a[0]); }
+    return nodes[nodes.length - 1][1];
+  }
+  // ---------------- curves ----------------
+  var HUNT_AGE = [25, 35, 45, 55, 65, 75], HUNT_VO2 = [54, 49, 47, 42, 39, 34]; // men, decade mid-points
+  var WOMEN_F = 0.85, VO2_SHRINK = 0.7; // the Uth estimate is noisy (+-6.5 ml/kg/min ~ +-12 y on the HUNT scale), so the difference to the calendar age is pulled 30% towards 0
+  function vo2RefAtAge(age, sex) { return interp(HUNT_AGE.map(function (a, i) { return [a, HUNT_VO2[i]]; }), age) * (sex === 'k' ? WOMEN_F : 1); }
+  // fitness age = age at which the average person has this VO2max (linear between mid-points, extrapolated with the end slopes, 18..90)
+  function fitnessAge(vo2, sex) {
+    var v = sex === 'k' ? vo2 / WOMEN_F : vo2, n = HUNT_AGE.length, i;
+    if (v >= HUNT_VO2[0]) { var s0 = (HUNT_VO2[0] - HUNT_VO2[1]) / (HUNT_AGE[1] - HUNT_AGE[0]); return clamp(HUNT_AGE[0] - (v - HUNT_VO2[0]) / s0, 18, 90); }
+    for (i = 1; i < n; i++) if (v >= HUNT_VO2[i]) return HUNT_AGE[i - 1] + (HUNT_VO2[i - 1] - v) / (HUNT_VO2[i - 1] - HUNT_VO2[i]) * (HUNT_AGE[i] - HUNT_AGE[i - 1]);
+    var s1 = (HUNT_VO2[n - 2] - HUNT_VO2[n - 1]) / (HUNT_AGE[n - 1] - HUNT_AGE[n - 2]);
+    return clamp(HUNT_AGE[n - 1] + (HUNT_VO2[n - 1] - v) / s1, 18, 90);
+  }
+  function uthVo2(hrMax, hrRest) { return hrMax > 0 && hrRest > 0 ? 15.3 * hrMax / hrRest : null; }
+  var LN_STEPS = [[2000, 0.69], [4000, 0.41], [6000, 0.18], [8000, 0.03], [10000, 0]];
+  var LN_ACT = [[0, 0.37], [75, 0.22], [150, 0]];
+  var LN_SLEEP = [[4, 0.26], [5, 0.17], [6, 0.11], [7, 0], [8, 0], [9, 0.10], [10, 0.26]];
+  var LN_BMI = [[18.5, 0.18], [20, 0.04], [22.5, 0], [25, 0], [26.25, 0.068], [28.75, 0.182], [32.5, 0.37], [37.5, 0.66], [42, 0.9]];
+  var REG_YEARS = [[30, -0.5], [45, 0], [60, 0.5], [90, 1.5], [120, 2.5]];
+  function stepsYears(steps) { return YPL * (interp(LN_STEPS, steps) - interp(LN_STEPS, 6000)); }
+  function activityYears(min) { return YPL * (interp(LN_ACT, min) - interp(LN_ACT, 100)); }
+  function sleepYears(h) { return YPL * (interp(LN_SLEEP, h) - interp(LN_SLEEP, 6.75)); }
+  function bmiYears(b) { return YPL * (interp(LN_BMI, b) - interp(LN_BMI, 25)); }
+  function rhrRef(sex) { return sex === 'k' ? 70 : 66; }
+  function hrvRef(age) { return Math.log(52) - 0.0145 * (age - 20); }
+
+  // component table: weight in the confidence (sums to 1), cap in years
+  var COMP = {
+    vo2: { label: 'Wydolność (VO₂max)', w: 0.28, cap: 8, typical: '42–50 ml/kg/min', unit: 'ml/kg/min' },
+    rhr: { label: 'Tętno spoczynkowe', w: 0.12, cap: 3, typical: '60–72 ud/min', unit: 'ud/min' },
+    hrv: { label: 'HRV', w: 0.10, cap: 3, typical: 'ok. 25–45 ms (zależy od urządzenia)', unit: 'ms' },
+    steps: { label: 'Kroki', w: 0.14, cap: 4, typical: '5 000–9 000 dziennie', unit: 'kroków/dzień' },
+    act: { label: 'Ruch w strefach 2–5', w: 0.12, cap: 3, typical: '60–150 min tygodniowo', unit: 'min/tydz.' },
+    sleep: { label: 'Długość snu', w: 0.08, cap: 3, typical: '6,5–7,5 h', unit: 'h' },
+    reg: { label: 'Regularność snu', w: 0.06, cap: 2.5, typical: 'odchylenie pory snu 30–60 min', unit: 'min' },
+    bmi: { label: 'BMI', w: 0.10, cap: 3, typical: '24–28', unit: '' }
+  };
+  var ORDER = ['vo2', 'rhr', 'hrv', 'steps', 'act', 'sleep', 'reg', 'bmi'];
+
+  // ---------------- data windows ----------------
+  function inWin(date, end, n) { var k = H.dayNum(date), e = H.dayNum(end); return k <= e && k > e - n; }
+  function firstDate(ctx) {
+    var ks = [];
+    (ctx.days || []).forEach(function (d) { if (d && d.date) ks.push(H.dayNum(d.date)); });
+    (ctx.workouts || []).forEach(function (w) { if (w && w.date) ks.push(H.dayNum(w.date)); });
+    Object.keys(ctx.stepsDaily || {}).forEach(function (k) { ks.push(H.dayNum(k)); });
+    ks = ks.filter(isFinite);
+    return ks.length ? H.dateFromNum(Math.min.apply(null, ks)) : null;
+  }
+  function spanDays(ctx, asOf) { var f = firstDate(ctx); return f ? Math.max(0, H.dayNum(asOf) - H.dayNum(f)) : 0; } // full days since the first record (today is not counted: the windows end yesterday)
+
+  // all components for the 30 complete days that end the day BEFORE asOf (today is partial). Returns { comps: {id: comp}, density }
+  function components(ctx, asOf) {
+    var end = H.addDays(asOf, -1), age = ctx.profile && ctx.profile.age, sex = ctx.profile && ctx.profile.sex === 'k' ? 'k' : 'm';
+    var days = (ctx.days || []).filter(function (d) { return d && inWin(d.date, end, WIN) && (d.tags || []).indexOf('Choroba') < 0 && (d.tags || []).indexOf('Alkohol') < 0; });
+    var C = {}, present = {};
+    function mk(id, o) { var b = COMP[id], c = { id: id, label: b.label, typical: b.typical, unit: b.unit, cap: b.cap, has: false, years: 0, value: null, note: '', hint: '', rel: 1 }; for (var k in o) c[k] = o[k]; C[id] = c; return c; }
+    // --- resting HR + HRV from the morning records
+    var hrs = days.filter(function (d) { return fin(d.hr) && d.hr > 25 && d.hr < 130; }).map(function (d) { return d.hr; });
+    var lns = days.filter(function (d) { return fin(d.lnRmssd); }).map(function (d) { return d.lnRmssd; });
+    var rhr = hrs.length >= 7 ? mean(hrs) : null;
+    // --- VO2max
+    var hmi = ctx.hrMax || null, hrMax = hmi && fin(hmi.value) ? hmi.value : null, vo2 = null, c;
+    var uth = rhr != null && hrMax ? uthVo2(hrMax, rhr) : null;
+    if (uth != null && !(uth >= 15 && uth <= 80)) uth = null;
+    var gps = gpsVo2(ctx, asOf, rhr, hrMax);
+    if (uth != null) {
+      var fa = fitnessAge(uth, sex), formula = !hmi.source || hmi.source === 'szacunek z wieku';
+      c = mk('vo2', { has: true, value: uth, years: clamp(VO2_SHRINK * (fa - age), -COMP.vo2.cap, COMP.vo2.cap), fitAge: fa, rel: formula ? 0.6 : 1, src: 'Uth: 15,3 × HRmax / HRspoczynkowe' });
+      c.note = 'HRmax: ' + (hmi.label || '—') + (formula ? ' – to wzór z wieku, błąd ±10 ud/min przekłada się na ok. ±10% wyniku' : '') + '. Błąd metody ok. ±6 ml/kg/min.';
+      if (gps) {
+        var diff = Math.abs(gps.vo2 - uth) / uth; c.gps = { vo2: gps.vo2, n: gps.n, agree: diff <= 0.15 };
+        if (c.gps.agree) { c.rel = Math.min(1, c.rel + 0.25); c.note += ' Z biegów GPS (' + gps.n + '): ok. ' + Math.round(gps.vo2) + ' – zgodne.'; }
+        else { c.rel = c.rel * 0.7; c.note += ' Z biegów GPS (' + gps.n + '): ok. ' + Math.round(gps.vo2) + ' – wyniki się rozjeżdżają, traktuj z ostrożnością.'; }
+      }
+      c.hint = 'Dwa razy w tygodniu 4 × 4 min mocno (tętno strefa 4) przerywane spokojnym marszem; to najszybszy sposób na wyższe VO₂max.';
+    } else {
+      c = mk('vo2', { note: !hrMax ? 'Potrzebny wiek w profilu.' : 'Potrzeba tętna spoczynkowego z min. 7 porannych pomiarów.', hint: 'Mierz się rano – wtedy policzymy VO₂max z tętna spoczynkowego i maksymalnego.' });
+      if (gps) c.gps = { vo2: gps.vo2, n: gps.n };
+    }
+    // --- RHR
+    if (rhr != null) {
+      var w = C.vo2.has && C.vo2.src ? 0.5 : 1;
+      mk('rhr', { has: true, value: rhr, years: clamp((rhr - rhrRef(sex)) * 0.1 * w, -COMP.rhr.cap, COMP.rhr.cap), note: w < 1 ? 'Liczone z połową wagi, bo VO₂max już korzysta z tętna spoczynkowego.' : '', hint: 'Spada przy regularnych treningach tlenowych, dobrym śnie i mniej alkoholu (zwykle o kilka ud/min w 2–3 miesiące).' });
+    } else mk('rhr', { note: 'Potrzeba min. 7 porannych pomiarów z ostatnich 30 dni.', hint: 'Mierz się rano, najlepiej o stałej porze.' });
+    // --- HRV
+    if (lns.length >= 7 && age) {
+      var ln = mean(lns), ref = hrvRef(age);
+      mk('hrv', { has: true, value: Math.exp(ln), lnValue: ln, ref: Math.exp(ref), years: clamp(-(ln - ref) / 0.0145 * 0.15, -COMP.hrv.cap, COMP.hrv.cap), note: 'Średnia z ' + lns.length + ' poranków. Do normy dla wieku ok. ' + Math.round(Math.exp(ref)) + ' ms – bezwzględne wartości zależą od urządzenia, więc wpływ jest ograniczony.', hint: 'HRV rośnie przy stałym rytmie snu, treningu tlenowym i ograniczeniu alkoholu wieczorem.' });
+    } else mk('hrv', { note: 'Potrzeba min. 7 porannych pomiarów z ostatnich 30 dni.', hint: 'Mierz się rano.' });
+    // --- steps (complete days only)
+    var sv = [], st = ctx.stepsDaily || {};
+    for (var k = 0; k < WIN; k++) { var dt = H.addDays(end, -k), v = st[dt]; if (fin(v) && v >= 0) sv.push(v); }
+    if (sv.length >= 7) { var sm = mean(sv); mk('steps', { has: true, value: sm, years: clamp(stepsYears(sm), -COMP.steps.cap, COMP.steps.cap), note: 'Średnia z ' + sv.length + ' dni.', hint: sm < 8000 ? 'Dodaj jeden 20-minutowy spacer dziennie (ok. +2 000 kroków). Zysk jest największy między 4 000 a 8 000.' : 'Utrzymuj. Powyżej ok. 10 000 kroków korzyść już się niemal nie zwiększa.' }); }
+    else mk('steps', { note: 'Kroki są dostępne w aplikacji na Androida (min. 7 dni).', hint: 'Włącz zliczanie kroków w Profilu.' });
+    // --- weekly activity (last 28 days, zones 2-5)
+    var ws = (ctx.workouts || []).filter(function (x) { return x && x.type !== 'sauna' && inWin(x.date, end, 28); });
+    var wz = ws.filter(function (x) { return Array.isArray(x.zonesSec) && x.zonesSec.length === 6; });
+    if (wz.length >= 1) {
+      var mod = 0, vig = 0;
+      wz.forEach(function (x) { mod += (x.zonesSec[2] + x.zonesSec[3]) / 60; vig += (x.zonesSec[4] + x.zonesSec[5]) / 60; });
+      var eq = (mod + 2 * vig) / 4;
+      mk('act', { has: true, value: eq, modMin: mod / 4, vigMin: vig / 4, years: clamp(activityYears(eq), -COMP.act.cap, COMP.act.cap), note: 'Strefy 2–3: ' + Math.round(mod / 4) + ' min, strefy 4–5: ' + Math.round(vig / 4) + ' min tygodniowo (średnia z 4 tygodni; mocne minuty liczą się podwójnie). WHO: 150–300 min.' + (ws.length > wz.length ? ' Pominęliśmy ' + (ws.length - wz.length) + ' trening(i) bez tętna.' : ''), hint: eq < 150 ? 'Dodaj jedną spokojną sesję w strefie 2 (np. szybki marsz lub rower 40 min) – łatwo zbliżyć się do 150 min.' : 'Masz więcej niż minimum WHO – dalsze minuty dają już mniejszy zysk niż sen i regularność.' });
+    } else mk('act', { note: ws.length ? 'Treningi bez tętna nie mają stref – nie liczymy ich tutaj.' : 'Brak treningów z tętnem w ostatnich 4 tygodniach.', hint: 'Zapisuj treningi z opaską – strefy tętna policzą się same.' });
+    // --- sleep duration + regularity
+    var durs = [], beds = [];
+    (ctx.sleepDays || ctx.days || []).forEach(function (d) { // nights count whatever the morning tags were
+      if (!d || !d.sleep || !inWin(d.date, end, WIN)) return;
+      var m = F.recSleepMin(d); if (fin(m) && m >= 120 && m <= 840) durs.push(m / 60);
+      var b = F.parseHM(d.sleep.bed); if (isFinite(b)) beds.push((b - 720 + 1440) % 1440); // shifted so that midnight is not a wrap point
+    });
+    if (durs.length >= 7) { var dm = mean(durs); mk('sleep', { has: true, value: dm, years: clamp(sleepYears(dm), -COMP.sleep.cap, COMP.sleep.cap), note: 'Średnia z ' + durs.length + ' nocy. Najlepsze wyniki zdrowotne: 7–8 h.', hint: dm < 7 ? 'Połóż się 30 min wcześniej – przez dwa tygodnie, potem oceń samopoczucie.' : (dm > 9 ? 'Bardzo długi sen bywa objawem zmęczenia lub choroby – przy złym samopoczuciu zbadaj się.' : 'Długość snu jest w porządku.') }); }
+    else mk('sleep', { note: 'Potrzeba min. 7 nocy z godzinami snu.', hint: 'Wpisuj godziny snu rano.' });
+    if (beds.length >= 7) { var bs = sd(beds); mk('reg', { has: true, value: bs, years: clamp(interp(REG_YEARS, bs), -COMP.reg.cap, COMP.reg.cap), note: 'Odchylenie standardowe pory zasypiania z ' + beds.length + ' nocy.', hint: bs > 45 ? 'Ustal stałą porę pójścia spać (±30 min), także w weekend – to jedna z najtańszych poprawek.' : 'Pora snu jest regularna – tak trzymaj.' }); }
+    else mk('reg', { note: 'Potrzeba min. 7 nocy z godzinami snu.', hint: 'Wpisuj godziny snu rano.' });
+    // --- BMI
+    var ht = ctx.profile && ctx.profile.heightCm, wt = null;
+    (ctx.weights || []).forEach(function (x) { if (x && fin(x.kg) && H.dayNum(x.date) <= H.dayNum(asOf) && H.dayNum(x.date) > H.dayNum(asOf) - 120 && (!wt || x.date >= wt.date)) wt = x; });
+    if (ht && wt) { var bmi = wt.kg / Math.pow(ht / 100, 2); mk('bmi', { has: true, value: bmi, years: clamp(bmiYears(bmi) * 0.7, -COMP.bmi.cap, COMP.bmi.cap), note: wt.kg + ' kg, ' + ht + ' cm. BMI nie odróżnia mięśni od tłuszczu – przy dużej masie mięśniowej wynik bywa zawyżony (dlatego liczymy go z wagą 0,7).', hint: bmi > 25 ? 'Obwód talii jest lepszym wskaźnikiem niż BMI: cel poniżej 94 cm. Spadek wagi o 3–5% już poprawia wynik.' : 'W normie.' }); }
+    else mk('bmi', { note: !ht ? 'Podaj wzrost w Profilu.' : 'Podaj aktualną wagę w Profilu (z ostatnich 4 miesięcy).', hint: 'Uzupełnij wzrost i wagę w Profilu.' });
+    var dd = {}; days.forEach(function (d) { dd[d.date] = 1; }); Object.keys(st).forEach(function (d) { if (inWin(d, end, WIN)) dd[d] = 1; });
+    (ctx.workouts || []).forEach(function (x) { if (x && inWin(x.date, end, WIN)) dd[x.date] = 1; });
+    return { comps: C, density: Object.keys(dd).length / WIN, rhr: rhr };
+  }
+
+  // VO2max from GPS runs of the last 90 days (ACSM running equation + %HRR). Needs >= 2 usable runs. Returns { vo2, n } or null.
+  function gpsVo2(ctx, asOf, rhr, hrMax) {
+    if (!(rhr > 0) || !(hrMax > rhr)) return null;
+    var est = [];
+    (ctx.workouts || []).forEach(function (w) {
+      if (!w || w.type !== 'run' || !w.gps || !inWin(w.date, asOf, 90) || !fin(w.hrAvg) || !(w.gps.movingSec >= 900) || !(w.gps.distM > 0)) return;
+      var v = w.gps.distM / (w.gps.movingSec / 60); // m/min
+      if (v < 134 || v > 400) return; // the running equation holds above ~8 km/h
+      var frac = (w.hrAvg - rhr) / (hrMax - rhr); if (frac < 0.55 || frac > 0.92) return;
+      var e = 3.5 + 0.2 * v / frac; if (e >= 15 && e <= 80) est.push(e);
+    });
+    return est.length >= 2 ? { vo2: median(est), n: est.length } : null;
+  }
+
+  // ---------------- result for one anchor date ----------------
+  function compute(ctx, asOf) {
+    var p = ctx && ctx.profile;
+    if (!p || !(p.age >= 18 && p.age <= 100)) return { ready: false, reason: 'profil', spanDays: 0, needDays: NEED_DAYS, comps: [], missing: [] };
+    var sd_ = spanDays(ctx, asOf), cm = components(ctx, asOf), list = ORDER.map(function (id) { return cm.comps[id]; });
+    var have = list.filter(function (c) { return c.has; });
+    var total = clamp(have.reduce(function (s, c) { return s + c.years; }, 0), -MAX_TOTAL, MAX_TOTAL);
+    var comp = 0; have.forEach(function (c) { comp += COMP[c.id].w * c.rel; });
+    var ready = sd_ >= NEED_DAYS && have.length >= 3;
+    var res = { ready: ready, reason: ready ? '' : (sd_ < NEED_DAYS ? 'dni' : 'skladniki'), asOf: asOf, spanDays: sd_, needDays: NEED_DAYS, age: p.age, comps: list, missing: list.filter(function (c) { return !c.has; }), nComps: have.length, completeness: comp, density: cm.density };
+    res.totalYears = total; res.fitAge = p.age + total;
+    res.confidence = clamp(CONF_MAX * comp * (0.7 + 0.3 * Math.min(1, cm.density / 0.8)), 0, CONF_MAX); // refined by stability in weekly()
+    return res;
+  }
+  function uncertainty(conf) { return Math.round(2 + 5 * (1 - conf)); } // +- years shown with the number
+
+  // Monday of the week of `today`; the headline number is computed once per week.
+  // asOf = that Monday when the data already spans >= 28 days there, else today (first result appears as soon as 28 days exist).
+  function anchorDate(ctx, today) {
+    var mon = F.weekStart(today);
+    return spanDays(ctx, mon) >= NEED_DAYS ? mon : today;
+  }
+  // { cur, prev, delta } - prev = the same computation a week earlier (null when there was not enough data then)
+  function weekly(ctx, today) {
+    var a = anchorDate(ctx, today), cur = compute(ctx, a), prev = null, delta = null;
+    if (cur.ready && a === F.weekStart(today)) { var pa = H.addDays(a, -7), pr = compute(ctx, pa); if (pr.ready) { prev = pr; delta = r1(Math.round(cur.fitAge * 10) / 10 - Math.round(pr.fitAge * 10) / 10); } }
+    if (cur.ready) {
+      var stab = prev ? 1 - 0.2 * Math.min(1, Math.abs(cur.fitAge - prev.fitAge) / 3) : 0.9; // stability: a big jump since last week lowers trust; no history = 0.9
+      cur.confidence = clamp(cur.confidence * stab, 0, CONF_MAX); cur.unc = uncertainty(cur.confidence);
+    }
+    return { cur: cur, prev: prev, delta: delta, anchor: a, nextUpdate: H.dateFromNum(H.dayNum(F.weekStart(today)) + 7) };
+  }
+
+  var api = {
+    compute: compute, weekly: weekly, anchorDate: anchorDate, spanDays: spanDays, uncertainty: uncertainty, components: components,
+    fitnessAge: fitnessAge, vo2RefAtAge: vo2RefAtAge, uthVo2: uthVo2, gpsVo2: gpsVo2, interp: interp,
+    stepsYears: stepsYears, activityYears: activityYears, sleepYears: sleepYears, bmiYears: bmiYears, regYears: function (sdMin) { return interp(REG_YEARS, sdMin); }, hrvRef: hrvRef, rhrRef: rhrRef,
+    COMP: COMP, ORDER: ORDER, NEED_DAYS: NEED_DAYS, MAX_TOTAL: MAX_TOTAL, YEARS_PER_LNRR: YPL
+  };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else root.AgeCore = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+;/* Forma Etap 8 - "Forma i obciążenie": training-load analytics in the spirit of intervals.icu. Pure logic, no DOM, no storage.
+   Browser: window.LoadCore (needs window.HrvCore, window.FormaCore). Node: require('./load-core.js').
+
+   Everything builds on the load Forma already has: FormaCore.dayLoad (HR-based TRIMP or session-RPE load, max of the two; sauna never counts) ->
+   CTL (42 d EWMA), ATL (7 d EWMA), TSB = CTL - ATL. Load units are TRIMP-like (not Foster's CR10 x minutes), so only RATIOS and own-history
+   comparisons are meaningful - absolute thresholds below are on ratios (TSB%, monotony) or on CTL points per week.
+
+   1. FORM ZONES on TSB% = TSB / CTL * 100 (the same thresholds as FormaCore.formZone, so the "Forma i HRV" screen and this card never disagree):
+        > +25 %      "Roztrenowanie"        (fitness is falling: too little stimulus)
+        +5 .. +25 %  "Świeżość"             (fresh - good day for a hard session or a race)
+        -10 .. +5 %  "Neutralna"
+        -30 .. -10 % "Optymalny trening"    (productive tiredness)
+        < -30 %      "Ryzyko przetrenowania"
+      intervals.icu uses +20 % as the top of "fresh" and the same -10 / -30 limits; we keep +25 % (already shipped in Forma).
+   2. RAMP RATE = CTL(today) - CTL(7 days ago), in CTL points per week. Banister-type models and coaching practice (TrainingPeaks / intervals.icu:
+      "5-8 CTL per week is a high but sustainable ramp for well-trained athletes") -> for a 47-year-old recreational athlete we are more careful:
+        absolute: <= 5 fine, 5-8 "szybko" (caution), > 8 "za szybko" (warning); negative below -5 = "spadek formy".
+        relative (low CTL makes small absolute numbers a big jump): ramp / CTL > 15 % caution, > 25 % warning.
+      The worse of the two applies. Needs >= 28 days of data (before that the seeded start of the averages distorts the ramp).
+   3. 80/20 (polarised / pyramidal training literature, Seiler 2010; Stöggl & Sperlich 2014): share of HR-measured time in zones 0-2 (below 70 % HRR,
+      "łatwo") versus zones 3-5 ("mocno"), over 28 days. Zones are the app's Karvonen zones. Strength sessions (gym) are EXCLUDED from the split
+      because heart rate in a gym is driven by sets and rests, not by aerobic intensity; they are reported separately (count, minutes). Walks, runs and
+      "other" sessions with heart-rate zones count. Needs >= 120 min of cardio time. Verdict: >= 92 % easy "tylko łatwo", 75-92 % "ok. 80/20",
+      60-75 % "dużo średnio-mocnych", < 60 % "za mało łatwych minut".
+   4. FOSTER monotony and strain (Foster 1998, Med Sci Sports Exerc 30:1164; Foster et al. 2001): over the last 7 days (rest days = 0 load, sample SD):
+      monotony = mean daily load / SD of daily load; strain = weekly load x monotony. Monotony > 2.0 together with a high strain was linked to illness /
+      overreaching. Strain has no portable absolute scale (our load units differ from Foster's), so "high strain" = more than 1.25 x the mean strain of the
+      three weeks before. Zero SD with load > 0 (identical every day) is reported as monotony 9.9 (capped). */
+(function (root) {
+  'use strict';
+  var H = (typeof module !== 'undefined' && module.exports) ? require('./hrv-core.js') : root.HrvCore;
+  var F = (typeof module !== 'undefined' && module.exports) ? require('./forma-core.js') : root.FormaCore;
+  function fin(v) { return typeof v === 'number' && isFinite(v); }
+  function mean(a) { if (!a.length) return NaN; var s = 0; a.forEach(function (v) { s += v; }); return s / a.length; }
+  function sd(a) { if (a.length < 2) return NaN; var m = mean(a), s = 0; a.forEach(function (v) { s += (v - m) * (v - m); }); return Math.sqrt(s / (a.length - 1)); }
+  var MIN_FORM_DAYS = 7, MIN_RAMP_DAYS = 28, MIN_CARDIO_MIN = 120, MONO_WARN = 2.0, MONO_CAP = 9.9, STRAIN_HIGH = 1.25;
+
+  // ---------------- 1. form zones ----------------
+  var COL = { red: '#FF4D5E', amber: '#F2A93B', green: '#2EE86B', teal: '#2CE8B5', blue: '#2D9CFF', grey: '#9AA6B0' };
+  var ZONES = [
+    { key: 'ryzyko', label: 'Ryzyko przetrenowania', color: COL.red, range: 'poniżej −30%', advice: 'Jesteś bardzo zmęczony względem swojej kondycji. Zrób 1–3 dni lżej (spacer, mobilność), potem wróć do planu.' },
+    { key: 'optimal', label: 'Optymalny trening', color: COL.teal, range: '−30% do −10%', advice: 'Zmęczenie jest produktywne – tak się buduje kondycja. Pilnuj snu i jedz wystarczająco.' },
+    { key: 'neutral', label: 'Neutralna', color: COL.teal, range: '−10% do +5%', advice: 'Obciążenie jest zbliżone do tego, do czego jesteś przyzwyczajony. Możesz podkręcić jedną sesję w tygodniu.' },
+    { key: 'swiezosc', label: 'Świeżość', color: COL.green, range: '+5% do +25%', advice: 'Jesteś wypoczęty. To dobry dzień na mocniejszy trening lub test formy.' },
+    { key: 'spadek', label: 'Roztrenowanie', color: COL.blue, range: 'powyżej +25%', advice: 'Od dłuższego czasu trenujesz wyraźnie mniej niż zwykle – kondycja spada. Wróć stopniowo, bez nadrabiania.' }
+  ];
+  function zoneByKey(k) { for (var i = 0; i < ZONES.length; i++) if (ZONES[i].key === k) return ZONES[i]; return null; }
+  function formZoneNamed(pct) {
+    if (!fin(pct)) return { key: 'brak', label: 'Brak danych', color: COL.grey, range: '', advice: 'Potrzeba kilku dni treningów z tętnem lub oceną wysiłku.' };
+    return zoneByKey(pct > 25 ? 'spadek' : (pct > 5 ? 'swiezosc' : (pct >= -10 ? 'neutral' : (pct >= -30 ? 'optimal' : 'ryzyko'))));
+  }
+
+  // ---------------- 2. ramp rate ----------------
+  function rampLevel(ramp, ctl) {
+    if (!fin(ramp)) return 'brak';
+    var rel = fin(ctl) && ctl > 5 ? ramp / ctl : 0, lv = 0;
+    if (ramp > 8 || rel > 0.25) lv = 2; else if (ramp > 5 || rel > 0.15) lv = 1;
+    if (ramp < -5) return 'spadek';
+    return ['ok', 'uwaga', 'ostrzezenie'][lv];
+  }
+  var RAMP_TXT = {
+    ok: { label: 'Spokojne tempo', color: COL.teal, advice: 'Kondycja rośnie w bezpiecznym tempie.' },
+    uwaga: { label: 'Szybki przyrost', color: COL.amber, advice: 'Obciążenie rośnie szybko. Nie dokładaj kolejnego tygodnia „więcej niż poprzedni” – utrzymaj ten poziom.' },
+    ostrzezenie: { label: 'Za szybki przyrost', color: COL.red, advice: 'Obciążenie rośnie za szybko jak na Twój wiek i obecną kondycję – to częsta droga do kontuzji. Zrób lżejszy tydzień.' },
+    spadek: { label: 'Kondycja spada', color: COL.blue, advice: 'W ostatnim tygodniu trenowałeś wyraźnie mniej. Jeśli to nie był planowany odpoczynek, wróć do regularności.' },
+    brak: { label: 'Brak danych', color: COL.grey, advice: '' }
+  };
+  function rampRate(workouts, days, today) {
+    var dd = F.loadDataDays(workouts, today);
+    if (dd < MIN_RAMP_DAYS) return { ready: false, dataDays: dd, need: MIN_RAMP_DAYS };
+    var ser = F.loadSeries(workouts, today, 60, 14, days), a = ser[ser.length - 1], b = ser[ser.length - 8];
+    if (!a || !b || a.ctl == null || b.ctl == null) return { ready: false, dataDays: dd, need: MIN_RAMP_DAYS };
+    var ramp = a.ctl - b.ctl, lv = rampLevel(ramp, a.ctl), t = RAMP_TXT[lv];
+    return { ready: true, ramp: ramp, ctl: a.ctl, ctlPrev: b.ctl, level: lv, label: t.label, color: t.color, advice: t.advice };
+  }
+
+  // ---------------- 3. 80/20 ----------------
+  function split(workouts, today, nDays) {
+    nDays = nDays || 28;
+    var t = H.dayNum(today), low = 0, high = 0, cardio = 0, noHr = 0, gymN = 0, gymMin = 0;
+    workouts.forEach(function (w) {
+      var k = H.dayNum(w.date); if (w.type === 'sauna' || !(k <= t && k > t - nDays)) return;
+      if (w.type === 'gym') { gymN++; gymMin += w.durMin || 0; return; }
+      if (!Array.isArray(w.zonesSec) || w.zonesSec.length !== 6) { noHr++; return; }
+      var z = w.zonesSec, l = z[0] + z[1] + z[2], h = z[3] + z[4] + z[5];
+      low += l; high += h; cardio += (l + h) / 60;
+    });
+    var o = { nDays: nDays, cardioMin: cardio, lowMin: low / 60, highMin: high / 60, gymSessions: gymN, gymMin: gymMin, noHrSessions: noHr, ready: cardio >= MIN_CARDIO_MIN };
+    if (!o.ready) return o;
+    o.lowPct = low / (low + high) * 100;
+    var p = o.lowPct, v = p >= 92 ? ['tylko_latwo', 'Prawie wszystko łatwo', COL.amber, 'Dodaj jeden mocniejszy bodziec w tygodniu (np. 4 × 4 min w strefie 4) – sama łatwa praca zatrzymuje postęp.']
+      : (p >= 75 ? ['ok', 'Blisko 80/20', COL.green, 'Dobry rozkład: większość spokojnie, trochę mocno. Tak trzymaj.']
+        : (p >= 60 ? ['srednio', 'Dużo średnio-mocnych minut', COL.amber, 'Za dużo „ani łatwo, ani naprawdę mocno”. Spokojne sesje zrób wolniej, a mocne – konkretnie mocne.']
+          : ['malo_latwych', 'Za mało łatwych minut', COL.red, 'Większość czasu spędzasz w strefach 3–5. Zamień część sesji na spokojne (rozmowa bez zadyszki) – szybciej się zregenerujesz.']));
+    o.level = v[0]; o.label = v[1]; o.color = v[2]; o.advice = v[3];
+    return o;
+  }
+
+  // ---------------- 4. Foster monotony / strain ----------------
+  // one week = 7 days ending on `end` (inclusive)
+  function weekStats(workouts, days, end) {
+    var e = H.dayNum(end), l = [];
+    for (var i = 6; i >= 0; i--) l.push(F.dayLoad(workouts, H.dateFromNum(e - i), days));
+    var m = mean(l), s = sd(l), total = l.reduce(function (a, b) { return a + b; }, 0), mono = null;
+    if (total > 0) mono = s > 1e-9 ? Math.min(MONO_CAP, m / s) : MONO_CAP;
+    return { end: end, load: total, monotony: mono, strain: mono != null ? total * mono : null, dailyLoads: l, trainingDays: l.filter(function (x) { return x > 0; }).length };
+  }
+  function monotony(workouts, days, today) {
+    var dd = F.loadDataDays(workouts, today);
+    if (dd < 7) return { ready: false, dataDays: dd, need: 7 };
+    var weeks = [];
+    for (var i = 3; i >= 0; i--) { var end = H.addDays(today, -7 * i); if (F.loadDataDays(workouts, end) >= 7) weeks.push(weekStats(workouts, days, end)); else weeks.push(null); }
+    var cur = weeks[3];
+    if (!cur || cur.monotony == null) return { ready: true, none: true, weeks: weeks, cur: cur, dataDays: dd };
+    var prev = weeks.slice(0, 3).filter(function (w) { return w && w.strain != null; }), base = prev.length ? mean(prev.map(function (w) { return w.strain; })) : null;
+    var strainHigh = base != null && base > 0 && cur.strain > STRAIN_HIGH * base, monoHigh = cur.monotony > MONO_WARN;
+    var level = monoHigh && strainHigh ? 'wysokie' : (monoHigh ? 'uwaga' : 'ok');
+    var adv = level === 'wysokie' ? 'Trenujesz jednostajnie i więcej niż zwykle – to wzorzec, po którym łatwiej o infekcję i przemęczenie. Wstaw jeden dzień wolny i jeden wyraźnie lżejszy.'
+      : (level === 'uwaga' ? 'Dni są do siebie bardzo podobne (mało odpoczynku i mało zróżnicowania). Dodaj jeden dzień całkiem lekki lub wolny, a jeden mocniejszy.' : 'Tydzień jest dobrze zróżnicowany – są dni cięższe i lżejsze.');
+    return { ready: true, none: false, weeks: weeks, cur: cur, baseStrain: base, strainHigh: strainHigh, monoHigh: monoHigh, level: level, color: level === 'ok' ? COL.green : (level === 'uwaga' ? COL.amber : COL.red), label: level === 'ok' ? 'W normie' : (level === 'uwaga' ? 'Zbyt jednostajnie' : 'Jednostajnie i dużo'), advice: adv, dataDays: dd };
+  }
+
+  // ---------------- all in one ----------------
+  function summary(workouts, days, today) {
+    var dd = F.loadDataDays(workouts, today), o = { dataDays: dd, formReady: dd >= MIN_FORM_DAYS };
+    if (o.formReady) {
+      var ser = F.loadSeries(workouts, today, 42, 14, days), last = ser[ser.length - 1];
+      o.ctl = last.ctl; o.atl = last.atl; o.tsb = last.tsb; o.pct = F.tsbPercent(last); o.zone = formZoneNamed(o.pct);
+    } else o.zone = formZoneNamed(null);
+    o.ramp = rampRate(workouts, days, today); o.split = split(workouts, today, 28); o.mono = monotony(workouts, days, today);
+    return o;
+  }
+
+  var api = {
+    ZONES: ZONES, formZoneNamed: formZoneNamed, rampLevel: rampLevel, rampRate: rampRate, split: split, weekStats: weekStats, monotony: monotony, summary: summary,
+    MIN_FORM_DAYS: MIN_FORM_DAYS, MIN_RAMP_DAYS: MIN_RAMP_DAYS, MIN_CARDIO_MIN: MIN_CARDIO_MIN, MONO_WARN: MONO_WARN, STRAIN_HIGH: STRAIN_HIGH, MONO_CAP: MONO_CAP
+  };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else root.LoadCore = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
 <script>(function () {
 'use strict';
 /* ===== Forma 0.2 - base: state, storage, battery, Bluetooth, measurement engine, sessions, demo ===== */
@@ -5516,7 +5896,7 @@ var WHOOP_SERVICE = '61080000-8d6d-82b8-614a-1c8cb0f8dcc6';
 // ---------- feature flags (ONE place). Etap 7 "strength logger" (exercise library, plate calculator, rest timer, records / progression, muscle map)
 // is PAUSED: the code stays in gym-core.js / app2-gym.js / app2-ui-gym.js, but nothing of it is reachable while this is false.
 // To switch it back on: `FORMA_GYM=1 node build.js` (build.js rewrites the next line), or edit false -> true here.
-var FEATURES = { gymLogger: false /*__GYM_LOGGER_FLAG__*/ };
+var FEATURES = { gymLogger: false /*__GYM_LOGGER_FLAG__*/, autoSleep: false /*__AUTO_SLEEP_FLAG__*/ }; // autoSleep: automatic sleep detection (PAUSED: only sleep-core.js exists, nothing is wired in yet)
 var DEMO = /[?&]demo=1\b/.test(location.search);
 var FAST = DEMO && /[?&]fast=1\b/.test(location.search);
 var BAD = DEMO && /[?&]bad=1\b/.test(location.search);
@@ -11525,6 +11905,159 @@ function gymChange(el) {
 }
 if (!FEATURES.gymLogger) ACT_GYM = {}; // paused: none of the logger's actions can be reached
 
+/* ===== Forma Etap 8 - UI: "Wiek kondycyjny" (#/wiek) and "Forma i obciążenie" (#/obciazenie) + their cards in Trendy ===== */
+var AGC = window.AgeCore, LDC = window.LoadCore;
+var E8_GREEN = '#2EE86B', E8_AMBER = '#F2A93B', E8_GREY = '#9AA6B0';
+function e8Yrs(v, d) { if (!isFinite(v)) return '—'; var a = Math.abs(v); return (v > 0.049 ? '+' : (v < -0.049 ? '−' : '')) + nf(a, d == null ? 1 : d) + ' r.'; }
+function e8Plural(n) { n = Math.round(Math.abs(n)); return n === 1 ? 'rok' : ((n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) ? 'lata' : 'lat'); }
+function e8YrCol(v) { return v <= -0.5 ? E8_GREEN : (v >= 0.5 ? E8_AMBER : E8_GREY); }
+
+// ---------------- inputs from the app state ----------------
+function e8AgeInput() {
+  return { profile: S.profile, hrMax: XC.hrMaxInfo(S.profile), days: S.days, sleepDays: typeof sleepDays === 'function' ? sleepDays() : S.days, workouts: S.workouts, stepsDaily: S.steps && S.steps.daily ? S.steps.daily : {}, weights: S.weights };
+}
+function e8Age() { return AGC.weekly(e8AgeInput(), todayStr()); }
+function e8Load() { return LDC.summary(S.workouts, S.days, todayStr()); }
+
+function e8Val(c) {
+  if (!c.has || c.value == null) return '—';
+  switch (c.id) {
+    case 'vo2': return nf(c.value, 0) + ' <span class="xs mut">ml/kg/min</span>';
+    case 'rhr': return nf(c.value, 0) + ' <span class="xs mut">ud/min</span>';
+    case 'hrv': return nf(c.value, 0) + ' <span class="xs mut">ms</span>';
+    case 'steps': return nfi(c.value) + ' <span class="xs mut">kroków dziennie</span>';
+    case 'act': return nfi(c.value) + ' <span class="xs mut">min/tydz. (równoważnik)</span>';
+    case 'sleep': return esc(FC.fmtDur(c.value));
+    case 'reg': return '±' + nf(c.value, 0) + ' <span class="xs mut">min (pora zasypiania)</span>';
+    case 'bmi': return nf(c.value, 1);
+  }
+  return nf(c.value, 1);
+}
+
+// ---------------- Trendy cards ----------------
+function ageTrendyHtml(i) {
+  var w = e8Age(), r = w.cur, h;
+  if (r.reason === 'profil') return '<a href="#/wiek" class="card fu" ' + dl(i) + ' data-e8="age-card" style="min-height:64px"><div class="row sp"><div><p class="lbl">Wiek kondycyjny</p><span class="sm sub">Uzupełnij wiek w Profilu, żeby go oszacować</span></div>' + ico('chev', 20) + '</div></a>';
+  if (!r.ready) {
+    var pct = Math.round(Math.min(1, r.spanDays / r.needDays) * 100);
+    return '<a href="#/wiek" class="card fu" ' + dl(i) + ' data-e8="age-card"><div class="row sp"><p class="lbl">Wiek kondycyjny · za mało danych</p>' + ico('chev', 20) + '</div><div class="bar" role="img" aria-label="' + Math.min(r.spanDays, r.needDays) + ' z ' + r.needDays + ' dni"><i style="width:' + pct + '%;background:#2CE8B5"></i></div>' +
+      '<span class="sm sub">' + Math.min(r.spanDays, r.needDays) + ' / ' + r.needDays + ' dni – liczbę pokażemy po 28 dniach. Składniki, które już mamy: ' + r.nComps + ' z 8.</span></a>';
+  }
+  var dl_ = w.delta;
+  h = '<a href="#/wiek" class="card fu" ' + dl(i) + ' data-e8="age-card"><div class="row sp"><p class="lbl">Wiek kondycyjny</p>' + ico('chev', 20) + '</div>' +
+    '<div class="row" style="align-items:baseline;gap:8px;flex-wrap:wrap"><span class="n" style="font-size:40px;line-height:1">≈ ' + Math.round(r.fitAge) + '</span><span class="sm sub">' + e8Plural(r.fitAge) + ' (kalendarzowy ' + r.age + ') · ±' + r.unc + '</span></div>' +
+    '<span class="xs mut">Pewność ' + Math.round(r.confidence * 100) + '%' + (dl_ != null ? ' · ' + (Math.abs(dl_) < 0.05 ? 'bez zmian od zeszłego tygodnia' : e8Yrs(dl_) + ' od zeszłego tygodnia') : ' · pierwsza ocena, zmianę pokażemy za tydzień') + ' · szacunek, nie diagnoza</span></a>';
+  return h;
+}
+function loadTrendyHtml(i) {
+  var s = e8Load();
+  if (!s.formReady) return '<a href="#/obciazenie" class="card fu" ' + dl(i) + ' data-e8="load-card"><div class="row sp"><div><p class="lbl">Forma i obciążenie</p><span class="sm sub">Potrzeba 7 dni treningów (masz ' + s.dataDays + ' z 7) – strefa formy, tempo przyrostu, 80/20, monotonia</span></div>' + ico('chev', 20) + '</div></a>';
+  var z = s.zone, rp = s.ramp, sp = s.split, mo = s.mono;
+  function dot(c) { return '<i style="display:inline-block;width:8px;height:8px;border-radius:4px;background:' + c + ';margin-right:6px"></i>'; }
+  var rampTxt = rp.ready ? dot(rp.color) + (rp.ramp >= 0 ? '+' : '−') + nf(Math.abs(rp.ramp), 1) + ' / tydz.' : '<span class="mut">po 28 dniach</span>';
+  var splTxt = sp.ready ? dot(sp.color) + Math.round(sp.lowPct) + '/' + Math.round(100 - sp.lowPct) : '<span class="mut">za mało minut</span>';
+  var moTxt = mo.ready && !mo.none ? dot(mo.color) + nf(mo.cur.monotony, 1) : '<span class="mut">—</span>';
+  return '<a href="#/obciazenie" class="card fu" ' + dl(i) + ' data-e8="load-card"><div class="row sp"><p class="lbl">Forma i obciążenie</p>' + ico('chev', 20) + '</div>' +
+    (s.pct != null ? '<span style="align-self:flex-start;background:' + z.color + ';color:#0B0E11;font-weight:700;border-radius:999px;padding:4px 12px;font-size:13px">Forma ' + (s.pct >= 0 ? '+' : '−') + Math.abs(Math.round(s.pct)) + '% · ' + esc(z.label) + '</span>' : '<span class="sm sub">Brak oceny formy</span>') +
+    '<div class="g3" style="gap:6px"><div><span class="xs mut" style="display:block">Przyrost CTL</span><span class="sm" style="font-weight:600">' + rampTxt + '</span></div><div><span class="xs mut" style="display:block">Łatwo/mocno</span><span class="sm" style="font-weight:600">' + splTxt + '</span></div><div><span class="xs mut" style="display:block">Monotonia</span><span class="sm" style="font-weight:600">' + moTxt + '</span></div></div></a>';
+}
+function e8TrendyHtml(i) { return loadTrendyHtml(i) + ageTrendyHtml(i + 1); }
+
+// ---------------- #/wiek ----------------
+function e8Disclaimer() { return '<p class="xs mut" style="margin:0" data-e8="disclaimer">To szacunek z kilku wskaźników, nie diagnoza ani badanie medyczne. Pokazuje, jak Twoje nawyki i tętno wypadają na tle typowych mężczyzn w tym wieku (HUNT i duże metaanalizy), a nie Twój „biologiczny wiek” w sensie klinicznym. Przy niepokojących objawach idź do lekarza.</p>'; }
+function e8CompCard(c) {
+  var col = e8YrCol(c.years), frac = (c.cap - c.years) / (2 * c.cap);
+  return '<div class="card fu" data-e8="comp-' + c.id + '" style="gap:6px"><div class="row sp" style="align-items:flex-start;gap:8px"><p class="lbl" style="font-size:12px;line-height:1.25">' + esc(c.label) + '</p><span class="n" style="font-size:20px;color:' + col + ';white-space:nowrap" data-e8="years">' + e8Yrs(c.years) + '</span></div>' +
+    '<span class="n" style="font-size:26px;line-height:1.1">' + e8Val(c) + '</span>' + segScale(frac, SC_STD, { lo: 'starzej', hi: 'młodziej', h: 5 }) +
+    '<span class="xs mut">Typowo w tym wieku: ' + esc(c.typical) + '</span>' + (c.note ? '<span class="xs sub">' + esc(c.note) + '</span>' : '') + '<span class="sm" style="margin-top:2px"><b style="color:#fff;font-weight:600">Co poprawić:</b> <span class="sub">' + esc(c.hint) + '</span></span></div>';
+}
+function e8Sources() {
+  var li = ['Wydolność: średnie VO₂max mężczyzn z badania HUNT3 (Aspenes 2011), idea „wieku fitness” (Nes 2013). VO₂max z tętna: wzór Uth 2004 (15,3 × HRmax / HRspoczynkowe). Kontrola z biegów GPS: wzór ACSM na bieg i %HRR.',
+    'Tętno spoczynkowe: Zhang 2016 (CMAJ), +10 ud/min ≈ +9% ryzyka zgonu. HRV: spadek RMSSD z wiekiem (Umetani 1998, Voss 2015, Nunan 2010) – wpływ ograniczony, bo zależy od urządzenia.',
+    'Kroki: Saint-Maurice 2020 (JAMA), Paluch 2022 (Lancet Public Health). Ruch: Arem 2015 (JAMA Intern Med) i zalecenia WHO 2020. Sen: Cappuccio 2010 (Sleep), regularność – Windred 2024 (Sleep). BMI: Global BMI Mortality Collaboration 2016 (Lancet).',
+    'Przeliczenie ryzyka na lata: śmiertelność dorosłych podwaja się co ok. 8 lat, więc ryzyko względne RR to 11,5 × ln(RR) lat. Każdy składnik ma limit (±2,5 do ±8 lat), suma ma limit ±12 lat.',
+    'Granice: liczby punktów to nasze uproszczone krzywe na podstawie tych badań, nie wartości z jednej publikacji. Składniki częściowo się pokrywają, dlatego tętno spoczynkowe liczymy z połową wagi, gdy VO₂max też z niego korzysta.'];
+  return '<details class="card" data-keepopen="e8Src"' + (S.ui.open.e8Src ? ' open' : '') + '><summary class="row sp" style="min-height:44px"><span class="lbl" style="margin:0">Jak to liczymy</span><span class="wchev">' + ico('chev', 16) + '</span></summary><div class="col" style="gap:8px;margin-top:8px">' + li.map(function (x) { return '<p class="xs sub" style="margin:0">' + esc(x) + '</p>'; }).join('') + '</div></details>';
+}
+function rWiek() {
+  var w = e8Age(), r = w.cur, h = header('Wiek kondycyjny', { back: 'trendy' }) + '<div class="body" data-e8="wiek">';
+  if (r.reason === 'profil') return h + emptyCard('Brakuje wieku', 'Podaj wiek i płeć w Profilu – bez nich nie ma z czym porównać Twoich wyników.', '<a class="btn pri" href="#/profil">Do profilu</a>') + e8Disclaimer() + '</div>';
+  var have = r.comps.filter(function (c) { return c.has; }).sort(function (a, b) { return Math.abs(b.years) - Math.abs(a.years); });
+  if (r.ready) {
+    var d = w.delta, tot = r.fitAge - r.age;
+    h += '<div class="card tint-g fu" data-e8="age-hero" style="gap:6px"><p class="lbl">Twój wiek kondycyjny</p><div class="row" style="align-items:baseline;gap:10px;flex-wrap:wrap"><span class="n" style="font-size:56px;line-height:1">≈ ' + Math.round(r.fitAge) + '</span><span class="sub">' + e8Plural(r.fitAge) + ' <span class="mut">(± ' + r.unc + ')</span></span></div>' +
+      '<span class="sm sub">Kalendarzowy: <b style="color:#fff">' + r.age + '</b>. ' + (Math.abs(tot) < 0.5 ? 'Twoje wskaźniki są typowe dla Twojego wieku.' : (tot < 0 ? 'Wskaźniki są lepsze niż typowe dla Twojego wieku (' + e8Yrs(tot) + ').' : 'Wskaźniki są słabsze niż typowe dla Twojego wieku (' + e8Yrs(tot) + ').')) + '</span>' +
+      '<div class="row sp" style="margin-top:4px"><span class="xs mut">Pewność</span><span class="n" style="font-size:18px" data-e8="conf">' + Math.round(r.confidence * 100) + '%</span></div><div class="bar" role="img" aria-label="Pewność ' + Math.round(r.confidence * 100) + ' procent"><i style="width:' + Math.round(r.confidence * 100) + '%;background:#2CE8B5"></i></div>' +
+      '<span class="xs mut">Pewność zależy od tego, ile z 8 składników mamy, jak gęste są dane z 30 dni i czy wynik jest stabilny. ' + (r.missing.length ? 'Brakuje: ' + r.missing.map(function (c) { return c.label.toLowerCase(); }).join(', ') + '.' : 'Mamy wszystkie składniki.') + '</span>' +
+      '<span class="sm" data-e8="delta">' + (d != null ? (Math.abs(d) < 0.05 ? 'Bez zmian od zeszłego tygodnia.' : 'Zmiana od zeszłego tygodnia: <b>' + e8Yrs(d) + '</b>.') : 'To pierwsza ocena – zmianę pokażemy za tydzień.') + '</span>' +
+      '<span class="xs mut">Liczymy raz w tygodniu (w poniedziałek), z ostatnich 30 pełnych dni. Następna aktualizacja: ' + ddmm(w.nextUpdate) + '.</span></div>';
+  } else {
+    h += '<div class="card fu" data-e8="age-hero" style="gap:6px"><p class="lbl">Za mało danych – ' + Math.min(r.spanDays, r.needDays) + '/' + r.needDays + ' dni</p>' + ageBlob(r.spanDays) +
+      '<span class="sm sub">' + (r.reason === 'dni' ? 'Liczbę pokażemy po 28 dniach danych.' : 'Mamy 28 dni, ale za mało składników (' + r.nComps + ', potrzeba 3).') + ' Poniżej widać, co już policzyliśmy.</span></div>';
+  }
+  if (have.length) { h += '<p class="lbl" style="margin-top:4px">' + (r.ready ? 'Co składa się na wynik' : 'Składniki, które już mamy') + '</p>'; have.forEach(function (c) { h += e8CompCard(c); }); }
+  if (r.missing.length) {
+    h += '<div class="card fu" data-e8="missing" style="gap:6px"><p class="lbl">Brakuje danych</p>' + r.missing.map(function (c) { return '<div><span class="sm" style="font-weight:600">' + esc(c.label) + '</span><br><span class="xs mut">' + esc(c.note) + '</span></div>'; }).join('') + '</div>';
+  }
+  h += e8Sources() + e8Disclaimer();
+  return h + '</div>';
+}
+ROUTES.wiek = { tab: 'trendy', depth: 1, parent: 'trendy', render: rWiek, mount: renderBattery };
+
+// ---------------- #/obciazenie ----------------
+var E8_ZONE_BAR = [['ryzyko', '#FF4D5E'], ['optimal', '#2CE8B5'], ['neutral', '#3A444C'], ['swiezosc', '#2EE86B'], ['spadek', '#2D9CFF']];
+function e8Metric(title, value, color, what, advice, extra, key) {
+  return '<div class="card fu" data-e8="' + key + '" style="gap:6px"><div class="row sp" style="align-items:flex-start;gap:8px"><p class="lbl" style="font-size:12px;line-height:1.25">' + title + '</p><span class="n" style="font-size:20px;color:' + color + ';text-align:right">' + value + '</span></div>' + (extra || '') +
+    '<span class="xs mut">' + what + '</span>' + (advice ? '<span class="sm"><b style="color:#fff;font-weight:600">Co zrobić:</b> <span class="sub">' + esc(advice) + '</span></span>' : '') + '</div>';
+}
+function rObciazenie() {
+  var s = e8Load(), h = header('Forma i obciążenie', { back: 'trendy' }) + '<div class="body" data-e8="obciazenie">';
+  // 1. form zone
+  var z = s.zone;
+  if (!s.formReady) h += emptyCard('Forma i obciążenie', 'Potrzeba 7 dni danych treningowych (masz ' + s.dataDays + ' z 7). Zapisz trening w zakładce Trening – obciążenie liczymy z tętna i oceny wysiłku.', '<a class="btn" href="#/trening">Do treningów</a>');
+  else {
+    var pos2 = Math.max(0, Math.min(1, ((s.pct == null ? 0 : s.pct) + 50) / 90)); // the bar spans -50 % .. +40 % (segment widths 20/20/15/20/15)
+    h += '<div class="card fu" data-e8="form" style="gap:6px"><p class="lbl">Strefa formy</p>' + (s.pct != null ? '<span style="align-self:flex-start;background:' + z.color + ';color:#0B0E11;font-weight:700;border-radius:999px;padding:4px 12px;font-size:13px">Forma ' + (s.pct >= 0 ? '+' : '−') + Math.abs(Math.round(s.pct)) + '% · ' + esc(z.label) + '</span>' : '<span class="sm sub">Brak oceny (kondycja bliska zera)</span>') +
+      '<div style="position:relative;margin-top:14px"><div style="display:flex;gap:2px;height:8px" role="img" aria-label="Skala stref formy">' + E8_ZONE_BAR.map(function (zb, k) { return '<i style="flex:' + [20, 20, 15, 20, 15][k] + ';border-radius:3px;background:' + zb[1] + ';opacity:' + (zb[0] === z.key ? 1 : 0.4) + '"></i>'; }).join('') + '</div><span class="mk2" style="left:' + (pos2 * 100).toFixed(1) + '%;top:-8px"></span></div>' +
+      '<div class="row sp xs mut" style="margin-top:2px"><span>−50%</span><span>0</span><span>+40%</span></div>' +
+      '<span class="sm sub">' + esc(z.advice) + '</span>' +
+      '<span class="xs mut">Forma % = (kondycja CTL − zmęczenie ATL) / CTL. CTL to średnia obciążenia z 42 dni, ATL z 7 dni. Progi: poniżej −30% ryzyko przetrenowania, −30…−10% optymalny trening, −10…+5% neutralna, +5…+25% świeżość, powyżej +25% roztrenowanie.</span>' +
+      '<span class="xs mut">CTL ' + nf(s.ctl, 0) + ' · ATL ' + nf(s.atl, 0) + ' · TSB ' + nf(s.tsb, 0) + '</span><a class="btn" href="#/forma" style="margin-top:2px">Wykresy kondycji i zmęczenia</a></div>';
+  }
+  // 2. ramp
+  var rp = s.ramp;
+  if (rp.ready) h += e8Metric('Tempo przyrostu kondycji', (rp.ramp >= 0 ? '+' : '−') + nf(Math.abs(rp.ramp), 1) + ' <span class="xs mut" style="white-space:nowrap">CTL/tydz.</span>', rp.color,
+    'O ile urosła kondycja (CTL) w ostatnich 7 dniach. Dla Ciebie: do 5 punktów tygodniowo to spokojnie, 5–8 szybko, powyżej 8 za szybko (przy niskiej kondycji liczymy też względem CTL: >15% uwaga, >25% ostrzeżenie).', rp.advice, '<span class="sm" style="color:' + rp.color + ';font-weight:600">' + esc(rp.label) + '</span>', 'ramp');
+  else h += emptyCard('Tempo przyrostu kondycji', 'Pokażemy po 28 dniach treningów (masz ' + rp.dataDays + '). Wcześniej średnie jeszcze się „rozkręcają” i liczba byłaby mylna.');
+  // 3. 80/20
+  var sp = s.split;
+  if (sp.ready) {
+    h += e8Metric('Łatwo i mocno (80/20)', Math.round(sp.lowPct) + '/' + Math.round(100 - sp.lowPct), sp.color,
+      'Ile z ' + Math.round(sp.cardioMin) + ' min treningów z tętnem (ostatnie 4 tygodnie) spędzasz w strefach 1–2 (łatwo) a ile w 3–5 (mocno). Cel dla wytrzymałości: ok. 80/20. Siłownia nie wchodzi do tego podziału, bo tętno na siłowni zależy od serii i przerw, nie od wysiłku tlenowego.', sp.advice,
+      '<div class="bar" role="img" aria-label="Łatwo ' + Math.round(sp.lowPct) + ' procent, mocno ' + Math.round(100 - sp.lowPct) + ' procent" style="display:flex"><i style="width:' + sp.lowPct.toFixed(1) + '%;background:#2CE8B5;border-radius:4px 0 0 4px"></i><i style="width:' + (100 - sp.lowPct).toFixed(1) + '%;background:#F2A93B;border-radius:0 4px 4px 0"></i></div><div class="row sp xs"><span style="color:#2CE8B5">łatwo ' + nfi(sp.lowMin) + ' min</span><span style="color:#F2A93B">mocno ' + nfi(sp.highMin) + ' min</span></div><span class="sm" style="color:' + sp.color + ';font-weight:600">' + esc(sp.label) + '</span>' +
+      (sp.gymSessions ? '<span class="xs mut">Osobno: siłownia – ' + sp.gymSessions + ' ' + (sp.gymSessions === 1 ? 'trening' : 'treningi') + ', ' + nfi(sp.gymMin) + ' min.</span>' : ''), 'split');
+  } else h += emptyCard('Łatwo i mocno (80/20)', 'Potrzeba co najmniej ' + LDC.MIN_CARDIO_MIN + ' min treningów z tętnem (spacery, biegi, rower) z ostatnich 4 tygodni – masz ' + Math.round(sp.cardioMin) + ' min.' + (sp.gymSessions ? ' Siłownię liczymy osobno (' + sp.gymSessions + ' ' + (sp.gymSessions === 1 ? 'trening' : 'treningi') + ', ' + nfi(sp.gymMin) + ' min).' : '') + (sp.noHrSessions ? ' ' + sp.noHrSessions + ' trening(i) bez tętna pominięto.' : ''));
+  // 4. monotony / strain
+  var mo = s.mono;
+  if (mo.ready && !mo.none) {
+    var wk = mo.weeks, mx = Math.max(3, Math.ceil(Math.max.apply(null, wk.map(function (x) { return x ? x.monotony || 0 : 0; })) * 1.15));
+    var bars = []; wk.forEach(function (x, i) { if (x && x.monotony != null) bars.push({ i: i, v: x.monotony, color: x.monotony > LDC.MONO_WARN ? '#F2A93B' : '#4C6A87' }); });
+    h += e8Metric('Monotonia i strain (Foster)', nf(mo.cur.monotony, 1), mo.color,
+      'Monotonia = średnie dzienne obciążenie / jego rozrzut z 7 dni (dni wolne liczą się jako zero). Powyżej 2,0 tydzień jest zbyt jednostajny. Strain = obciążenie tygodnia × monotonia; „wysoki” oznacza ponad 1,25 × Twoja średnia z trzech poprzednich tygodni.', mo.advice,
+      '<span class="sm" style="color:' + mo.color + ';font-weight:600">' + esc(mo.label) + '</span>' + chart({ n: 4, ymax: mx, H: 100, ticks: [0, 2, mx].map(function (t) { return Math.round(t * 10) / 10; }), tickFmt: function (t) { return nf(t, 0); }, label: 'Monotonia z 4 tygodni', bars: bars, lines: [{ pts: [{ i: 0, v: 2 }, { i: 3, v: 2 }], color: '#FF4D5E', w: 1.2, dash: true }], xl: [{ i: 0, t: '3 tyg. temu', a: 'start' }, { i: 3, t: 'ostatnie 7 dni', a: 'end' }] }) +
+      '<span class="xs mut">Strain tego tygodnia: ' + nfi(mo.cur.strain) + (mo.baseStrain != null ? ' (zwykle ' + nfi(mo.baseStrain) + ')' : '') + ' · obciążenie ' + nfi(mo.cur.load) + ' · dni z treningiem ' + mo.cur.trainingDays + ' z 7. Linia przerywana = próg 2,0.</span>', 'mono');
+  } else if (mo.ready) h += emptyCard('Monotonia i strain (Foster)', 'W ostatnich 7 dniach nie zapisano obciążenia, więc nie ma czego liczyć.');
+  else h += emptyCard('Monotonia i strain (Foster)', 'Potrzeba 7 dni danych treningowych (masz ' + mo.dataDays + ' z 7).');
+  // 5. EF (lives in Trendy; not duplicated)
+  var efs = [['run', 'biegu'], ['walk', 'spacerów']].map(function (x) { var ser = GPC.efSeries(S.workouts, x[0]); return ser.length >= 3 ? { l: x[1], last: ser[ser.length - 1].v, first: ser[Math.max(0, ser.length - 6)].v } : null; }).filter(Boolean);
+  h += '<a href="#/trendy" class="card fu" data-e8="ef" style="gap:4px"><div class="row sp"><p class="lbl">Wydajność tlenowa (EF)</p>' + ico('chev', 20) + '</div>' +
+    (efs.length ? efs.map(function (x) { var dd = x.last - x.first; return '<span class="sm">EF ' + x.l + ': <b class="n">' + nf(x.last, 2) + '</b> <span class="xs mut">' + (Math.abs(dd) < 0.005 ? 'bez zmian' : (dd > 0 ? 'rośnie (+' : 'spada (−') + nf(Math.abs(dd), 2) + ') w ostatnich treningach') + (Math.abs(dd) < 0.005 ? '' : ')') + '</span></span>'; }).join('') : '<span class="sm sub">Pojawi się po 3 treningach z GPS i tętnem.</span>') +
+    '<span class="xs mut">Metry na minutę na 1 uderzenie serca na spokojnych odcinkach – rośnie, gdy kondycja rośnie. Wykresy są w Trendy (karty „Wydajność tlenowa”).</span></a>';
+  h += '<p class="xs mut" style="margin:0" data-e8="disclaimer">To szacunki z Twojego tętna i oceny wysiłku, nie zalecenia medyczne. Przy bólu w klatce, zawrotach głowy lub długo utrzymującym się zmęczeniu skonsultuj się z lekarzem.</p>';
+  return h + '</div>';
+}
+ROUTES.obciazenie = { tab: 'trendy', depth: 1, parent: 'trendy', render: rObciazenie, mount: renderBattery };
+
 /* ===== Forma 0.2 - UI part B: Regeneracja, Sen, Trening, sesje, Forma, Trendy, Profil, Diagnostyka, events, init ===== */
 function weekdayShort(date) { return WD1[dowIdx(date)]; }
 
@@ -11856,10 +12389,7 @@ function ageBlob(days) {
   var f = Math.min(days, 28) / 28, lit = Math.round(f * BLOB_DOTS.length);
   var s = '<div class="fu" style="position:relative;width:100%;max-width:350px;align-self:center;aspect-ratio:350/232"><svg viewBox="0 0 350 232" width="100%" aria-hidden="true" style="position:absolute;inset:0"><path d="M175 8C232 6 300 40 316 104C326 158 290 214 226 224C160 236 76 222 48 160C30 110 52 44 106 20C130 11 152 9 175 8Z" fill="rgba(44,232,181,.06)" stroke="#2CE8B5" stroke-width="1.5" stroke-opacity="' + (0.35 + f * 0.65).toFixed(2) + '"/><g fill="#2CE8B5">';
   BLOB_DOTS.forEach(function (d, i) { s += '<circle class="po" cx="' + d[0] + '" cy="' + d[1] + '" r="' + d[2] + '" opacity="' + (i < lit ? 0.9 : 0.18) + '" style="animation-delay:' + ((i * 137) % 2400) + 'ms"/>'; });
-  return s + '</g></svg><div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 52px;text-align:center"><span class="n pop" style="font-size:56px;line-height:1;white-space:nowrap">' + Math.min(days, 28) + '<span style="font-size:30px;color:#9AA6B0"> / 28</span></span><span class="lbl" style="color:#C5CED6">Dni zebrane</span><span class="n" style="font-size:18px;font-weight:600;color:#2CE8B5;margin-top:4px">Wiek kondycyjny wkrótce</span><span style="font-size:11px;color:#9AA6B0;line-height:1.3;margin-top:4px">Bez liczby, dopóki nie ma na czym jej oprzeć (ok. 4 tygodnie danych)</span></div></div>';
-}
-function driverCard(label, valHtml, scaleHtml) {
-  return '<div class="card fu" style="gap:6px;min-height:104px"><span class="lbl" style="font-size:12px;line-height:1.2">' + label + '</span><div class="row sp" style="align-items:baseline">' + valHtml + '</div>' + scaleHtml + '</div>';
+  return s + '</g></svg><div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 52px;text-align:center"><span class="n pop" style="font-size:56px;line-height:1;white-space:nowrap">' + Math.min(days, 28) + '<span style="font-size:30px;color:#9AA6B0"> / 28</span></span><span class="lbl" style="color:#C5CED6">Dni zebrane</span><span class="n" style="font-size:18px;font-weight:600;color:#2CE8B5;margin-top:4px">Za mało danych</span><span style="font-size:11px;color:#9AA6B0;line-height:1.3;margin-top:4px">Liczbę wieku kondycyjnego pokażemy po 28 dniach – wcześniej byłaby zgadywaniem</span></div></div>';
 }
 function rTrendy() {
   var td = todayStr(), n = S.days.length, h = header('Trendy', { gear: true }) + '<div class="body">';
@@ -11867,6 +12397,7 @@ function rTrendy() {
   else { h += trendCardsHtml(3); h += e6TrendyHtml(3); }
   h += alarmTrendLink(2);
   h += '<a href="#/forma" class="card fu" ' + dl(1) + '><div class="row sp"><div><p class="lbl">Forma i HRV</p><span class="sm sub">Kondycja, zmęczenie, forma i ćwiartka HRV × tętno</span></div>' + ico('chev', 20) + '</div></a>';
+  h += e8TrendyHtml(2); // Etap 8: "Forma i obciążenie" + "Wiek kondycyjny" cards (app2-ui-e8.js)
   var wv = FC.weeklyVolume(S.workouts, td, 12);
   if (S.workouts.length) {
     var mk = Math.max(1000, Math.ceil(Math.max.apply(null, wv.map(function (x) { return x.kg; })) * 1.1 / 1000) * 1000), mm = Math.max(30, Math.ceil(Math.max.apply(null, wv.map(function (x) { return x.runMin + x.walkMin; })) * 1.1 / 30) * 30);
@@ -11877,11 +12408,6 @@ function rTrendy() {
   h += gymTrendyHtml();
   h += gpsTrendHtml();
   h += '<div class="g2"><a class="btn" href="#/sen">Sen – 7 nocy</a><a class="btn" href="#/kalorie">Kalorie</a><a class="btn" href="#/raport">Raport tygodnia</a></div>';
-  var rest = FC.restingHr(S.days, td), slN = FC.sleepNight(sleepDays(), S.workouts, td), none = '<span class="n" style="font-size:22px;color:#6E7A84">—</span>';
-  h += '<details class="card" data-keepopen="trAge"' + (S.ui.open.trAge ? ' open' : '') + '><summary class="row sp" style="min-height:44px"><span class="lbl" style="margin:0">Wiek kondycyjny · wkrótce</span><span class="wchev">' + ico('chev', 16) + '</span></summary><div class="col" style="gap:8px;margin-top:8px">' + ageBlob(n) + '<p class="lbl" style="margin-top:4px">Co złoży się na wiek kondycyjny</p><div class="g2">' +
-    driverCard('Tętno spoczynkowe', rest != null ? '<span class="n" style="font-size:26px">' + Math.round(rest) + ' <span class="xs mut">ud/min</span></span>' : none, rest != null ? segScale((80 - rest) / 40, SC_STD, { lo: '80', hi: '40', h: 5 }) : '<span class="xs mut">po pierwszych pomiarach</span>') +
-    driverCard('Regularność snu', slN && slN.reg != null ? '<span class="n" style="font-size:26px">' + Math.round(slN.reg) + '<span class="xs mut">%</span></span>' : none, slN && slN.reg != null ? segScale(slN.reg / 100, SC_STD, { lo: '0%', hi: '100%', h: 5 }) : '<span class="xs mut">po 3 nocach z godzinami snu</span>') +
-    driverCard('Kroki', (function () { var v = SC.stepsOn(S.steps, td); return v != null && (NATIVE || DEMO) ? '<span class="n" style="font-size:26px">' + nfi(v) + '</span>' : none; })(), '<span class="xs mut">' + (NATIVE || DEMO ? 'dziś · ' + stepsSrcLabel(td) : 'dostępne w aplikacji na Androida') + '</span>') + '</div></div></details>';
   return h + '</div>';
 }
 ROUTES.trendy = { tab: 'trendy', depth: 0, render: rTrendy, mount: renderBattery };
@@ -12355,7 +12881,7 @@ e6Start();
 e6bStart();
 hcStart();
 
-function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-28 06:41 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
+function formaVersion() { var b = '__APK_BUILD__'; return 'Forma 1.1 (2026-11-28 07:54 UTC) · ' + (b.indexOf('__') === 0 ? 'wersja przeglądarkowa' : 'APK nr ' + b); }
 
 })();</script>
 </body>
